@@ -1,0 +1,350 @@
+! dmc_gpu_params.cuf
+! Modulo de datos de dispositivo (device) para el kernel DMC en GPU.
+! Contiene copias en GPU de todos los parametros fisicos y los arrays SOA.
+!
+module dmc_gpu_params
+  use cudafor
+  implicit none
+
+  integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+  ! Tamanhos maximos en tiempo de compilacion (ajustados al sistema He20+H2).
+  ! CRITICO: reducir al minimo necesario. Cada double extra en arrays locales
+  ! consume registros; cuando se agota (256 reg/hilo con bloque=256) todo se
+  ! va a "local memory" del device con latencia de 400 ciclos -> 400x lento.
+  ! Con bloque=32: cada hilo tiene 2048 registros -> sin spilling.
+  !
+  ! Sistema actual: nhe4=20, nhe3=0, natom=21, lxhe4=4, lxhe3=0
+  ! Si cambias de sistema DEBES ajustar estos valores.
+  integer(4), public, parameter :: NATOM_MAX   = 22   ! >= natom  (21 aqui)
+  integer(4), public, parameter :: NHE3_MAX    = 2    ! >= nhe3   (0 aqui)
+  integer(4), public, parameter :: NHE4_MAX    = 21   ! >= nhe4   (20 aqui)
+  integer(4), public, parameter :: NGATOM_MAX  = 21   ! >= ngatom (20 aqui)
+  integer(4), public, parameter :: NFERMAX_GPU = 4    ! >= max(nhe3up,nhe3dw) (0)
+  integer(4), public, parameter :: NDIM_GPU    = 4    ! dim matriz Slater (nhe3=0)
+  integer(4), public, parameter :: LMAX_GPU    = 8    ! >= lxhe4  (4 aqui)
+
+  !---------------------------------------------------------------------------
+  ! Parametros escalares de mparametros (copias en device)
+  !---------------------------------------------------------------------------
+  integer(4), device, public :: d_natom, d_nhe4, d_nhe3, d_ngatom, d_ncmtras
+  integer(4), device, public :: d_nhe3up, d_nhe3dw, d_opot
+  integer(4), device, public :: d_lxhe4, d_lxhe3
+  logical,    device, public :: d_impureza, d_impurmol, d_impurfija
+  logical,    device, public :: d_rotamol, d_libre
+  real(r8),   device, public :: d_dtau, d_etrial, d_ratio, d_grande
+  real(r8),   device, public :: d_mhe4, d_mhe3, d_mx, d_hb2x, d_brot
+
+  ! Parametros Jastrow e impureza
+  real(r8), device, public :: d_phe4(3), d_phe3(4), d_pmix(3)
+  real(r8), device, public :: d_pxhe4(5, 0:LMAX_GPU)
+  real(r8), device, public :: d_pxhe3(5, 0:LMAX_GPU)
+
+  ! Potencial Aziz (variables save privadas de mvaziz)
+  real(r8), device, public :: d_a_aziz, d_alpha_aziz
+  real(r8), device, public :: d_c6_aziz, d_c7_aziz, d_c8_aziz
+  real(r8), device, public :: d_d_aziz, d_eps_aziz, d_rm_aziz
+
+  !---------------------------------------------------------------------------
+  ! Arrays SOA en device (espejos de los arrays privados de mtipos)
+  ! Convenio de indices: (componente, atomo, walker) o (walker) para escalares
+  !---------------------------------------------------------------------------
+  real(r8), device, allocatable, public :: d_soa_atom(:,:,:)    ! (3, na, 2*nw)
+  real(r8), device, allocatable, public :: d_soa_dwf(:,:,:)     ! (3, na, 2*nw)
+  real(r8), device, allocatable, public :: d_soa_delta(:,:)     ! (na, 2*nw)
+  real(r8), device, allocatable, public :: d_soa_hb2m(:,:)      ! (na, 2*nw)
+  real(r8), device, allocatable, public :: d_soa_sigma1(:,:)    ! (na, 2*nw)
+  real(r8), device, allocatable, public :: d_soa_sigma2(:,:)    ! (na, 2*nw)
+  real(r8), device, allocatable, public :: d_soa_sprop(:,:,:)   ! (3, 3, 2*nw)
+  real(r8), device, allocatable, public :: d_soa_dangle(:)      ! (2*nw)
+  real(r8), device, allocatable, public :: d_soa_b(:)           ! (2*nw)
+  real(r8), device, allocatable, public :: d_soa_sig1rot(:)
+  real(r8), device, allocatable, public :: d_soa_sig2rot(:)
+  real(r8), device, allocatable, public :: d_soa_sig1hrot(:)
+  real(r8), device, allocatable, public :: d_soa_sig2hrot(:)
+  real(r8), device, allocatable, public :: d_soa_dphi(:,:)      ! (2, 2*nw)
+  real(r8), device, allocatable, public :: d_soa_eje0(:,:)      ! (3, 2*nw)
+  real(r8), device, allocatable, public :: d_soa_pos0(:,:)      ! (3, 2*nw)
+  real(r8), device, allocatable, public :: d_soa_wf(:)
+  real(r8), device, allocatable, public :: d_soa_wfhe4(:)
+  real(r8), device, allocatable, public :: d_soa_wfhe3(:)
+  real(r8), device, allocatable, public :: d_soa_wfm(:)
+  real(r8), device, allocatable, public :: d_soa_wfx(:)
+  real(r8), device, allocatable, public :: d_soa_kin(:)
+  real(r8), device, allocatable, public :: d_soa_pot(:)
+  real(r8), device, allocatable, public :: d_soa_ene(:)
+  real(r8), device, allocatable, public :: d_soa_erot(:)
+  real(r8), device, allocatable, public :: d_soa_eimp(:)
+  integer(4), device, allocatable, public :: d_soa_signoup(:)
+  integer(4), device, allocatable, public :: d_soa_signodw(:)
+  integer(4), device, allocatable, public :: d_soa_nsons(:)
+
+  ! Estado RNG por walker (LCG de 48 bits, mismo algoritmo que mrandom2.f90)
+  integer(8), device, allocatable, public :: d_irn(:)
+
+contains
+
+  !---------------------------------------------------------------------------
+  ! Inicializar parametros en device. Llamar una vez tras leer la entrada.
+  !---------------------------------------------------------------------------
+  subroutine gpu_init_params(natom_h, nhe4_h, nhe3_h, ngatom_h, ncmtras_h,  &
+                              nhe3up_h, nhe3dw_h, opot_h, lxhe4_h, lxhe3_h, &
+                              impureza_h, impurmol_h, impurfija_h,            &
+                              rotamol_h, libre_h,                             &
+                              dtau_h, etrial_h, ratio_h, grande_h,           &
+                              mhe4_h, mhe3_h, mx_h, hb2x_h, brot_h,         &
+                              phe4_h, phe3_h, pmix_h,                        &
+                              pxhe4_h, pxhe3_h,                              &
+                              a_aziz_h, alpha_aziz_h, c6_aziz_h,             &
+                              c7_aziz_h, c8_aziz_h, d_aziz_val,              &
+                              eps_aziz_h, rm_aziz_h)
+    integer(4), intent(in) :: natom_h, nhe4_h, nhe3_h, ngatom_h, ncmtras_h
+    integer(4), intent(in) :: nhe3up_h, nhe3dw_h, opot_h, lxhe4_h, lxhe3_h
+    logical,    intent(in) :: impureza_h, impurmol_h, impurfija_h
+    logical,    intent(in) :: rotamol_h, libre_h
+    real(r8),   intent(in) :: dtau_h, etrial_h, ratio_h, grande_h
+    real(r8),   intent(in) :: mhe4_h, mhe3_h, mx_h, hb2x_h, brot_h
+    real(r8),   intent(in) :: phe4_h(3), phe3_h(4), pmix_h(3)
+    real(r8),   intent(in) :: pxhe4_h(5, 0:lxhe4_h)
+    real(r8),   intent(in) :: pxhe3_h(5, 0:lxhe3_h)
+    real(r8),   intent(in) :: a_aziz_h, alpha_aziz_h, c6_aziz_h
+    real(r8),   intent(in) :: c7_aziz_h, c8_aziz_h, d_aziz_val
+    real(r8),   intent(in) :: eps_aziz_h, rm_aziz_h
+
+    d_natom    = natom_h
+    d_nhe4     = nhe4_h
+    d_nhe3     = nhe3_h
+    d_ngatom   = ngatom_h
+    d_ncmtras  = ncmtras_h
+    d_nhe3up   = nhe3up_h
+    d_nhe3dw   = nhe3dw_h
+    d_opot     = opot_h
+    d_lxhe4    = lxhe4_h
+    d_lxhe3    = lxhe3_h
+    d_impureza  = impureza_h
+    d_impurmol  = impurmol_h
+    d_impurfija = impurfija_h
+    d_rotamol   = rotamol_h
+    d_libre     = libre_h
+    d_dtau     = dtau_h
+    d_etrial   = etrial_h
+    d_ratio    = ratio_h
+    d_grande   = grande_h
+    d_mhe4     = mhe4_h
+    d_mhe3     = mhe3_h
+    d_mx       = mx_h
+    d_hb2x     = hb2x_h
+    d_brot     = brot_h
+    d_phe4     = phe4_h
+    d_phe3     = phe3_h
+    d_pmix     = pmix_h
+    d_pxhe4(1:5, 0:lxhe4_h) = pxhe4_h
+    d_pxhe3(1:5, 0:lxhe3_h) = pxhe3_h
+    d_a_aziz     = a_aziz_h
+    d_alpha_aziz = alpha_aziz_h
+    d_c6_aziz    = c6_aziz_h
+    d_c7_aziz    = c7_aziz_h
+    d_c8_aziz    = c8_aziz_h
+    d_d_aziz     = d_aziz_val
+    d_eps_aziz   = eps_aziz_h
+    d_rm_aziz    = rm_aziz_h
+
+  end subroutine gpu_init_params
+
+  !---------------------------------------------------------------------------
+  ! Reservar arrays SOA en device. Llamar tras conocer nw y na.
+  !---------------------------------------------------------------------------
+  subroutine gpu_alloc_device_soa(nw, na)
+    integer(4), intent(in) :: nw, na
+    integer :: istat
+
+    if (allocated(d_soa_atom)) then
+      deallocate(d_soa_atom, d_soa_dwf, d_soa_delta, d_soa_hb2m)
+      deallocate(d_soa_sigma1, d_soa_sigma2, d_soa_sprop)
+      deallocate(d_soa_dangle, d_soa_b, d_soa_sig1rot, d_soa_sig2rot)
+      deallocate(d_soa_sig1hrot, d_soa_sig2hrot, d_soa_dphi)
+      deallocate(d_soa_eje0, d_soa_pos0)
+      deallocate(d_soa_wf, d_soa_wfhe4, d_soa_wfhe3, d_soa_wfm, d_soa_wfx)
+      deallocate(d_soa_kin, d_soa_pot, d_soa_ene, d_soa_erot, d_soa_eimp)
+      deallocate(d_soa_signoup, d_soa_signodw, d_soa_nsons, d_irn)
+    endif
+
+    allocate(d_soa_atom(3, na, 2*nw),   stat=istat)
+    allocate(d_soa_dwf(3, na, 2*nw),    stat=istat)
+    allocate(d_soa_delta(na, 2*nw),     stat=istat)
+    allocate(d_soa_hb2m(na, 2*nw),      stat=istat)
+    allocate(d_soa_sigma1(na, 2*nw),    stat=istat)
+    allocate(d_soa_sigma2(na, 2*nw),    stat=istat)
+    allocate(d_soa_sprop(3, 3, 2*nw),   stat=istat)
+    allocate(d_soa_dangle(2*nw),         stat=istat)
+    allocate(d_soa_b(2*nw),              stat=istat)
+    allocate(d_soa_sig1rot(2*nw),        stat=istat)
+    allocate(d_soa_sig2rot(2*nw),        stat=istat)
+    allocate(d_soa_sig1hrot(2*nw),       stat=istat)
+    allocate(d_soa_sig2hrot(2*nw),       stat=istat)
+    allocate(d_soa_dphi(2, 2*nw),        stat=istat)
+    allocate(d_soa_eje0(3, 2*nw),        stat=istat)
+    allocate(d_soa_pos0(3, 2*nw),        stat=istat)
+    allocate(d_soa_wf(2*nw),             stat=istat)
+    allocate(d_soa_wfhe4(2*nw),          stat=istat)
+    allocate(d_soa_wfhe3(2*nw),          stat=istat)
+    allocate(d_soa_wfm(2*nw),            stat=istat)
+    allocate(d_soa_wfx(2*nw),            stat=istat)
+    allocate(d_soa_kin(2*nw),            stat=istat)
+    allocate(d_soa_pot(2*nw),            stat=istat)
+    allocate(d_soa_ene(2*nw),            stat=istat)
+    allocate(d_soa_erot(2*nw),           stat=istat)
+    allocate(d_soa_eimp(2*nw),           stat=istat)
+    allocate(d_soa_signoup(2*nw),        stat=istat)
+    allocate(d_soa_signodw(2*nw),        stat=istat)
+    allocate(d_soa_nsons(2*nw),          stat=istat)
+    allocate(d_irn(2*nw),                stat=istat)
+
+  end subroutine gpu_alloc_device_soa
+
+  !---------------------------------------------------------------------------
+  ! Copiar SOA host -> device.
+  ! Los punteros a los arrays SOA del host se obtienen via get_soa_pointers.
+  !---------------------------------------------------------------------------
+  subroutine gpu_soa_h2d(nw, na)
+    use mtipos, only: get_soa_pointers
+    integer(4), intent(in) :: nw, na
+    real(r8), pointer :: p_atom(:,:,:), p_dwf(:,:,:)
+    real(r8), pointer :: p_delta(:,:), p_hb2m(:,:), p_sigma1(:,:), p_sigma2(:,:)
+    real(r8), pointer :: p_sprop(:,:,:)
+    real(r8), pointer :: p_dangle(:), p_b(:)
+    real(r8), pointer :: p_sig1rot(:), p_sig2rot(:), p_sig1hrot(:), p_sig2hrot(:)
+    real(r8), pointer :: p_dphi(:,:), p_eje0(:,:), p_pos0(:,:)
+    real(r8), pointer :: p_wf(:), p_wfhe4(:), p_wfhe3(:), p_wfm(:), p_wfx(:)
+    real(r8), pointer :: p_kin(:), p_pot(:), p_ene(:), p_erot(:), p_eimp(:)
+    integer(4), pointer :: p_signoup(:), p_signodw(:), p_nsons(:)
+    integer(4) :: nw_out, na_out
+
+    call get_soa_pointers(p_atom, p_dwf, p_delta, p_hb2m, p_sigma1, p_sigma2, &
+         p_sprop, p_dangle, p_b, p_sig1rot, p_sig2rot,                        &
+         p_sig1hrot, p_sig2hrot, p_dphi, p_eje0, p_pos0,                     &
+         p_wf, p_wfhe4, p_wfhe3, p_wfm, p_wfx,                               &
+         p_kin, p_pot, p_ene, p_erot, p_eimp,                                 &
+         p_signoup, p_signodw, p_nsons, nw_out, na_out)
+
+    ! La asignacion host-pointer -> device array desencadena cudaMemcpy H2D
+    d_soa_atom     = p_atom
+    d_soa_dwf      = p_dwf
+    d_soa_delta    = p_delta
+    d_soa_hb2m     = p_hb2m
+    d_soa_sigma1   = p_sigma1
+    d_soa_sigma2   = p_sigma2
+    d_soa_sprop    = p_sprop
+    d_soa_dangle   = p_dangle
+    d_soa_b        = p_b
+    d_soa_sig1rot  = p_sig1rot
+    d_soa_sig2rot  = p_sig2rot
+    d_soa_sig1hrot = p_sig1hrot
+    d_soa_sig2hrot = p_sig2hrot
+    d_soa_dphi     = p_dphi
+    d_soa_eje0     = p_eje0
+    d_soa_pos0     = p_pos0
+    d_soa_wf       = p_wf
+    d_soa_wfhe4    = p_wfhe4
+    d_soa_wfhe3    = p_wfhe3
+    d_soa_wfm      = p_wfm
+    d_soa_wfx      = p_wfx
+    d_soa_kin      = p_kin
+    d_soa_pot      = p_pot
+    d_soa_ene      = p_ene
+    d_soa_erot     = p_erot
+    d_soa_eimp     = p_eimp
+    d_soa_signoup  = p_signoup
+    d_soa_signodw  = p_signodw
+    d_soa_nsons    = p_nsons
+  end subroutine gpu_soa_h2d
+
+  !---------------------------------------------------------------------------
+  ! Copiar resultados device -> SOA host.
+  ! Solo los campos que el kernel modifica: posiciones, derivadas, lw, nsons.
+  !---------------------------------------------------------------------------
+  subroutine gpu_soa_d2h(nw, na)
+    use mtipos, only: get_soa_pointers
+    integer(4), intent(in) :: nw, na
+    real(r8), pointer :: p_atom(:,:,:), p_dwf(:,:,:)
+    real(r8), pointer :: p_delta(:,:), p_hb2m(:,:), p_sigma1(:,:), p_sigma2(:,:)
+    real(r8), pointer :: p_sprop(:,:,:)
+    real(r8), pointer :: p_dangle(:), p_b(:)
+    real(r8), pointer :: p_sig1rot(:), p_sig2rot(:), p_sig1hrot(:), p_sig2hrot(:)
+    real(r8), pointer :: p_dphi(:,:), p_eje0(:,:), p_pos0(:,:)
+    real(r8), pointer :: p_wf(:), p_wfhe4(:), p_wfhe3(:), p_wfm(:), p_wfx(:)
+    real(r8), pointer :: p_kin(:), p_pot(:), p_ene(:), p_erot(:), p_eimp(:)
+    integer(4), pointer :: p_signoup(:), p_signodw(:), p_nsons(:)
+    integer(4) :: nw_out, na_out
+
+    call get_soa_pointers(p_atom, p_dwf, p_delta, p_hb2m, p_sigma1, p_sigma2, &
+         p_sprop, p_dangle, p_b, p_sig1rot, p_sig2rot,                        &
+         p_sig1hrot, p_sig2hrot, p_dphi, p_eje0, p_pos0,                     &
+         p_wf, p_wfhe4, p_wfhe3, p_wfm, p_wfx,                               &
+         p_kin, p_pot, p_ene, p_erot, p_eimp,                                 &
+         p_signoup, p_signodw, p_nsons, nw_out, na_out)
+
+    p_atom    = d_soa_atom
+    p_dwf     = d_soa_dwf
+    p_sprop   = d_soa_sprop
+    p_dphi    = d_soa_dphi
+    p_wf      = d_soa_wf
+    p_wfhe4   = d_soa_wfhe4
+    p_wfhe3   = d_soa_wfhe3
+    p_wfm     = d_soa_wfm
+    p_wfx     = d_soa_wfx
+    p_kin     = d_soa_kin
+    p_pot     = d_soa_pot
+    p_ene     = d_soa_ene
+    p_erot    = d_soa_erot
+    p_eimp    = d_soa_eimp
+    p_signoup = d_soa_signoup
+    p_signodw = d_soa_signodw
+    p_nsons   = d_soa_nsons
+  end subroutine gpu_soa_d2h
+
+  !---------------------------------------------------------------------------
+  ! Inicializar semillas RNG por walker usando el LCG de mrandom2.
+  ! Llamar tras gpu_alloc_device_soa y antes del primer kernel.
+  !---------------------------------------------------------------------------
+  subroutine gpu_init_rng(base_seed, nw)
+    integer(8), intent(in) :: base_seed
+    integer(4), intent(in) :: nw
+    integer(8) :: h_irn(2*nw)
+    integer(4) :: iw
+    integer(8), parameter :: mask48 = ishft(1_8, 48) - 1_8
+    integer(8), parameter :: mult1  = 44485709377909_8
+    integer(8), parameter :: iadd1  = 96309754297_8
+
+    h_irn(1) = iand(base_seed, mask48)
+    do iw = 2, 2*nw
+      h_irn(iw) = iand(h_irn(iw-1) * mult1 + iadd1, mask48)
+    enddo
+    d_irn = h_irn
+  end subroutine gpu_init_rng
+
+  !---------------------------------------------------------------------------
+  ! Inicializar parametros GPU leyendo directamente de mparametros y mvaziz.
+  ! Llamar DESPUES de gpu_alloc_device_soa y de leer datos de entrada.
+  !---------------------------------------------------------------------------
+  subroutine gpu_init_from_mparametros()
+    use mparametros
+    use mvaziz, only: sacaaziz
+    real(r8) :: azp(8)
+
+    call sacaaziz(azp)
+
+    call gpu_init_params( &
+      natom, nhe4, nhe3, ngatom, ncmtras,           &
+      nhe3up, nhe3dw, opot, lxhe4, lxhe3,           &
+      impureza, impurmol, impurfija, rotamol, libre, &
+      dtau, etrial, ratio, grande,                   &
+      mhe4, mhe3, mx, hb2x, brot,                   &
+      phe4, phe3, pmix,                              &
+      pxhe4(1:5, 0:lxhe4), pxhe3(1:5, 0:lxhe3),    &
+      azp(1), azp(2), azp(3), azp(4),               &
+      azp(5), azp(6), azp(7), azp(8))
+
+  end subroutine gpu_init_from_mparametros
+
+end module dmc_gpu_params
