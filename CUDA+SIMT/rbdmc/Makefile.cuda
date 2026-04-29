@@ -1,25 +1,14 @@
 # Makefile for CUDA GPU compilation using nvfortran (NVIDIA HPC SDK)
-# Compilar con: make -f Makefile.cuda
-
-FC     = mpif90
-# -cuda activa CUDA Fortran; -gpu=cuda11.8 especifica la version CUDA
-# nvfortran con -cuda enlaza automaticamente cudart; no se necesita -lcurand
-# porque el codigo usa su propio LCG (rn1_d) en lugar de cuRAND.
+FC      = mpif90
 CUDA_HOME = /opt/nvidia/hpc_sdk/Linux_x86_64/24.1/cuda
 FFLAGS    = -O2 -tp=native -cuda -gpu=cc89
-# Para ver registros/spilling por kernel: añadir -Minfo=accel
-# FFLAGS = -O2 -tp=native -cuda -gpu=cc89 -Minfo=accel
-# Para depuracion:
-# FFLAGS = -O0 -g -cuda -gpu=cc89 -Minfo=accel
-
 CUDALIBS = -L$(CUDA_HOME)/lib64 -lcudart
-MPILIBS  = -lmpi
-LDFLAGS  = -llapack -lblas
+MPILIBS   = -lmpi
+LDFLAGS   = -llapack -lblas
 
 .SUFFIXES:
 .SUFFIXES: .f90 .f .cuf .o
 
-# Reglas de compilacion
 .f90.o:
 	$(FC) $(FFLAGS) -c $<
 
@@ -42,6 +31,7 @@ OBJECTS=\
  mdensidades.o\
  dmc_gpu_params.o\
  dmc_gpu.o\
+ wf_gpu.o\
  msteps.o\
  mwavef.o\
  mangwavef.o\
@@ -61,39 +51,6 @@ OBJECTS=\
  mlegendre.o\
  modlegendre.o\
 
-SRC=\
- qmccluster.f90\
- mmontecarlo.f90\
- mminimiza.f90\
- mentradatos.f90\
- mconfiguraciones.f90\
- mparametros.f90\
- mrandom.f90\
- mrandom2.f90\
- mtipos.f90\
- mdensidades.f90\
- dmc_gpu_params.cuf\
- dmc_gpu.cuf\
- msteps.f90\
- mwavef.f90\
- mangwavef.f90\
- mimagina.f90\
- mrotaciones.f90\
- msistref.f90\
- mvaziz.f90\
- mvmolecula.f90\
- mmcvpromedia.f90\
- mdmcpromedia.f90\
- bh_heh2m.f\
- pw_heocs.f\
- mhh_heocs.f90\
- mkp_heco.f90\
- kpcoef.f\
- mlineal.f90\
- mlegendre.f90\
- modlegendre.f\
- mmpi.f90\
-
 qmccluster: $(OBJECTS) mmpi.o
 	$(FC) $(FFLAGS) -o $@ $^ $(LDFLAGS) $(MPILIBS) $(CUDALIBS)
 
@@ -101,72 +58,54 @@ clean:
 	rm -f qmccluster *.o *.d *.mod work.pc work.pcl tags
 
 # -----------------------------------------------------------------------
-# Dependencias modulos base (sin GPU)
+# Dependencias modulos base
 # -----------------------------------------------------------------------
 mparametros.o: mparametros.f90
-
 mrandom2.o: mrandom2.f90
-
 mrandom.o: mrandom.f90 mrandom2.o
-
 mtipos.o: mtipos.f90
-
 mvaziz.o: mvaziz.f90
-
 mlineal.o: mlineal.f90
-
 mlegendre.o: mlegendre.f90
-
 modlegendre.o: modlegendre.f
-
 bh_heh2m.o: bh_heh2m.f
-
 pw_heocs.o: pw_heocs.f
-
 kpcoef.o: kpcoef.f
 	$(FC) $(FFLAGS) -c $< $(LDFLAGS)
 
 mrotaciones.o: mrotaciones.f90 mtipos.o
-
 msistref.o: msistref.f90 mparametros.o mtipos.o
-
 mangwavef.o: mangwavef.f90 mparametros.o mtipos.o mlegendre.o
-
 mimagina.o: mimagina.f90 mtipos.o mlegendre.o
-
 mvmolecula.o: mvmolecula.f90 pw_heocs.o mhh_heocs.o mkp_heco.o
-
 mhh_heocs.o: mhh_heocs.f90 mparametros.o mtipos.o bh_heh2m.o
-
 mkp_heco.o: mkp_heco.f90 mparametros.o mtipos.o
-
 mmcvpromedia.o: mmcvpromedia.f90 mtipos.o mdensidades.o
-
 mdmcpromedia.o: mdmcpromedia.f90 mtipos.o
-
 mdensidades.o: mdensidades.f90 msistref.o mparametros.o mtipos.o
-
 mentradatos.o: mentradatos.f90 mparametros.o mvaziz.o bh_heh2m.o \
                pw_heocs.o mhh_heocs.o mkp_heco.o mrandom.o
-
 mconfiguraciones.o: mconfiguraciones.f90 mrandom.o
 
 # -----------------------------------------------------------------------
-# Modulos GPU (CUDA Fortran .cuf)
-# Orden: dmc_gpu_params antes que dmc_gpu
+# Modulos GPU
 # -----------------------------------------------------------------------
 dmc_gpu_params.o: dmc_gpu_params.cuf mparametros.o mtipos.o mvaziz.o
-
 dmc_gpu.o: dmc_gpu.cuf dmc_gpu_params.o
+
+# -----------------------------------------------------------------------
+# Modulos GPU
+# -----------------------------------------------------------------------
+wf_gpu.o: wf_gpu.cuf dmc_gpu_params.o
 
 # -----------------------------------------------------------------------
 # Modulos que usan GPU
 # -----------------------------------------------------------------------
 mwavef.o: mwavef.f90 mparametros.o mtipos.o mangwavef.o mrotaciones.o \
-          msistref.o mvaziz.o mvmolecula.o bh_heh2m.o mlineal.o
+          msistref.o mvaziz.o mvmolecula.o bh_heh2m.o mlineal.o wf_gpu.o
 
 msteps.o: msteps.f90 mparametros.o mtipos.o mrandom.o mwavef.o \
-          mrotaciones.o mmcvpromedia.o dmc_gpu_params.o dmc_gpu.o
+          mrotaciones.o mmcvpromedia.o
 
 mmontecarlo.o: mmontecarlo.f90 mparametros.o mconfiguraciones.o mtipos.o \
                msteps.o mwavef.o msistref.o mkp_heco.o mdensidades.o    \

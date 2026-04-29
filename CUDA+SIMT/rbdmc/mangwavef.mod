@@ -1,6 +1,6 @@
 V34 :0x24 mangwavef
 13 mangwavef.f90 S624 0
-04/24/2026  21:39:14
+04/28/2026  14:15:39
 use mparametros public 0 direct
 use mtipos public 0 direct
 use mlegendre public 0 direct

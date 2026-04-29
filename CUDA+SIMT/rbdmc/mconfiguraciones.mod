@@ -1,6 +1,6 @@
 V34 :0x24 mconfiguraciones
 20 mconfiguraciones.f90 S624 0
-04/24/2026  21:39:10
+04/28/2026  14:15:35
 use mrandom2 public 0 indirect
 use mrandom public 0 direct
 enduse

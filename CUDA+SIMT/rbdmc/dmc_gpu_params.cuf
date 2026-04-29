@@ -34,6 +34,7 @@ module dmc_gpu_params
   logical,    device, public :: d_rotamol, d_libre
   real(r8),   device, public :: d_dtau, d_etrial, d_ratio, d_grande
   real(r8),   device, public :: d_mhe4, d_mhe3, d_mx, d_hb2x, d_brot
+  real(r8),   device, public :: d_dhcm   ! semidistancia H-H en bohr (potencial BH opot=4)
 
   ! Parametros Jastrow e impureza
   real(r8), device, public :: d_phe4(3), d_phe3(4), d_pmix(3)
@@ -97,7 +98,8 @@ contains
                               pxhe4_h, pxhe3_h,                              &
                               a_aziz_h, alpha_aziz_h, c6_aziz_h,             &
                               c7_aziz_h, c8_aziz_h, d_aziz_val,              &
-                              eps_aziz_h, rm_aziz_h)
+                              eps_aziz_h, rm_aziz_h,                         &
+                              dhcm_h)
     integer(4), intent(in) :: natom_h, nhe4_h, nhe3_h, ngatom_h, ncmtras_h
     integer(4), intent(in) :: nhe3up_h, nhe3dw_h, opot_h, lxhe4_h, lxhe3_h
     logical,    intent(in) :: impureza_h, impurmol_h, impurfija_h
@@ -110,6 +112,7 @@ contains
     real(r8),   intent(in) :: a_aziz_h, alpha_aziz_h, c6_aziz_h
     real(r8),   intent(in) :: c7_aziz_h, c8_aziz_h, d_aziz_val
     real(r8),   intent(in) :: eps_aziz_h, rm_aziz_h
+    real(r8),   intent(in) :: dhcm_h
 
     d_natom    = natom_h
     d_nhe4     = nhe4_h
@@ -148,6 +151,7 @@ contains
     d_d_aziz     = d_aziz_val
     d_eps_aziz   = eps_aziz_h
     d_rm_aziz    = rm_aziz_h
+    d_dhcm       = dhcm_h
 
   end subroutine gpu_init_params
 
@@ -331,8 +335,16 @@ contains
     use mparametros
     use mvaziz, only: sacaaziz
     real(r8) :: azp(8)
+    real(r8) :: dhcm_val
 
+    ! Parametros potencial Aziz generico (opot=0)
     call sacaaziz(azp)
+
+    ! Semidistancia H-H para potencial BH (opot=4); vale 0 si no se usa
+    dhcm_val = 0.0_r8
+    if (opot == 4) then
+      call sacabh(dhcm_val)
+    endif
 
     call gpu_init_params( &
       natom, nhe4, nhe3, ngatom, ncmtras,           &
@@ -343,7 +355,8 @@ contains
       phe4, phe3, pmix,                              &
       pxhe4(1:5, 0:lxhe4), pxhe3(1:5, 0:lxhe3),    &
       azp(1), azp(2), azp(3), azp(4),               &
-      azp(5), azp(6), azp(7), azp(8))
+      azp(5), azp(6), azp(7), azp(8),               &
+      dhcm_val)
 
   end subroutine gpu_init_from_mparametros
 

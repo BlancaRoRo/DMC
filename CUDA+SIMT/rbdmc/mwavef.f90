@@ -12,7 +12,7 @@ module mwavef
  implicit none
  integer, private, parameter :: i4=selected_int_kind(9)
  integer, private, parameter :: r8=selected_real_kind(15,9)
- 
+
  real, private, parameter :: umax=200.0_r8, umin=-200.0_r8
 
 contains
@@ -625,17 +625,12 @@ contains
 
  subroutine wavef(w1)
   type(walker), intent (inout) :: w1
-! real(kind=r8) :: chico=1.0_r8
 
-     call wavefhe4(w1)
-     call wavefhe3(w1)
-     call wavefm(w1)
-     call wavefx(w1)
-
-
-     w1%lw%wf=(w1%lw%wfhe4)*(w1%lw%wfhe3)*(w1%lw%wfm)*(w1%lw%wfx)
-!    chico=tiny(chico)
-!    w1%lw%wf=max(w1%lw%wf,chico)
+  call wavefhe4(w1)
+  call wavefhe3(w1)
+  call wavefm(w1)
+  call wavefx(w1)
+  w1%lw%wf = w1%lw%wfhe4 * w1%lw%wfhe3 * w1%lw%wfm * w1%lw%wfx
 
  end subroutine wavef
 
@@ -678,35 +673,34 @@ contains
   type(walker), intent (inout) :: w1
   type(vec3), intent (out)    :: d1wf(nhe3)
   real(kind=r8), intent (out) :: d2wf(nhe3)
-  type(vec3) :: rtemp
-  real(kind=r8) :: wfmas,wfmen,dend1,dend2
-  real(kind=r8) :: wf0,sumd2
-  integer (kind=i4) :: ihe3,iatom,ic
-  real (kind=r8), parameter :: dx=1.d-3
+  real(kind=r8) :: wf0, wfmas, wfmen, dend1, dend2, sumd2
+  integer(kind=i4) :: ihe3, iatom, ic
+  real(kind=r8), parameter :: dx = 1.0d-3
 
-   wf0=w1%lw%wfhe3
-   dend1=2.0_r8*dx*wf0
-   dend2=dx**2*wf0
+  if (nhe3 == 0) return
 
-   do ihe3=1,nhe3
-     iatom=nhe4+ihe3
-     rtemp=w1%atom(iatom)
-     sumd2=0.0_r8
-     do ic=1,3
-       w1%atom(iatom)%comp(ic)=rtemp%comp(ic)+dx
-       call wavefhe3(w1)
-       wfmas=w1%lw%wfhe3
-       w1%atom(iatom)%comp(ic)=rtemp%comp(ic)-dx
-       call wavefhe3(w1)
-       wfmen=w1%lw%wfhe3
-       w1%atom(iatom)%comp(ic)=rtemp%comp(ic)
-       d1wf(ihe3)%comp(ic)=(wfmas-wfmen)/dend1
-       sumd2=sumd2+(wfmas+wfmen-2.0_r8*wf0)
-     enddo
-     d2wf(ihe3)=sumd2/dend2
-   enddo
+  wf0   = w1%lw%wfhe3
+  dend1 = 2.0_r8 * dx * wf0
+  dend2 = dx**2 * wf0
 
-   w1%lw%wfhe3=wf0
+  do ihe3 = 1, nhe3
+    iatom = nhe4 + ihe3
+    sumd2 = 0.0_r8
+    do ic = 1, 3
+      w1%atom(iatom)%comp(ic) = w1%atom(iatom)%comp(ic) + dx
+      call wavefhe3(w1)
+      wfmas = w1%lw%wfhe3
+      w1%atom(iatom)%comp(ic) = w1%atom(iatom)%comp(ic) - 2.0_r8*dx
+      call wavefhe3(w1)
+      wfmen = w1%lw%wfhe3
+      w1%atom(iatom)%comp(ic) = w1%atom(iatom)%comp(ic) + dx
+      d1wf(ihe3)%comp(ic) = (wfmas - wfmen) / dend1
+      sumd2 = sumd2 + (wfmas + wfmen - 2.0_r8*wf0) / dend2
+    enddo
+    d2wf(ihe3) = sumd2
+  enddo
+
+  w1%lw%wfhe3 = wf0
 
  end subroutine derwavefhe3
 
