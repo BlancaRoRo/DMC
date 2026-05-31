@@ -1,0 +1,418 @@
+! mwavef_gpu.cuf
+!
+! Kernel CUDA para wavef (mwavef.f90).
+! Calcula las cuatro componentes wfhe4, wfhe3, wfm, wfx y las multiplica.
+! Inlinea todas las device functions necesarias (getcm, det, slaterdet,
+! calpleg, uhe4x, uhe3x) para poder ejecutar todo en un solo kernel.
+!
+! SOA entrada: atom(natom) + sprop(3,3)
+! SOA salida:  wf, wfhe4, wfhe3, wfm, wfx, signoup, signodw
+!
+! Nota: se usan 128 hilos/bloque (en vez de 256) para dar mas registros
+! por hilo y evitar spilling dado el volumen de trabajo por thread.
+!
+module mwavef_gpu
+  use cudafor
+  implicit none
+
+  integer, private, parameter :: r8 = selected_real_kind(15,9)
+  integer, private, parameter :: i4 = selected_int_kind(9)
+
+  real(r8), private, parameter :: UMAX_WF =  200.0_r8
+  real(r8), private, parameter :: UMIN_WF = -200.0_r8
+
+  integer(i4), parameter, public :: NHE3_MAX_WF  = 5
+  integer(i4), parameter, public :: NFERMAX_WF   = 4
+  integer(i4), parameter, public :: NATOM_MAX_WF = 26
+  integer(i4), parameter, public :: LMAX_WF      = 8
+
+  !---------------------------------------------------------------------------
+  ! Parametros en device (union de los cuatro modulos de componentes)
+  !---------------------------------------------------------------------------
+  integer(i4), device, public :: d_nhe4_wf, d_nhe3_wf
+  integer(i4), device, public :: d_ngatom_wf, d_natom_wf
+  integer(i4), device, public :: d_nhe3up_wf, d_nhe3dw_wf
+  integer(i4), device, public :: d_lxhe4_wf, d_lxhe3_wf
+  real(r8),    device, public :: d_mhe4_wf, d_mhe3_wf, d_mx_wf
+  real(r8),    device, public :: d_phe4_wf(3)
+  real(r8),    device, public :: d_phe3_wf(4)
+  real(r8),    device, public :: d_pmix_wf(3)
+  real(r8),    device, public :: d_pxhe4_wf(5, 0:LMAX_WF)
+  real(r8),    device, public :: d_pxhe3_wf(5, 0:LMAX_WF)
+  logical,     device, public :: d_impureza_wf, d_impurmol_wf
+
+  !---------------------------------------------------------------------------
+  ! SOA en device
+  !---------------------------------------------------------------------------
+  real(r8),    device, allocatable, public :: d_atom_soa_wf(:,:,:)   ! (3,natom,nw)
+  real(r8),    device, allocatable, public :: d_sprop_soa_wf(:,:,:)  ! (3,3,nw)
+  real(r8),    device, allocatable, public :: d_wf_soa(:)
+  real(r8),    device, allocatable, public :: d_wfhe4_soa_wf(:)
+  real(r8),    device, allocatable, public :: d_wfhe3_soa_wf(:)
+  real(r8),    device, allocatable, public :: d_wfm_soa_wf(:)
+  real(r8),    device, allocatable, public :: d_wfx_soa_wf(:)
+  integer(i4), device, allocatable, public :: d_signoup_soa_wf(:)
+  integer(i4), device, allocatable, public :: d_signodw_soa_wf(:)
+
+contains
+
+  !===========================================================================
+  subroutine wavef_gpu_init(nhe4_h, nhe3_h, ngatom_h, natom_h,       &
+                             nhe3up_h, nhe3dw_h, lxhe4_h, lxhe3_h,    &
+                             mhe4_h, mhe3_h, mx_h,                     &
+                             phe4_h, phe3_h, pmix_h,                   &
+                             pxhe4_h, pxhe3_h,                         &
+                             impureza_h, impurmol_h)
+    integer(i4), intent(in) :: nhe4_h, nhe3_h, ngatom_h, natom_h
+    integer(i4), intent(in) :: nhe3up_h, nhe3dw_h, lxhe4_h, lxhe3_h
+    real(r8),    intent(in) :: mhe4_h, mhe3_h, mx_h
+    real(r8),    intent(in) :: phe4_h(3), phe3_h(4), pmix_h(3)
+    real(r8),    intent(in) :: pxhe4_h(5, 0:lxhe4_h), pxhe3_h(5, 0:lxhe3_h)
+    logical,     intent(in) :: impureza_h, impurmol_h
+    d_nhe4_wf   = nhe4_h;    d_nhe3_wf   = nhe3_h
+    d_ngatom_wf = ngatom_h;  d_natom_wf  = natom_h
+    d_nhe3up_wf = nhe3up_h;  d_nhe3dw_wf = nhe3dw_h
+    d_lxhe4_wf  = lxhe4_h;   d_lxhe3_wf  = lxhe3_h
+    d_mhe4_wf   = mhe4_h;    d_mhe3_wf   = mhe3_h;  d_mx_wf = mx_h
+    d_phe4_wf   = phe4_h;    d_phe3_wf   = phe3_h;  d_pmix_wf = pmix_h
+    d_pxhe4_wf(1:5, 0:lxhe4_h) = pxhe4_h
+    d_pxhe3_wf(1:5, 0:lxhe3_h) = pxhe3_h
+    d_impureza_wf  = impureza_h
+    d_impurmol_wf  = impurmol_h
+  end subroutine wavef_gpu_init
+
+  !===========================================================================
+  subroutine wavef_gpu_alloc(nw, na)
+    integer(i4), intent(in) :: nw, na
+    integer :: istat
+    if (allocated(d_atom_soa_wf)) then
+      deallocate(d_atom_soa_wf, d_sprop_soa_wf)
+      deallocate(d_wf_soa, d_wfhe4_soa_wf, d_wfhe3_soa_wf)
+      deallocate(d_wfm_soa_wf, d_wfx_soa_wf)
+      deallocate(d_signoup_soa_wf, d_signodw_soa_wf)
+    end if
+    allocate(d_atom_soa_wf(3, na, nw),  stat=istat)
+    allocate(d_sprop_soa_wf(3, 3, nw),  stat=istat)
+    allocate(d_wf_soa(nw),              stat=istat)
+    allocate(d_wfhe4_soa_wf(nw),        stat=istat)
+    allocate(d_wfhe3_soa_wf(nw),        stat=istat)
+    allocate(d_wfm_soa_wf(nw),          stat=istat)
+    allocate(d_wfx_soa_wf(nw),          stat=istat)
+    allocate(d_signoup_soa_wf(nw),      stat=istat)
+    allocate(d_signodw_soa_wf(nw),      stat=istat)
+  end subroutine wavef_gpu_alloc
+
+  !===========================================================================
+  ! AOS -> SOA (H2D)
+  !===========================================================================
+  subroutine aos_to_soa_wf(wsim, nw, na)
+    use mtipos, only: walker
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw, na
+    real(r8) :: h_atom(3, na, nw), h_sprop(3, 3, nw)
+    integer(i4) :: iw, ia, iv
+    do iw = 1, nw
+      do ia = 1, na
+        h_atom(1,ia,iw) = wsim(iw)%atom(ia)%comp(1)
+        h_atom(2,ia,iw) = wsim(iw)%atom(ia)%comp(2)
+        h_atom(3,ia,iw) = wsim(iw)%atom(ia)%comp(3)
+      end do
+      do iv = 1, 3
+        h_sprop(1,iv,iw) = wsim(iw)%sprop(iv)%comp(1)
+        h_sprop(2,iv,iw) = wsim(iw)%sprop(iv)%comp(2)
+        h_sprop(3,iv,iw) = wsim(iw)%sprop(iv)%comp(3)
+      end do
+    end do
+    d_atom_soa_wf  = h_atom
+    d_sprop_soa_wf = h_sprop
+  end subroutine aos_to_soa_wf
+
+  !===========================================================================
+  ! Device functions (inlineadas de cada modulo de componente)
+  !===========================================================================
+
+  attributes(device) subroutine getcm_d_wf(atom, rcm)
+    real(r8), intent(in)  :: atom(3, NATOM_MAX_WF)
+    real(r8), intent(out) :: rcm(3)
+    real(r8) :: mtot
+    integer(i4) :: i
+    rcm = 0.0_r8
+    do i = 1, d_nhe4_wf
+      rcm = rcm + d_mhe4_wf * atom(:,i)
+    end do
+    do i = d_nhe4_wf+1, d_ngatom_wf
+      rcm = rcm + d_mhe3_wf * atom(:,i)
+    end do
+    if (d_impureza_wf) then
+      rcm  = rcm + d_mx_wf * atom(:, d_natom_wf)
+      mtot = d_nhe4_wf*d_mhe4_wf + d_nhe3_wf*d_mhe3_wf + d_mx_wf
+    else
+      mtot = d_nhe4_wf*d_mhe4_wf + d_nhe3_wf*d_mhe3_wf
+    end if
+    rcm = rcm / mtot
+  end subroutine getcm_d_wf
+
+  attributes(device) function det_d_wf(n, b) result(d)
+    integer(i4), value :: n
+    real(r8), intent(in) :: b(NFERMAX_WF, NFERMAX_WF)
+    real(r8) :: d, a(NFERMAX_WF, NFERMAX_WF), s, pivot, piv
+    integer(i4) :: i, j, k, ipiv
+    a = b;  d = 1.0_r8
+    do j = 1, n
+      if (j /= 1) then
+        do i = 2, n
+          s = a(i,j)
+          do k = 1, min(i-1,j-1);  s = s - a(i,k)*a(k,j);  end do
+          a(i,j) = s
+        end do
+      end if
+      pivot = 0.0_r8;  ipiv = j
+      do k = j, n
+        piv = abs(a(k,j))
+        if (piv > pivot) then;  ipiv = k;  pivot = piv;  end if
+      end do
+      if (ipiv /= j) then
+        do i = 1, n;  piv=a(j,i); a(j,i)=a(ipiv,i); a(ipiv,i)=piv;  end do
+        d = -d
+      end if
+      pivot = a(j,j)
+      if (j /= n) then
+        do k = j+1, n;  a(k,j) = a(k,j)/pivot;  end do
+      end if
+      d = d * pivot
+    end do
+  end function det_d_wf
+
+  attributes(device) subroutine slaterdet_d_wf(npart, rpart, slater)
+    integer(i4), value :: npart
+    real(r8), intent(in)  :: rpart(3, NFERMAX_WF)
+    real(r8), intent(out) :: slater
+    real(r8) :: m(NFERMAX_WF, NFERMAX_WF)
+    integer(i4) :: ip
+    if (npart <= 1) then;  slater = 1.0_r8;  return;  end if
+    do ip = 1, npart
+      m(ip,1) = 1.0_r8;  m(ip,2) = rpart(1,ip)
+      if (npart == 2) cycle
+      m(ip,3) = rpart(2,ip)
+      if (npart == 3) cycle
+      m(ip,4) = rpart(3,ip)
+    end do
+    slater = det_d_wf(npart, m)
+  end subroutine slaterdet_d_wf
+
+  attributes(device) subroutine calpleg_d_wf(l, x, pl)
+    integer(i4), value :: l
+    real(r8), value    :: x
+    real(r8), intent(out) :: pl(0:LMAX_WF)
+    integer(i4) :: il
+    pl(0) = 1.0_r8
+    if (l < 1) return
+    pl(1) = x
+    do il = 1, l-1
+      pl(il+1) = ((2.0_r8*il+1.0_r8)*x*pl(il) - il*pl(il-1)) / real(il+1,r8)
+    end do
+  end subroutine calpleg_d_wf
+
+  attributes(device) function uhe4x_d_wf(rij, cth) result(u)
+    real(r8), value :: rij, cth
+    real(r8) :: u, pl(0:LMAX_WF), ul
+    integer(i4) :: il
+    call calpleg_d_wf(d_lxhe4_wf, cth, pl)
+    do il = 1, d_lxhe4_wf;  pl(il) = 1.0_r8 - pl(il);  end do
+    u = 0.0_r8
+    do il = 0, d_lxhe4_wf
+      ul = -d_pxhe4_wf(1,il)/rij**d_pxhe4_wf(2,il) &
+           - d_pxhe4_wf(3,il)*rij**d_pxhe4_wf(4,il) &
+           - d_pxhe4_wf(5,il)*log(rij)
+      u = u + ul*pl(il)
+    end do
+  end function uhe4x_d_wf
+
+  attributes(device) function uhe3x_d_wf(rij, cth) result(u)
+    real(r8), value :: rij, cth
+    real(r8) :: u, pl(0:LMAX_WF), ul
+    integer(i4) :: il
+    call calpleg_d_wf(d_lxhe3_wf, cth, pl)
+    do il = 1, d_lxhe3_wf;  pl(il) = 1.0_r8 - pl(il);  end do
+    u = 0.0_r8
+    do il = 0, d_lxhe3_wf
+      ul = -d_pxhe3_wf(1,il)/rij**d_pxhe3_wf(2,il) &
+           - d_pxhe3_wf(3,il)*rij**d_pxhe3_wf(4,il) &
+           - d_pxhe3_wf(5,il)*log(rij)
+      u = u + ul*pl(il)
+    end do
+  end function uhe3x_d_wf
+
+  !===========================================================================
+  ! Kernel wavef: un hilo por walker, calcula las 4 componentes
+  ! 128 hilos/bloque para dar mas registros por hilo (varios arrays locales)
+  !===========================================================================
+  attributes(global) subroutine wavef_kernel(nw)
+    integer(i4), value :: nw
+    integer(i4) :: iw, i, j, jhe3, ihe3, iatom, jatom
+    real(r8) :: atom(3, NATOM_MAX_WF), sprop3(3)
+    ! wfhe4
+    real(r8) :: ujas_he4, wfhe4
+    ! wfhe3
+    real(r8) :: rcm(3), rb(3, NHE3_MAX_WF)
+    real(r8) :: rb_up(3, NFERMAX_WF), rb_dw(3, NFERMAX_WF)
+    real(r8) :: ujas_he3, slaterup, slaterdw, etaij, wfhe3
+    integer(i4) :: signoup, signodw
+    ! wfm
+    real(r8) :: ujas_m, wfm
+    ! wfx
+    real(r8) :: ujas_x, wfx, dnor, cth
+    ! temporales comunes
+    real(r8) :: rt(3), rij
+
+    iw = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+    if (iw > nw) return
+
+    do i = 1, d_natom_wf
+      atom(1,i) = d_atom_soa_wf(1, i, iw)
+      atom(2,i) = d_atom_soa_wf(2, i, iw)
+      atom(3,i) = d_atom_soa_wf(3, i, iw)
+    end do
+    sprop3(1) = d_sprop_soa_wf(1, 3, iw)
+    sprop3(2) = d_sprop_soa_wf(2, 3, iw)
+    sprop3(3) = d_sprop_soa_wf(3, 3, iw)
+
+    !--- wfhe4: pares He4-He4 (i<j) ---
+    ujas_he4 = 0.0_r8
+    do i = 1, d_nhe4_wf-1
+      do j = i+1, d_nhe4_wf
+        rt(1)=atom(1,i)-atom(1,j); rt(2)=atom(2,i)-atom(2,j); rt(3)=atom(3,i)-atom(3,j)
+        rij = sqrt(rt(1)**2 + rt(2)**2 + rt(3)**2)
+        ujas_he4 = ujas_he4 - d_phe4_wf(1)/rij**d_phe4_wf(2) - d_phe4_wf(3)*rij
+      end do
+    end do
+    ujas_he4 = min(ujas_he4, UMAX_WF);  ujas_he4 = max(ujas_he4, UMIN_WF)
+    wfhe4 = exp(ujas_he4)
+
+    !--- wfhe3: getcm + Jastrow + Slater ---
+    call getcm_d_wf(atom, rcm)
+    do iatom = d_nhe4_wf+1, d_ngatom_wf
+      ihe3 = iatom - d_nhe4_wf
+      rb(1,ihe3)=atom(1,iatom)-rcm(1); rb(2,ihe3)=atom(2,iatom)-rcm(2); rb(3,ihe3)=atom(3,iatom)-rcm(3)
+    end do
+    ujas_he3 = 0.0_r8
+    do iatom = d_nhe4_wf+1, d_ngatom_wf-1
+      ihe3 = iatom - d_nhe4_wf
+      do jatom = iatom+1, d_ngatom_wf
+        jhe3 = jatom - d_nhe4_wf
+        rt(1)=atom(1,iatom)-atom(1,jatom); rt(2)=atom(2,iatom)-atom(2,jatom); rt(3)=atom(3,iatom)-atom(3,jatom)
+        rij = sqrt(rt(1)**2+rt(2)**2+rt(3)**2)
+        ujas_he3 = ujas_he3 - d_phe3_wf(1)/rij**d_phe3_wf(2)
+        etaij = d_phe3_wf(4)/rij**3
+        rb(1,ihe3)=rb(1,ihe3)+etaij*rt(1); rb(2,ihe3)=rb(2,ihe3)+etaij*rt(2); rb(3,ihe3)=rb(3,ihe3)+etaij*rt(3)
+        rb(1,jhe3)=rb(1,jhe3)-etaij*rt(1); rb(2,jhe3)=rb(2,jhe3)-etaij*rt(2); rb(3,jhe3)=rb(3,jhe3)-etaij*rt(3)
+      end do
+    end do
+    do ihe3 = 1, d_nhe3_wf-1
+      do jhe3 = ihe3+1, d_nhe3_wf
+        rt(1)=rb(1,ihe3)-rb(1,jhe3); rt(2)=rb(2,ihe3)-rb(2,jhe3); rt(3)=rb(3,ihe3)-rb(3,jhe3)
+        ujas_he3 = ujas_he3 - d_phe3_wf(3)*sqrt(rt(1)**2+rt(2)**2+rt(3)**2)
+      end do
+    end do
+    do ihe3 = 1, d_nhe3up_wf
+      rb_up(1,ihe3)=rb(1,ihe3); rb_up(2,ihe3)=rb(2,ihe3); rb_up(3,ihe3)=rb(3,ihe3)
+    end do
+    do ihe3 = 1, d_nhe3dw_wf
+      rb_dw(1,ihe3)=rb(1,d_nhe3up_wf+ihe3); rb_dw(2,ihe3)=rb(2,d_nhe3up_wf+ihe3); rb_dw(3,ihe3)=rb(3,d_nhe3up_wf+ihe3)
+    end do
+    call slaterdet_d_wf(d_nhe3up_wf, rb_up, slaterup)
+    call slaterdet_d_wf(d_nhe3dw_wf, rb_dw, slaterdw)
+    ujas_he3 = min(ujas_he3, UMAX_WF);  ujas_he3 = max(ujas_he3, UMIN_WF)
+    wfhe3    = exp(ujas_he3) * slaterup * slaterdw
+    signoup  = merge(-1, 1, slaterup < 0.0_r8)
+    signodw  = merge(-1, 1, slaterdw < 0.0_r8)
+
+    !--- wfm: pares He4-He3 ---
+    ujas_m = 0.0_r8
+    do i = 1, d_nhe4_wf
+      do j = d_nhe4_wf+1, d_ngatom_wf
+        rt(1)=atom(1,i)-atom(1,j); rt(2)=atom(2,i)-atom(2,j); rt(3)=atom(3,i)-atom(3,j)
+        rij = sqrt(rt(1)**2+rt(2)**2+rt(3)**2)
+        ujas_m = ujas_m - d_pmix_wf(1)/rij**d_pmix_wf(2) - d_pmix_wf(3)*rij
+      end do
+    end do
+    wfm = exp(ujas_m)
+
+    !--- wfx: He vs impureza ---
+    if (.not. d_impureza_wf) then
+      wfx = 1.0_r8
+    else
+      cth = 0.0_r8;  ujas_x = 0.0_r8
+      if (d_impurmol_wf) dnor = sqrt(sprop3(1)**2+sprop3(2)**2+sprop3(3)**2)
+      do j = 1, d_nhe4_wf
+        rt(1)=atom(1,j)-atom(1,d_natom_wf); rt(2)=atom(2,j)-atom(2,d_natom_wf); rt(3)=atom(3,j)-atom(3,d_natom_wf)
+        rij = sqrt(rt(1)**2+rt(2)**2+rt(3)**2)
+        if (d_impurmol_wf) cth = (rt(1)*sprop3(1)+rt(2)*sprop3(2)+rt(3)*sprop3(3))/(dnor*rij)
+        ujas_x = ujas_x + uhe4x_d_wf(rij, cth)
+      end do
+      do j = d_nhe4_wf+1, d_ngatom_wf
+        rt(1)=atom(1,j)-atom(1,d_natom_wf); rt(2)=atom(2,j)-atom(2,d_natom_wf); rt(3)=atom(3,j)-atom(3,d_natom_wf)
+        rij = sqrt(rt(1)**2+rt(2)**2+rt(3)**2)
+        if (d_impurmol_wf) cth = (rt(1)*sprop3(1)+rt(2)*sprop3(2)+rt(3)*sprop3(3))/(dnor*rij)
+        ujas_x = ujas_x + uhe3x_d_wf(rij, cth)
+      end do
+      wfx = exp(ujas_x)
+    end if
+
+    !--- wf total ---
+    d_wf_soa(iw)          = wfhe4 * wfhe3 * wfm * wfx
+    d_wfhe4_soa_wf(iw)    = wfhe4
+    d_wfhe3_soa_wf(iw)    = wfhe3
+    d_wfm_soa_wf(iw)      = wfm
+    d_wfx_soa_wf(iw)      = wfx
+    d_signoup_soa_wf(iw)  = signoup
+    d_signodw_soa_wf(iw)  = signodw
+  end subroutine wavef_kernel
+
+  !===========================================================================
+  subroutine wavef_gpu_run(nw)
+    integer(i4), intent(in) :: nw
+    integer(i4), parameter  :: NTHREADS = 128
+    integer(i4) :: nblocks
+    integer      :: istat
+    nblocks = (nw + NTHREADS - 1) / NTHREADS
+    call wavef_kernel<<<nblocks, NTHREADS>>>(nw)
+    istat = cudaDeviceSynchronize()
+  end subroutine wavef_gpu_run
+
+  !===========================================================================
+  ! SOA -> AOS (D2H)
+  !===========================================================================
+  subroutine soa_to_aos_wf(nw, wf_out, wfhe4_out, wfhe3_out, &
+                             wfm_out, wfx_out, signoup_out, signodw_out)
+    integer(i4), intent(in)  :: nw
+    real(r8),    intent(out) :: wf_out(nw), wfhe4_out(nw), wfhe3_out(nw)
+    real(r8),    intent(out) :: wfm_out(nw), wfx_out(nw)
+    integer(i4), intent(out) :: signoup_out(nw), signodw_out(nw)
+    wf_out      = d_wf_soa
+    wfhe4_out   = d_wfhe4_soa_wf
+    wfhe3_out   = d_wfhe3_soa_wf
+    wfm_out     = d_wfm_soa_wf
+    wfx_out     = d_wfx_soa_wf
+    signoup_out = d_signoup_soa_wf
+    signodw_out = d_signodw_soa_wf
+  end subroutine soa_to_aos_wf
+
+  !===========================================================================
+  ! Wrapper completo
+  !===========================================================================
+  subroutine wavef_gpu(wsim, nw, na, wf_out, wfhe4_out, wfhe3_out, &
+                        wfm_out, wfx_out, signoup_out, signodw_out)
+    use mtipos, only: walker
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw, na
+    real(r8),    intent(out) :: wf_out(nw), wfhe4_out(nw), wfhe3_out(nw)
+    real(r8),    intent(out) :: wfm_out(nw), wfx_out(nw)
+    integer(i4), intent(out) :: signoup_out(nw), signodw_out(nw)
+    call aos_to_soa_wf(wsim, nw, na)
+    call wavef_gpu_run(nw)
+    call soa_to_aos_wf(nw, wf_out, wfhe4_out, wfhe3_out, &
+                        wfm_out, wfx_out, signoup_out, signodw_out)
+  end subroutine wavef_gpu
+
+end module mwavef_gpu

@@ -1,0 +1,325 @@
+! mderwavefhe3_gpu.cuf
+!
+! Kernel CUDA para derwavefhe3 (mwavef.f90).
+! Calcula el gradiente y laplaciano de ln(psi_T) para los He3 mediante
+! diferencias finitas numericas (dx=1e-3), igual que la version CPU.
+!
+! Por cada walker, el kernel perturba cada atomo He3 en ±dx en las 3
+! coordenadas (4*3*2 = 24 llamadas internas a wavefhe3 + 1 sin perturbar).
+!
+! 64 hilos/bloque para reducir presion de registros (wavefhe3_inline_d
+! usa arrays locales grandes: atom, rb, matrices Slater).
+!
+module mderwavefhe3_gpu
+  use cudafor
+  implicit none
+
+  integer, private, parameter :: r8 = selected_real_kind(15,9)
+  integer, private, parameter :: i4 = selected_int_kind(9)
+
+  real(r8), private, parameter :: UMAX_DH3 =  200.0_r8
+  real(r8), private, parameter :: UMIN_DH3 = -200.0_r8
+  real(r8), private, parameter :: DX_DH3   = 1.0d-3
+
+  integer(i4), parameter, public :: NHE3_MAX_DH3  = 5
+  integer(i4), parameter, public :: NFERMAX_DH3   = 4
+  integer(i4), parameter, public :: NATOM_MAX_DH3 = 26
+
+  !---------------------------------------------------------------------------
+  ! Parametros en device (mismos que mwavefhe3_gpu)
+  !---------------------------------------------------------------------------
+  integer(i4), device, public :: d_nhe4_dh3, d_nhe3_dh3
+  integer(i4), device, public :: d_ngatom_dh3, d_natom_dh3
+  integer(i4), device, public :: d_nhe3up_dh3, d_nhe3dw_dh3
+  real(r8),    device, public :: d_mhe4_dh3, d_mhe3_dh3, d_mx_dh3
+  real(r8),    device, public :: d_phe3_dh3(4)
+  logical,     device, public :: d_impureza_dh3
+
+  !---------------------------------------------------------------------------
+  ! SOA en device
+  ! Entrada: atom(natom, nw)
+  ! Salida:  d1wf(3, nhe3, nw), d2wf(nhe3, nw)
+  !---------------------------------------------------------------------------
+  real(r8), device, allocatable, public :: d_atom_soa_dh3(:,:,:)
+  real(r8), device, allocatable, public :: d_d1wfhe3_soa(:,:,:)
+  real(r8), device, allocatable, public :: d_d2wfhe3_soa(:,:)
+
+contains
+
+  !===========================================================================
+  subroutine derwavefhe3_gpu_init(nhe4_h, nhe3_h, ngatom_h, natom_h, &
+                                   nhe3up_h, nhe3dw_h,                 &
+                                   mhe4_h, mhe3_h, mx_h,               &
+                                   phe3_h, impureza_h)
+    integer(i4), intent(in) :: nhe4_h, nhe3_h, ngatom_h, natom_h
+    integer(i4), intent(in) :: nhe3up_h, nhe3dw_h
+    real(r8),    intent(in) :: mhe4_h, mhe3_h, mx_h, phe3_h(4)
+    logical,     intent(in) :: impureza_h
+    d_nhe4_dh3    = nhe4_h;   d_nhe3_dh3    = nhe3_h
+    d_ngatom_dh3  = ngatom_h; d_natom_dh3   = natom_h
+    d_nhe3up_dh3  = nhe3up_h; d_nhe3dw_dh3  = nhe3dw_h
+    d_mhe4_dh3    = mhe4_h;   d_mhe3_dh3    = mhe3_h;  d_mx_dh3 = mx_h
+    d_phe3_dh3    = phe3_h
+    d_impureza_dh3 = impureza_h
+  end subroutine derwavefhe3_gpu_init
+
+  !===========================================================================
+  subroutine derwavefhe3_gpu_alloc(nw, nh3, na)
+    integer(i4), intent(in) :: nw, nh3, na
+    integer :: istat
+    if (allocated(d_atom_soa_dh3)) &
+      deallocate(d_atom_soa_dh3, d_d1wfhe3_soa, d_d2wfhe3_soa)
+    allocate(d_atom_soa_dh3(3, na, nw),  stat=istat)
+    allocate(d_d1wfhe3_soa(3, nh3, nw), stat=istat)
+    allocate(d_d2wfhe3_soa(nh3, nw),    stat=istat)
+  end subroutine derwavefhe3_gpu_alloc
+
+  !===========================================================================
+  ! AOS -> SOA (H2D)
+  !===========================================================================
+  subroutine aos_to_soa_dh3(wsim, nw, na)
+    use mtipos, only: walker
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw, na
+    real(r8) :: h_soa(3, na, nw)
+    integer(i4) :: iw, ia
+    do iw = 1, nw
+      do ia = 1, na
+        h_soa(1,ia,iw) = wsim(iw)%atom(ia)%comp(1)
+        h_soa(2,ia,iw) = wsim(iw)%atom(ia)%comp(2)
+        h_soa(3,ia,iw) = wsim(iw)%atom(ia)%comp(3)
+      end do
+    end do
+    d_atom_soa_dh3 = h_soa
+  end subroutine aos_to_soa_dh3
+
+  !===========================================================================
+  ! Device: determinante LU
+  !===========================================================================
+  attributes(device) function det_d_dh3(n, b) result(d)
+    integer(i4), value :: n
+    real(r8), intent(in) :: b(NFERMAX_DH3, NFERMAX_DH3)
+    real(r8) :: d, a(NFERMAX_DH3, NFERMAX_DH3), s, pivot, piv
+    integer(i4) :: i, j, k, ipiv
+    a = b;  d = 1.0_r8
+    do j = 1, n
+      if (j /= 1) then
+        do i = 2, n
+          s = a(i,j)
+          do k = 1, min(i-1,j-1);  s = s - a(i,k)*a(k,j);  end do
+          a(i,j) = s
+        end do
+      end if
+      pivot = 0.0_r8;  ipiv = j
+      do k = j, n
+        piv = abs(a(k,j))
+        if (piv > pivot) then;  ipiv = k;  pivot = piv;  end if
+      end do
+      if (ipiv /= j) then
+        do i = 1, n;  piv=a(j,i); a(j,i)=a(ipiv,i); a(ipiv,i)=piv;  end do
+        d = -d
+      end if
+      pivot = a(j,j)
+      if (j /= n) then
+        do k = j+1, n;  a(k,j) = a(k,j)/pivot;  end do
+      end if
+      d = d * pivot
+    end do
+  end function det_d_dh3
+
+  !===========================================================================
+  ! Device: determinante de Slater
+  !===========================================================================
+  attributes(device) subroutine slaterdet_d_dh3(npart, rpart, slater)
+    integer(i4), value :: npart
+    real(r8), intent(in)  :: rpart(3, NFERMAX_DH3)
+    real(r8), intent(out) :: slater
+    real(r8) :: m(NFERMAX_DH3, NFERMAX_DH3)
+    integer(i4) :: ip
+    if (npart <= 1) then;  slater = 1.0_r8;  return;  end if
+    do ip = 1, npart
+      m(ip,1) = 1.0_r8;  m(ip,2) = rpart(1,ip)
+      if (npart == 2) cycle
+      m(ip,3) = rpart(2,ip)
+      if (npart == 3) cycle
+      m(ip,4) = rpart(3,ip)
+    end do
+    slater = det_d_dh3(npart, m)
+  end subroutine slaterdet_d_dh3
+
+  !===========================================================================
+  ! Device: getcm
+  !===========================================================================
+  attributes(device) subroutine getcm_d_dh3(atom, rcm)
+    real(r8), intent(in)  :: atom(3, NATOM_MAX_DH3)
+    real(r8), intent(out) :: rcm(3)
+    real(r8) :: mtot
+    integer(i4) :: i
+    rcm = 0.0_r8
+    do i = 1, d_nhe4_dh3;     rcm = rcm + d_mhe4_dh3 * atom(:,i);  end do
+    do i = d_nhe4_dh3+1, d_ngatom_dh3;  rcm = rcm + d_mhe3_dh3 * atom(:,i);  end do
+    if (d_impureza_dh3) then
+      rcm  = rcm + d_mx_dh3 * atom(:, d_natom_dh3)
+      mtot = d_nhe4_dh3*d_mhe4_dh3 + d_nhe3_dh3*d_mhe3_dh3 + d_mx_dh3
+    else
+      mtot = d_nhe4_dh3*d_mhe4_dh3 + d_nhe3_dh3*d_mhe3_dh3
+    end if
+    rcm = rcm / mtot
+  end subroutine getcm_d_dh3
+
+  !===========================================================================
+  ! Device: wavefhe3 completa para una configuracion atom dada
+  ! Necesaria para calcular las derivadas numericas.
+  !===========================================================================
+  attributes(device) subroutine wavefhe3_inline_d(atom, wfhe3_out, sup, sdw)
+    real(r8), intent(in)  :: atom(3, NATOM_MAX_DH3)
+    real(r8), intent(out) :: wfhe3_out
+    integer(i4), intent(out) :: sup, sdw
+    real(r8) :: rcm(3), rb(3, NHE3_MAX_DH3)
+    real(r8) :: rb_up(3, NFERMAX_DH3), rb_dw(3, NFERMAX_DH3)
+    real(r8) :: rt(3), ujas, rij, etaij, slaterup, slaterdw
+    integer(i4) :: iatom, jatom, ihe3, jhe3
+
+    call getcm_d_dh3(atom, rcm)
+    do iatom = d_nhe4_dh3+1, d_ngatom_dh3
+      ihe3 = iatom - d_nhe4_dh3
+      rb(1,ihe3)=atom(1,iatom)-rcm(1); rb(2,ihe3)=atom(2,iatom)-rcm(2); rb(3,ihe3)=atom(3,iatom)-rcm(3)
+    end do
+    ujas = 0.0_r8
+    do iatom = d_nhe4_dh3+1, d_ngatom_dh3-1
+      ihe3 = iatom - d_nhe4_dh3
+      do jatom = iatom+1, d_ngatom_dh3
+        jhe3 = jatom - d_nhe4_dh3
+        rt(1)=atom(1,iatom)-atom(1,jatom); rt(2)=atom(2,iatom)-atom(2,jatom); rt(3)=atom(3,iatom)-atom(3,jatom)
+        rij = sqrt(rt(1)**2+rt(2)**2+rt(3)**2)
+        ujas = ujas - d_phe3_dh3(1)/rij**d_phe3_dh3(2)
+        etaij = d_phe3_dh3(4)/rij**3
+        rb(1,ihe3)=rb(1,ihe3)+etaij*rt(1); rb(2,ihe3)=rb(2,ihe3)+etaij*rt(2); rb(3,ihe3)=rb(3,ihe3)+etaij*rt(3)
+        rb(1,jhe3)=rb(1,jhe3)-etaij*rt(1); rb(2,jhe3)=rb(2,jhe3)-etaij*rt(2); rb(3,jhe3)=rb(3,jhe3)-etaij*rt(3)
+      end do
+    end do
+    do ihe3 = 1, d_nhe3_dh3-1
+      do jhe3 = ihe3+1, d_nhe3_dh3
+        rt(1)=rb(1,ihe3)-rb(1,jhe3); rt(2)=rb(2,ihe3)-rb(2,jhe3); rt(3)=rb(3,ihe3)-rb(3,jhe3)
+        ujas = ujas - d_phe3_dh3(3)*sqrt(rt(1)**2+rt(2)**2+rt(3)**2)
+      end do
+    end do
+    do ihe3 = 1, d_nhe3up_dh3
+      rb_up(1,ihe3)=rb(1,ihe3); rb_up(2,ihe3)=rb(2,ihe3); rb_up(3,ihe3)=rb(3,ihe3)
+    end do
+    do ihe3 = 1, d_nhe3dw_dh3
+      rb_dw(1,ihe3)=rb(1,d_nhe3up_dh3+ihe3); rb_dw(2,ihe3)=rb(2,d_nhe3up_dh3+ihe3); rb_dw(3,ihe3)=rb(3,d_nhe3up_dh3+ihe3)
+    end do
+    call slaterdet_d_dh3(d_nhe3up_dh3, rb_up, slaterup)
+    call slaterdet_d_dh3(d_nhe3dw_dh3, rb_dw, slaterdw)
+    ujas = min(ujas, UMAX_DH3);  ujas = max(ujas, UMIN_DH3)
+    wfhe3_out = exp(ujas) * slaterup * slaterdw
+    sup = merge(-1, 1, slaterup < 0.0_r8)
+    sdw = merge(-1, 1, slaterdw < 0.0_r8)
+  end subroutine wavefhe3_inline_d
+
+  !===========================================================================
+  ! Kernel derwavefhe3: un hilo por walker, derivadas numericas
+  !===========================================================================
+  attributes(global) subroutine derwavefhe3_kernel(nw)
+    integer(i4), value :: nw
+    integer(i4) :: iw, ihe3, iatom, ic, dum_sup, dum_sdw
+    real(r8) :: atom(3, NATOM_MAX_DH3)
+    real(r8) :: wf0, wfmas, wfmen, dend1, dend2, sumd2
+    real(r8) :: orig1, orig2, orig3
+
+    iw = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+    if (iw > nw) return
+
+    do iatom = 1, d_natom_dh3
+      atom(1,iatom) = d_atom_soa_dh3(1, iatom, iw)
+      atom(2,iatom) = d_atom_soa_dh3(2, iatom, iw)
+      atom(3,iatom) = d_atom_soa_dh3(3, iatom, iw)
+    end do
+
+    ! wfhe3 en la posicion actual (sin perturbar)
+    call wavefhe3_inline_d(atom, wf0, dum_sup, dum_sdw)
+    dend1 = 2.0_r8 * DX_DH3 * wf0
+    dend2 = DX_DH3**2 * wf0
+
+    do ihe3 = 1, d_nhe3_dh3
+      iatom  = d_nhe4_dh3 + ihe3
+      orig1  = atom(1, iatom)
+      orig2  = atom(2, iatom)
+      orig3  = atom(3, iatom)
+      sumd2  = 0.0_r8
+
+      ! Derivada en x
+      atom(1,iatom) = orig1 + DX_DH3
+      call wavefhe3_inline_d(atom, wfmas, dum_sup, dum_sdw)
+      atom(1,iatom) = orig1 - DX_DH3
+      call wavefhe3_inline_d(atom, wfmen, dum_sup, dum_sdw)
+      atom(1,iatom) = orig1
+      d_d1wfhe3_soa(1, ihe3, iw) = (wfmas - wfmen) / dend1
+      sumd2 = sumd2 + (wfmas + wfmen - 2.0_r8*wf0)
+
+      ! Derivada en y
+      atom(2,iatom) = orig2 + DX_DH3
+      call wavefhe3_inline_d(atom, wfmas, dum_sup, dum_sdw)
+      atom(2,iatom) = orig2 - DX_DH3
+      call wavefhe3_inline_d(atom, wfmen, dum_sup, dum_sdw)
+      atom(2,iatom) = orig2
+      d_d1wfhe3_soa(2, ihe3, iw) = (wfmas - wfmen) / dend1
+      sumd2 = sumd2 + (wfmas + wfmen - 2.0_r8*wf0)
+
+      ! Derivada en z
+      atom(3,iatom) = orig3 + DX_DH3
+      call wavefhe3_inline_d(atom, wfmas, dum_sup, dum_sdw)
+      atom(3,iatom) = orig3 - DX_DH3
+      call wavefhe3_inline_d(atom, wfmen, dum_sup, dum_sdw)
+      atom(3,iatom) = orig3
+      d_d1wfhe3_soa(3, ihe3, iw) = (wfmas - wfmen) / dend1
+      sumd2 = sumd2 + (wfmas + wfmen - 2.0_r8*wf0)
+
+      d_d2wfhe3_soa(ihe3, iw) = sumd2 / dend2
+    end do
+  end subroutine derwavefhe3_kernel
+
+  !===========================================================================
+  subroutine derwavefhe3_gpu_run(nw)
+    integer(i4), intent(in) :: nw
+    integer(i4), parameter  :: NTHREADS = 64
+    integer(i4) :: nblocks
+    integer      :: istat
+    nblocks = (nw + NTHREADS - 1) / NTHREADS
+    call derwavefhe3_kernel<<<nblocks, NTHREADS>>>(nw)
+    istat = cudaDeviceSynchronize()
+  end subroutine derwavefhe3_gpu_run
+
+  !===========================================================================
+  ! SOA -> AOS (D2H)
+  ! d1wf_out(ic, ihe3, iw): gradiente He3 ihe3, componente ic, walker iw
+  ! d2wf_out(ihe3, iw):     laplaciano He3 ihe3, walker iw
+  !
+  ! Para recuperar el formato CPU:
+  !   d1wf(ihe3)%comp(ic) = d1wf_out(ic, ihe3, iw)
+  !   d2wf(ihe3)          = d2wf_out(ihe3, iw)
+  !===========================================================================
+  subroutine soa_to_aos_dh3(nw, nh3, d1wf_out, d2wf_out)
+    integer(i4), intent(in)  :: nw, nh3
+    real(r8),    intent(out) :: d1wf_out(3, nh3, nw)
+    real(r8),    intent(out) :: d2wf_out(nh3, nw)
+    d1wf_out = d_d1wfhe3_soa
+    d2wf_out = d_d2wfhe3_soa
+  end subroutine soa_to_aos_dh3
+
+  !===========================================================================
+  ! Wrapper completo
+  !===========================================================================
+  subroutine derwavefhe3_gpu(wsim, nw, nh3, na, d1wf_out, d2wf_out)
+    use mtipos, only: walker
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw, nh3, na
+    real(r8),    intent(out) :: d1wf_out(3, nh3, nw)
+    real(r8),    intent(out) :: d2wf_out(nh3, nw)
+    call aos_to_soa_dh3(wsim, nw, na)
+    call derwavefhe3_gpu_run(nw)
+    call soa_to_aos_dh3(nw, nh3, d1wf_out, d2wf_out)
+  end subroutine derwavefhe3_gpu
+
+end module mderwavefhe3_gpu
