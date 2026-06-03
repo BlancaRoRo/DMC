@@ -1,5 +1,5 @@
-FC=ifx
-#FC=gfortran
+#FC=ifx
+FC=gfortran
 FFLAGS=-O2
 F77FLAGS=-extend-source 132 -O2 
 LDFLAGS= -llapack -lblas

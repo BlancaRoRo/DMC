@@ -5,7 +5,7 @@
  4.00260             !masa helio 4                                                        
  3.01604             !masa helio 3                                                        
 20                   !numero de he4                                                       
- 0                   !numero de he3
+ 0                   !numero de he3                                                       
  2                   !numero de atomos en la impureza molecular                           
 H                    !atomo 1 de la impureza molecular                                    
  1.00782503210       !masa del atomo 1                                                    
@@ -28,20 +28,20 @@ heh2m.pot
 !#2: DATOS MONTE CARLO                                                                    
 !----------------------                                                                   
 0000000000000011      !semilla aleatoria                                                  
-  6                   !opcion  0=test der, 1=mcv, 2 optimiza, 3 optimiza correlated, 4=dmc, 6=dmc gpu
+  5                   !opcion  0=test der, 1=mcv, 2 optimiza, 3 optimiza correlated, 4=dmc, 6=dmc gpu
 .T.                   !.T. se minimiza la energia ||  .F. se minimiza la varianza         
   0.96                !delta pasos metropolis he4                                         
   1.00                !delta pasos metropolis he3                                         
   0.295               !delta pasos cm impureza                                            
  055.7                !delta angular rotaciones impureza en grados                        
- -623.0           !etrial
-  0.000100            !dtau
-    50               !bloques de equilibrio
-      1               !pasos de descorrelacion
-    50               !bloques de calculo
+ -631.8               !etrial                                                             
+  0.000100            !dtau                                                               
+     01               !bloques de equilibrio
+     10               !pasos de descorrelacion
+     10               !bloques de calculo
    1000               !pasos por bloque
-  20000               !numero de walkers
-   0010               !pasos para cambiar etrial en los bloques de equilibrio
+    200               !numero de walkers
+   0010               !pasos para cambiar etrial en los bloques de equilibrio             
 !----------------------                                                                   
 !#3: DATOS FUNCION DE ONDA                                                                
 !----------------------                                                                   
@@ -51,13 +51,13 @@ heh2m.pot
   3.139383    0.1000000       !b he4
   4.725025   -0.4000000       !nu he4 he4
   0.009428   -0.0007000       !alfa he4
-  3.000000    0.1000000       !b he3
-  4.500000   -0.4000000       !nu he3 he3
-  0.009000   -0.0007000       !alfa he3
-  1.000000    0.1000000       !b backflow he3;   eta(r)=bb/r**3
-  3.070000    0.1000000       !b mezclas
-  4.610000   -0.4000000       !nu mezclas
-  0.009200   -0.0007000       !alfa mezclas
+  0.000000    0.0000000       !b he3
+  1.000000    0.0000000       !nu he3 he3
+  1.000000    0.0000000       !alfa he3
+  0.000000    0.0000000       !b backflow he3;   eta(r)=bb/r**3
+  0.000000    0.0000000       !b mezclas
+  1.000000    0.0000000       !nu mezclas
+  0.000000    0.0000000       !alfa mezclas
 !                                                                                         
 ! X-he                                                                                    
 ! f(r,theta)=exp(u(r,theta))                                                              
@@ -97,11 +97,11 @@ heh2m.pot
   0.020823    0.0020000       !p5 he4 impureza
  0                   !lmax polinomios de Legendre impureza-he3                            
 !l=0
-  1.680309   -0.1200000       !b he3 impureza
-  9.763290    0.8000000       !nu he3 impureza
-  0.643208   -0.0500000       !alfa he3 impureza
-  0.129298    0.0300000       !p4 he3 impureza
- 13.568705   -0.7000000       !p5 he3 impureza
+  0.000000    0.0000000       !b he3 impureza
+  0.000000    0.0000000       !nu he3 impureza
+  1.000000    0.0000000       !alfa he3 impureza
+  1.000000    0.0000000       !p4 he3 impureza
+  0.000000    0.0000000       !p5 he3 impureza
 !                                                                                         
 !----------------------                                                                   
 !#4 DATOS CALCULO PARALELO (solo si se usa PVM)                                           

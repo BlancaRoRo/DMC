@@ -288,8 +288,10 @@ contains
      enddo
 !    write(*,*) ujas,exp(ujas)
 !    write(*,*)
+     w1%lw%log_wfx=ujas
      w1%lw%wfx=exp(ujas)
    else
+     w1%lw%log_wfx=0.0_r8
      w1%lw%wfx=1.0_r8
    endif
 
@@ -340,17 +342,12 @@ contains
        uold=uold+uhe3x(rij,cth)
      enddo
      delu=unew-uold
-     delu=min(delu,umax)
+     ! log_wfx se actualiza con delu exacto (sin clamping) → nunca underflow
+     w1%lw%log_wfx=w1%lw%log_wfx+delu
+     w1%lw%wfx=exp(w1%lw%log_wfx)   ! puede underflowear a 0; OK, se usa log_wfx
+     delu=min(delu,umax)              ! delu clampado solo para cimp (compat. con MCV)
      delu=max(delu,umin)
      cimp=exp(delu)
-     ! Si wfx_old=0 (underflow porque H2 estaba lejos), la actualización
-     ! multiplicativa w1%lw%wfx*cimp=0*cimp=0 es incorrecta aunque H2
-     ! haya entrado al cluster. Recomputamos desde cero en ese caso.
-     if (w1%lw%wfx == 0.0_r8) then
-       call wavefx(w1)
-     else
-       w1%lw%wfx=w1%lw%wfx*cimp
-     end if
      return
    endif
 
@@ -365,10 +362,11 @@ contains
      if(impurmol) cth=dot_product(rtemp%comp,w1%sprop(3)%comp)/(dnor*rij)
      uold=uhe4x(rij,cth)
      delu=unew-uold
+     w1%lw%log_wfx=w1%lw%log_wfx+delu
+     w1%lw%wfx=exp(w1%lw%log_wfx)
      delu=min(delu,umax)
      delu=max(delu,umin)
      cimp=exp(delu)
-     w1%lw%wfx=w1%lw%wfx*cimp
    elseif(iatom.le.ngatom) then
      jatom=iatom
      rtemp=w1%atom(jatom)-w1%atom(natom)
@@ -380,11 +378,11 @@ contains
      if(impurmol) cth=dot_product(rtemp%comp,w1%sprop(3)%comp)/(dnor*rij)
      uold=uhe3x(rij,cth)
      delu=unew-uold
+     w1%lw%log_wfx=w1%lw%log_wfx+delu
+     w1%lw%wfx=exp(w1%lw%log_wfx)
      delu=min(delu,umax)
      delu=max(delu,umin)
      cimp=exp(delu)
-     w1%lw%wfx=w1%lw%wfx*cimp
-!    return
    endif
 
  end subroutine iwavefx
@@ -496,12 +494,13 @@ contains
      uold=uold+uhe3x(rij,cth)
    enddo
    delu=unew-uold
+   w1%lw%log_wfx=w1%lw%log_wfx+delu
+   w1%lw%wfx=exp(w1%lw%log_wfx)
    delu=min(delu,umax)
    delu=max(delu,umin)
    delwf=exp(delu)
 
    crot=delwf
-   w1%lw%wfx=w1%lw%wfx*delwf
 
  end subroutine ewavefx
 

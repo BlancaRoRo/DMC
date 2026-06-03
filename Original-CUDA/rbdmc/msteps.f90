@@ -137,23 +137,19 @@ contains
   real(kind=r8) :: rn3(3),rn
   real(kind=r8) :: cowf,prob
   real(kind=r8) :: phi
-  real(kind=r8) :: wfxo
+  real(kind=r8) :: log_wfxo, dlog
   integer (kind=i4) :: ipasodc
   integer (kind=i4) :: iatom,ic
+  logical :: acepta
 
 
    do ipasodc=1,npasosdc
      do iatom=1,ncmtras
        rtemp=w1%atom(iatom)
-       ltemp=w1%lw
+       ltemp=w1%lw          ! guarda log_wfx antiguo en ltemp%log_wfx
        call randv3(rn3)
        w1%atom(iatom)%comp(:)=rtemp%comp(:)+w1%delta(iatom)*(rn3(:)-0.50_r8)
-       call iwavef(iatom,rtemp,w1,cowf)
-!      prob=(w1%lw%wf/ltemp%wf)**2
-       prob=cowf**2
-       ! wf_old=0 y wf_new=0: prob=NaN → siempre rechazado → impureza congelada.
-       ! Tratamos NaN como prob=1 (paseo aleatorio) para que H2 explore el espacio.
-       if (prob /= prob) prob = 1.0_r8
+       call iwavef(iatom,rtemp,w1,cowf)  ! actualiza w1%lw%log_wfx y devuelve cowf
        pmcvtot=pmcvtot+1.0_r8
        if(iatom.le.nhe4) then
          pmcvtothe4=pmcvtothe4+1.0_r8
@@ -162,7 +158,18 @@ contains
        else
          pmcvtotx=pmcvtotx+1.0_r8
        endif
-       if(prob.gt.rn1()) then
+       ! Para el CM de la impureza (iatom==natom): aceptación en espacio log
+       ! usando log_wfx (sin underflow ni clamping). Para los demás átomos
+       ! (He4/He3), cowf=che4×cmix×cimp ya contiene la ratio completa.
+       if (impureza .and. iatom == natom) then
+         dlog = w1%lw%log_wfx - ltemp%log_wfx
+         rn   = rn1()
+         acepta = (rn <= 0.0_r8 .or. 2.0_r8*dlog >= log(rn))
+       else
+         prob   = cowf**2
+         acepta = (prob > rn1())
+       end if
+       if(acepta) then
          pmcvacep=pmcvacep+1.0_r8
          if(iatom.le.nhe4) then
            pmcvacephe4=pmcvacephe4+1.0_r8
@@ -173,29 +180,28 @@ contains
          endif
        else
          w1%atom(iatom)=rtemp
-         w1%lw=ltemp
+         w1%lw=ltemp        ! restaura log_wfx antiguo
        endif
      enddo
      if(rotamol) then
        do ic=1,2
-         wfxo=w1%lw%wfx
+         log_wfxo=w1%lw%log_wfx
          etemp(:)=w1%sprop(:)
          phi=w1%dangle*(rn1()-0.50_r8)
          call rota(ic,phi,w1%sprop)
-         call ewavefx(etemp(3),w1,cowf)
-!        prob=(w1%lw%wfx/wfxo)**2
-         prob=cowf**2
-         if (prob /= prob) prob = 1.0_r8
+         call ewavefx(etemp(3),w1,cowf)  ! actualiza w1%lw%log_wfx
+         dlog = w1%lw%log_wfx - log_wfxo
+         rn   = rn1()
+         acepta = (rn <= 0.0_r8 .or. 2.0_r8*dlog >= log(rn))
          pmcvtot=pmcvtot+1.0_r8
          pmcvtotrot=pmcvtotrot+1.0_r8
-         if(prob.gt.rn1()) then
+         if(acepta) then
            pmcvacep=pmcvacep+1.0_r8
            pmcvaceprot=pmcvaceprot+1.0_r8
-!          w1%lw%wf=w1%lw%wf*(w1%lw%wfx/wfxo)
-           w1%lw%wf=w1%lw%wf*cowf
          else
            w1%sprop(:)=etemp(:)
-           w1%lw%wfx=wfxo
+           w1%lw%log_wfx=log_wfxo
+           w1%lw%wfx=exp(log_wfxo)
          endif
        enddo
      endif

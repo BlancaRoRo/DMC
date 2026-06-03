@@ -10,20 +10,20 @@ contains
     integer(kind=i8), intent (inout) :: irn
     real(kind=r8), intent (out) :: rn
 
-    integer(kind=i8),  parameter :: mask24 = ishft(1_i8,24)-1
-    integer(kind=i8),  parameter :: mask48 = ishft(1_i8,48_i8)-1_i8
-    real(kind=r8),  parameter :: twom48=2.0_r8**(-48)
-    integer(kind=i8),  parameter :: mult1 = 44485709377909_i8
-    integer(kind=i8),  parameter :: m11 = iand(mult1,mask24)
-    integer(kind=i8),  parameter :: m12 = iand(ishft(mult1,-24),mask24)
-    integer(kind=i8),  parameter :: iadd1 = 96309754297_i8
+    integer(kind=i8),  parameter :: mult1  = 44485709377909_i8
+    integer(kind=i8),  parameter :: iadd1  = 96309754297_i8
+    real(kind=r8),     parameter :: twom48 = 2.0_r8**(-48)
+    integer(kind=i8) :: mask24, mask48, m11, m12, is1, is2
 
-    integer(kind=i8) :: is1,is2
+     mask24 = ishft(1_i8, 24_i8) - 1_i8
+     mask48 = ishft(1_i8, 48_i8) - 1_i8
+     m11    = iand(mult1, mask24)
+     m12    = iand(ishft(mult1, -24_i8), mask24)
 
-     is2=iand(ishft(irn,-24),mask24)
-     is1=iand(irn,mask24)
-     irn=iand(ishft(iand(is1*m12+is2*m11,mask24),24)+is1*m11+iadd1,mask48)
-     rn=ior(irn,1_i8)*twom48
+     is2 = iand(ishft(irn, -24_i8), mask24)
+     is1 = iand(irn, mask24)
+     irn = iand(ishft(iand(is1*m12+is2*m11, mask24), 24_i8)+is1*m11+iadd1, mask48)
+     rn  = ior(irn, 1_i8) * twom48
 
    end subroutine rand1
 

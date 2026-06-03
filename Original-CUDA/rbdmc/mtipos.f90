@@ -14,6 +14,7 @@ module mtipos
  type :: vloc
    real(kind=r8) :: wf
    real(kind=r8) :: wfhe4,wfhe3,wfm,wfx
+   real(kind=r8) :: log_wfx   ! log(wfx) = ujas; nunca hace underflow
    real(kind=r8) :: kin,pot,ene,erot,eimp
    integer(kind=i4) :: signoup,signodw
  end type
@@ -116,12 +117,13 @@ module mtipos
     type (vloc), intent (out) :: l1
     type (vloc), intent (in) :: l2
 
-      l1%wf   =l2%wf
-      l1%wfhe4=l2%wfhe4
-      l1%wfhe3=l2%wfhe3
-      l1%wfm  =l2%wfm
-      l1%wfx  =l2%wfx
-      l1%kin  =l2%kin
+      l1%wf     =l2%wf
+      l1%wfhe4  =l2%wfhe4
+      l1%wfhe3  =l2%wfhe3
+      l1%wfm    =l2%wfm
+      l1%wfx    =l2%wfx
+      l1%log_wfx=l2%log_wfx
+      l1%kin    =l2%kin
       l1%pot  =l2%pot
       l1%ene  =l2%ene
       l1%erot  =l2%erot

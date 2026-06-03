@@ -28,7 +28,7 @@ heh2m.pot
 !#2: DATOS MONTE CARLO                                                                    
 !----------------------                                                                   
 0000000000000011      !semilla aleatoria                                                  
-  6                   !opcion  0=test der, 1=mcv, 2 optimiza, 3 optimiza correlated, 4=dmc
+  5                   !opcion  0=test der, 1=mcv, 2 optimiza, 3 optimiza correlated, 4=dmc
 .T.                   !.T. se minimiza la energia ||  .F. se minimiza la varianza         
   0.96                !delta pasos metropolis he4                                         
   1.00                !delta pasos metropolis he3                                         
@@ -37,10 +37,10 @@ heh2m.pot
  -631.8               !etrial                                                             
   0.000100            !dtau                                                               
      01               !bloques de equilibrio                                              
-      5               !pasos de descorrelacion                                            
-      5               !bloques de calculo                                                 
-      5               !pasos por bloque                                                   
-    100               !numero de walkers                                                  
+     10               !pasos de descorrelacion                                            
+     10               !bloques de calculo                                                 
+   1000               !pasos por bloque                                                   
+    200               !numero de walkers                                                  
    0010               !pasos para cambiar etrial en los bloques de equilibrio             
 !----------------------                                                                   
 !#3: DATOS FUNCION DE ONDA                                                                

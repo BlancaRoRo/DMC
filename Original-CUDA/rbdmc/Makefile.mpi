@@ -1,9 +1,10 @@
 #FC=mpiifx
 FFLAGS=-O2
-FC=mpif90
+#FC=mpif90
+FC=mpif90.mpich
 #F77FLAGS= -extend-source 132 -O2
 #LDFLAGS= -L/usr/lib64 -llapack -lblas
-MPILIBS= -lmpi
+MPILIBS=
 LDFLAGS= -llapack -lblas
 #LDFLAGS= -L/usr/lib64 -llapack -lblas
 

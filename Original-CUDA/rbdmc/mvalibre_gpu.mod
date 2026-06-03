@@ -1,6 +1,6 @@
 V34 :0x24 mvalibre_gpu
 16 mvalibre_gpu.cuf S624 0
-05/30/2026  17:56:52
+06/03/2026  17:46:59
 use iso_c_binding public 0 indirect
 use nvf_acc_common public 0 indirect
 use cudafor_lib_la public 0 indirect
@@ -70,14 +70,14 @@ D 3320 23 10 2 9052 9051 0 1 0 0 1
  9045 9048 9050 9045 9048 9046
 D 3323 23 7 1 0 233 0 0 0 0 0
  0 233 0 11 233 0
-D 3347 26 14539 1184 14538 7
+D 3347 26 14540 1192 14539 7
 D 3395 22 7
 D 3397 22 7
 D 3399 22 7
 D 3401 22 7
 D 3403 22 7
 D 3405 22 7
-D 3410 26 14539 1184 14538 7
+D 3410 26 14540 1192 14539 7
 D 3416 23 3410 1 11 9107 0 0 1 0 0
  0 9106 11 11 9107 9107
 S 624 24 0 0 0 6 1 0 5012 10005 0 A 0 0 0 0 B 0 15 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 15 0 0 0 0 0 0 mvalibre_gpu
@@ -219,53 +219,53 @@ S 14513 23 5 0 0 0 14515 624 103850 0 0 A 0 0 0 0 B 0 105 0 0 0 0 0 0 0 0 0 0 0 
 S 14514 1 3 1 0 6 1 14513 103823 4 3000 A 0 0 0 0 B 0 105 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 nw
 S 14515 14 5 0 0 0 1 14513 103850 0 400000 A 0 0 0 0 B 0 105 0 0 0 0 0 5162 1 0 0 0 0 0 0 0 0 0 0 0 0 105 0 624 0 0 0 0 valibre_gpu_run valibre_gpu_run 
 F 14515 1 14514
-R 14538 25 22 mtipos walker
-R 14539 5 23 mtipos lw walker
-R 14540 5 24 mtipos atom walker
-R 14542 5 26 mtipos atom$sd walker
-R 14543 5 27 mtipos atom$p walker
-R 14544 5 28 mtipos atom$o walker
-R 14546 5 30 mtipos dwf walker
-R 14548 5 32 mtipos dwf$sd walker
-R 14549 5 33 mtipos dwf$p walker
-R 14550 5 34 mtipos dwf$o walker
-R 14552 5 36 mtipos delta walker
-R 14554 5 38 mtipos delta$sd walker
-R 14555 5 39 mtipos delta$p walker
-R 14556 5 40 mtipos delta$o walker
-R 14558 5 42 mtipos hb2m walker
-R 14560 5 44 mtipos hb2m$sd walker
-R 14561 5 45 mtipos hb2m$p walker
-R 14562 5 46 mtipos hb2m$o walker
-R 14564 5 48 mtipos sigma1 walker
-R 14566 5 50 mtipos sigma1$sd walker
-R 14567 5 51 mtipos sigma1$p walker
-R 14568 5 52 mtipos sigma1$o walker
-R 14570 5 54 mtipos sigma2 walker
-R 14572 5 56 mtipos sigma2$sd walker
-R 14573 5 57 mtipos sigma2$p walker
-R 14574 5 58 mtipos sigma2$o walker
-R 14576 5 60 mtipos sprop walker
-R 14577 5 61 mtipos dangle walker
-R 14578 5 62 mtipos b walker
-R 14579 5 63 mtipos sig1rot walker
-R 14580 5 64 mtipos sig2rot walker
-R 14581 5 65 mtipos sig1hrot walker
-R 14582 5 66 mtipos sig2hrot walker
-R 14583 5 67 mtipos dphi walker
-R 14584 5 68 mtipos eje0 walker
-R 14585 5 69 mtipos pos0 walker
-R 14588 26 72 mtipos =
-R 14593 26 77 mtipos +
-R 14595 26 79 mtipos -
-R 14597 26 81 mtipos *
-S 14651 23 5 0 0 0 14655 624 104515 0 0 A 0 0 0 0 B 0 117 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 soa_to_aos_vl
-S 14652 7 3 3 0 3416 1 14651 104529 800204 3000 A 0 0 0 0 B 0 117 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 wsim
-S 14653 6 3 1 0 6 1 14651 103823 800004 3000 A 0 0 0 0 B 0 117 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 nw
-S 14654 6 3 1 0 6 1 14651 103826 800004 3000 A 0 0 0 0 B 0 117 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 na
-S 14655 14 5 0 0 0 1 14651 104515 200 400000 A 0 0 0 0 B 0 117 0 0 0 0 0 5196 3 0 0 0 0 0 0 0 0 0 0 0 0 117 0 624 0 0 0 0 soa_to_aos_vl soa_to_aos_vl 
-F 14655 3 14652 14653 14654
-S 14656 6 1 0 0 7 1 14651 104534 40800006 3000 A 0 0 0 0 B 0 119 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 z_e_9106
+R 14539 25 23 mtipos walker
+R 14540 5 24 mtipos lw walker
+R 14541 5 25 mtipos atom walker
+R 14543 5 27 mtipos atom$sd walker
+R 14544 5 28 mtipos atom$p walker
+R 14545 5 29 mtipos atom$o walker
+R 14547 5 31 mtipos dwf walker
+R 14549 5 33 mtipos dwf$sd walker
+R 14550 5 34 mtipos dwf$p walker
+R 14551 5 35 mtipos dwf$o walker
+R 14553 5 37 mtipos delta walker
+R 14555 5 39 mtipos delta$sd walker
+R 14556 5 40 mtipos delta$p walker
+R 14557 5 41 mtipos delta$o walker
+R 14559 5 43 mtipos hb2m walker
+R 14561 5 45 mtipos hb2m$sd walker
+R 14562 5 46 mtipos hb2m$p walker
+R 14563 5 47 mtipos hb2m$o walker
+R 14565 5 49 mtipos sigma1 walker
+R 14567 5 51 mtipos sigma1$sd walker
+R 14568 5 52 mtipos sigma1$p walker
+R 14569 5 53 mtipos sigma1$o walker
+R 14571 5 55 mtipos sigma2 walker
+R 14573 5 57 mtipos sigma2$sd walker
+R 14574 5 58 mtipos sigma2$p walker
+R 14575 5 59 mtipos sigma2$o walker
+R 14577 5 61 mtipos sprop walker
+R 14578 5 62 mtipos dangle walker
+R 14579 5 63 mtipos b walker
+R 14580 5 64 mtipos sig1rot walker
+R 14581 5 65 mtipos sig2rot walker
+R 14582 5 66 mtipos sig1hrot walker
+R 14583 5 67 mtipos sig2hrot walker
+R 14584 5 68 mtipos dphi walker
+R 14585 5 69 mtipos eje0 walker
+R 14586 5 70 mtipos pos0 walker
+R 14589 26 73 mtipos =
+R 14594 26 78 mtipos +
+R 14596 26 80 mtipos -
+R 14598 26 82 mtipos *
+S 14652 23 5 0 0 0 14656 624 104523 0 0 A 0 0 0 0 B 0 117 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 soa_to_aos_vl
+S 14653 7 3 3 0 3416 1 14652 104537 800204 3000 A 0 0 0 0 B 0 117 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 wsim
+S 14654 6 3 1 0 6 1 14652 103823 800004 3000 A 0 0 0 0 B 0 117 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 nw
+S 14655 6 3 1 0 6 1 14652 103826 800004 3000 A 0 0 0 0 B 0 117 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 na
+S 14656 14 5 0 0 0 1 14652 104523 200 400000 A 0 0 0 0 B 0 117 0 0 0 0 0 5196 3 0 0 0 0 0 0 0 0 0 0 0 0 117 0 624 0 0 0 0 soa_to_aos_vl soa_to_aos_vl 
+F 14656 3 14653 14654 14655
+S 14657 6 1 0 0 7 1 14652 104542 40800006 3000 A 0 0 0 0 B 0 119 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 z_e_9106
 A 13 2 0 0 0 6 628 0 0 0 13 0 0 0 0 0 0 0 0 0 0 0
 A 17 2 0 0 0 6 630 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0
 A 68 1 0 0 0 58 683 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
@@ -491,9 +491,9 @@ A 9051 10 0 0 9050 7 9040 13 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 X 1 191
 A 9052 10 0 0 9051 7 9040 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 X 1 181
-A 9105 1 0 0 5394 6 14653 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+A 9105 1 0 0 5397 6 14654 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 A 9106 7 0 0 7586 7 9105 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-A 9107 1 0 0 8444 7 14656 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+A 9107 1 0 0 8922 7 14657 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 Z
 J 133 1 1
 V 68 58 7 0
@@ -507,17 +507,17 @@ J 36 1 1
 V 141 97 7 0
 S 0 97 0 0 0
 A 0 76 0 0 1 68 0
-T 14538 3347 0 0 0 0
-A 14543 7 3395 0 1 2 1
-A 14542 7 0 241 1 10 1
-A 14549 7 3397 0 1 2 1
-A 14548 7 0 241 1 10 1
-A 14555 7 3399 0 1 2 1
-A 14554 7 0 241 1 10 1
-A 14561 7 3401 0 1 2 1
-A 14560 7 0 241 1 10 1
-A 14567 7 3403 0 1 2 1
-A 14566 7 0 241 1 10 1
-A 14573 7 3405 0 1 2 1
-A 14572 7 0 241 1 10 0
+T 14539 3347 0 0 0 0
+A 14544 7 3395 0 1 2 1
+A 14543 7 0 241 1 10 1
+A 14550 7 3397 0 1 2 1
+A 14549 7 0 241 1 10 1
+A 14556 7 3399 0 1 2 1
+A 14555 7 0 241 1 10 1
+A 14562 7 3401 0 1 2 1
+A 14561 7 0 241 1 10 1
+A 14568 7 3403 0 1 2 1
+A 14567 7 0 241 1 10 1
+A 14574 7 3405 0 1 2 1
+A 14573 7 0 241 1 10 0
 Z

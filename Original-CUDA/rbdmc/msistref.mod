@@ -1,6 +1,6 @@
 V34 :0x24 msistref
 12 msistref.f90 S624 0
-05/30/2026  17:56:13
+06/03/2026  17:46:23
 use mparametros public 0 direct
 use mtipos public 0 direct
 enduse
@@ -12,7 +12,7 @@ D 64 23 6 1 10 74 0 0 0 0 0
  10 73 11 10 73 74
 D 67 23 6 1 11 74 0 0 0 0 0
  0 74 11 11 74 74
-D 173 26 803 1184 802 7
+D 173 26 804 1192 803 7
 D 221 22 7
 D 223 22 7
 D 225 22 7
@@ -35,60 +35,60 @@ R 677 7 20 mparametros nndw$ac
 R 689 6 32 mparametros namol
 R 694 6 37 mparametros ngatom
 S 776 3 0 0 0 7 1 1 0 0 0 A 0 0 0 0 B 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 7
-R 802 25 22 mtipos walker
-R 803 5 23 mtipos lw walker
-R 804 5 24 mtipos atom walker
-R 806 5 26 mtipos atom$sd walker
-R 807 5 27 mtipos atom$p walker
-R 808 5 28 mtipos atom$o walker
-R 810 5 30 mtipos dwf walker
-R 812 5 32 mtipos dwf$sd walker
-R 813 5 33 mtipos dwf$p walker
-R 814 5 34 mtipos dwf$o walker
-R 816 5 36 mtipos delta walker
-R 818 5 38 mtipos delta$sd walker
-R 819 5 39 mtipos delta$p walker
-R 820 5 40 mtipos delta$o walker
-R 822 5 42 mtipos hb2m walker
-R 824 5 44 mtipos hb2m$sd walker
-R 825 5 45 mtipos hb2m$p walker
-R 826 5 46 mtipos hb2m$o walker
-R 828 5 48 mtipos sigma1 walker
-R 830 5 50 mtipos sigma1$sd walker
-R 831 5 51 mtipos sigma1$p walker
-R 832 5 52 mtipos sigma1$o walker
-R 834 5 54 mtipos sigma2 walker
-R 836 5 56 mtipos sigma2$sd walker
-R 837 5 57 mtipos sigma2$p walker
-R 838 5 58 mtipos sigma2$o walker
-R 840 5 60 mtipos sprop walker
-R 841 5 61 mtipos dangle walker
-R 842 5 62 mtipos b walker
-R 843 5 63 mtipos sig1rot walker
-R 844 5 64 mtipos sig2rot walker
-R 845 5 65 mtipos sig1hrot walker
-R 846 5 66 mtipos sig2hrot walker
-R 847 5 67 mtipos dphi walker
-R 848 5 68 mtipos eje0 walker
-R 849 5 69 mtipos pos0 walker
-R 852 26 72 mtipos =
-R 857 26 77 mtipos +
-R 859 26 79 mtipos -
-R 861 26 81 mtipos *
-S 916 16 0 0 0 6 1 624 5040 14 400000 A 0 0 0 0 B 0 0 0 0 0 0 0 0 4 13 0 0 0 0 0 0 0 0 0 0 0 0 0 624 0 0 0 0 i4
-S 918 16 0 0 0 6 1 624 5046 14 400000 A 0 0 0 0 B 0 0 0 0 0 0 0 0 8 15 0 0 0 0 0 0 0 0 0 0 0 0 0 624 0 0 0 0 r8
-S 920 23 5 0 0 0 923 624 6556 0 0 A 0 0 0 0 B 0 13 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ccuerpo
-S 921 1 3 1 0 173 1 920 6514 4 3000 A 0 0 0 0 B 0 13 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 w1
-S 922 7 3 2 0 236 1 920 6564 800204 3000 A 0 0 0 0 B 0 13 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 rhesal
-S 923 14 5 0 0 0 1 920 6556 200 400000 A 0 0 0 0 B 0 13 0 0 0 0 0 34 2 0 0 0 0 0 0 0 0 0 0 0 0 13 0 624 0 0 0 0 ccuerpo ccuerpo 
-F 923 2 921 922
-S 924 6 1 0 0 7 1 920 6571 40800006 3000 A 0 0 0 0 B 0 15 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 z_e_173
-S 925 23 5 0 0 0 928 624 6579 0 0 A 0 0 0 0 B 0 34 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 cespacio
-S 926 1 3 1 0 173 1 925 6514 4 3000 A 0 0 0 0 B 0 34 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 w1
-S 927 7 3 2 0 239 1 925 6588 800204 3000 A 0 0 0 0 B 0 34 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ratsal
-S 928 14 5 0 0 0 1 925 6579 200 400000 A 0 0 0 0 B 0 34 0 0 0 0 0 37 2 0 0 0 0 0 0 0 0 0 0 0 0 34 0 624 0 0 0 0 cespacio cespacio 
-F 928 2 926 927
-S 929 6 1 0 0 7 1 925 6595 40800006 3000 A 0 0 0 0 B 0 36 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 z_e_177
+R 803 25 23 mtipos walker
+R 804 5 24 mtipos lw walker
+R 805 5 25 mtipos atom walker
+R 807 5 27 mtipos atom$sd walker
+R 808 5 28 mtipos atom$p walker
+R 809 5 29 mtipos atom$o walker
+R 811 5 31 mtipos dwf walker
+R 813 5 33 mtipos dwf$sd walker
+R 814 5 34 mtipos dwf$p walker
+R 815 5 35 mtipos dwf$o walker
+R 817 5 37 mtipos delta walker
+R 819 5 39 mtipos delta$sd walker
+R 820 5 40 mtipos delta$p walker
+R 821 5 41 mtipos delta$o walker
+R 823 5 43 mtipos hb2m walker
+R 825 5 45 mtipos hb2m$sd walker
+R 826 5 46 mtipos hb2m$p walker
+R 827 5 47 mtipos hb2m$o walker
+R 829 5 49 mtipos sigma1 walker
+R 831 5 51 mtipos sigma1$sd walker
+R 832 5 52 mtipos sigma1$p walker
+R 833 5 53 mtipos sigma1$o walker
+R 835 5 55 mtipos sigma2 walker
+R 837 5 57 mtipos sigma2$sd walker
+R 838 5 58 mtipos sigma2$p walker
+R 839 5 59 mtipos sigma2$o walker
+R 841 5 61 mtipos sprop walker
+R 842 5 62 mtipos dangle walker
+R 843 5 63 mtipos b walker
+R 844 5 64 mtipos sig1rot walker
+R 845 5 65 mtipos sig2rot walker
+R 846 5 66 mtipos sig1hrot walker
+R 847 5 67 mtipos sig2hrot walker
+R 848 5 68 mtipos dphi walker
+R 849 5 69 mtipos eje0 walker
+R 850 5 70 mtipos pos0 walker
+R 853 26 73 mtipos =
+R 858 26 78 mtipos +
+R 860 26 80 mtipos -
+R 862 26 82 mtipos *
+S 917 16 0 0 0 6 1 624 5040 14 400000 A 0 0 0 0 B 0 0 0 0 0 0 0 0 4 13 0 0 0 0 0 0 0 0 0 0 0 0 0 624 0 0 0 0 i4
+S 919 16 0 0 0 6 1 624 5046 14 400000 A 0 0 0 0 B 0 0 0 0 0 0 0 0 8 15 0 0 0 0 0 0 0 0 0 0 0 0 0 624 0 0 0 0 r8
+S 921 23 5 0 0 0 924 624 6564 0 0 A 0 0 0 0 B 0 13 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ccuerpo
+S 922 1 3 1 0 173 1 921 6522 4 3000 A 0 0 0 0 B 0 13 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 w1
+S 923 7 3 2 0 236 1 921 6572 800204 3000 A 0 0 0 0 B 0 13 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 rhesal
+S 924 14 5 0 0 0 1 921 6564 200 400000 A 0 0 0 0 B 0 13 0 0 0 0 0 34 2 0 0 0 0 0 0 0 0 0 0 0 0 13 0 624 0 0 0 0 ccuerpo ccuerpo 
+F 924 2 922 923
+S 925 6 1 0 0 7 1 921 6579 40800006 3000 A 0 0 0 0 B 0 15 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 z_e_173
+S 926 23 5 0 0 0 929 624 6587 0 0 A 0 0 0 0 B 0 34 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 cespacio
+S 927 1 3 1 0 173 1 926 6522 4 3000 A 0 0 0 0 B 0 34 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 w1
+S 928 7 3 2 0 239 1 926 6596 800204 3000 A 0 0 0 0 B 0 34 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ratsal
+S 929 14 5 0 0 0 1 926 6587 200 400000 A 0 0 0 0 B 0 34 0 0 0 0 0 37 2 0 0 0 0 0 0 0 0 0 0 0 0 34 0 624 0 0 0 0 cespacio cespacio 
+F 929 2 927 928
+S 930 6 1 0 0 7 1 926 6603 40800006 3000 A 0 0 0 0 B 0 36 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 z_e_177
 A 13 2 0 0 0 6 627 0 0 0 13 0 0 0 0 0 0 0 0 0 0 0
 A 15 2 0 0 0 6 628 0 0 0 15 0 0 0 0 0 0 0 0 0 0 0
 A 43 2 0 0 0 6 629 0 0 0 43 0 0 0 0 0 0 0 0 0 0 0
@@ -101,11 +101,11 @@ A 110 2 0 0 0 7 776 0 0 0 110 0 0 0 0 0 0 0 0 0 0 0
 A 171 1 0 0 0 6 694 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 A 172 4 0 0 0 6 171 0 44 0 0 0 0 3 0 0 0 0 0 0 0 0
 A 173 7 0 0 0 7 172 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-A 174 1 0 0 0 7 924 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+A 174 1 0 0 0 7 925 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 A 175 1 0 0 0 6 689 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 A 176 4 0 0 0 6 175 0 44 0 0 0 0 3 0 0 0 0 0 0 0 0
 A 177 7 0 0 0 7 176 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-A 178 1 0 0 0 7 929 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+A 178 1 0 0 0 7 930 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 Z
 J 24 1 1
 V 94 58 7 0
@@ -131,17 +131,17 @@ A 0 6 0 0 1 3 1
 A 0 6 0 0 1 43 1
 A 0 6 0 0 1 44 1
 A 0 6 0 0 1 13 0
-T 802 173 0 0 0 0
-A 807 7 221 0 1 2 1
-A 806 7 0 110 1 10 1
-A 813 7 223 0 1 2 1
-A 812 7 0 110 1 10 1
-A 819 7 225 0 1 2 1
-A 818 7 0 110 1 10 1
-A 825 7 227 0 1 2 1
-A 824 7 0 110 1 10 1
-A 831 7 229 0 1 2 1
-A 830 7 0 110 1 10 1
-A 837 7 231 0 1 2 1
-A 836 7 0 110 1 10 0
+T 803 173 0 0 0 0
+A 808 7 221 0 1 2 1
+A 807 7 0 110 1 10 1
+A 814 7 223 0 1 2 1
+A 813 7 0 110 1 10 1
+A 820 7 225 0 1 2 1
+A 819 7 0 110 1 10 1
+A 826 7 227 0 1 2 1
+A 825 7 0 110 1 10 1
+A 832 7 229 0 1 2 1
+A 831 7 0 110 1 10 1
+A 838 7 231 0 1 2 1
+A 837 7 0 110 1 10 0
 Z
