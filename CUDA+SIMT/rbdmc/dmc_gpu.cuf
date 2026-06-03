@@ -5,10 +5,12 @@
 ! Implementa la misma logica que dmc2() de msteps.f90 y todas las funciones
 ! que llama: hpsi, derananum, wavef*, derwavef*, vpot, rota, etc.
 !
-! LIMITACIONES:
-!   - vatomol_d solo acepta opot=0 (caso sin impureza molecular).
-!     Para opot=1,2,3 hay que portar pw_vheocs/hh_vheocs/hecokp2d.
-!   - potenbh (opot=4) no esta implementado.
+! IMPLEMENTADO:
+!   - opot=4 (potenbh BH He-H2): ENERGY1 (LM2M2 He-He) + ENERGY2 (rep+disp He-H2)
+!     + ENERGY3 (induccion He-H2), calculado en marco espacial (frame-independent).
+!   - opot=0 (Aziz atomica): azizgen_d.
+! PENDIENTE:
+!   - opot=1,2,3 (vatomol molecular): pw_vheocs/hh_vheocs/hecokp2d.
 !
 module dmc_gpu
   use cudafor
@@ -72,15 +74,19 @@ contains
     real(r8), intent(inout) :: ejes(3, 3)
     real(r8) :: c, s, t
     integer(4) :: j1, k1, ic
+    real(r8) :: v_j, v_k ! Variables temporales para los componentes originales
 
     j1 = mod(i1, 3) + 1
     k1 = mod(j1, 3) + 1
     c  = cos(phi)
     s  = sin(phi)
+
     do ic = 1, 3
-      t            =  c * ejes(ic, j1) + s * ejes(ic, k1)
-      ejes(ic, k1) = -s * ejes(ic, j1) + c * ejes(ic, k1)
-      ejes(ic, j1) = t
+      v_j = ejes(ic, j1)
+      v_k = ejes(ic, k1)
+      
+      ejes(ic, j1) =  c * v_j + s * v_k
+      ejes(ic, k1) = -s * v_j + c * v_k
     enddo
   end subroutine rota_d
 
@@ -92,11 +98,19 @@ contains
     real(r8), value   :: x
     real(r8), intent(out) :: pl(0:LMAX_GPU)
     integer(4) :: il
+    integer(4) :: l_eff
+
+    if (l > LMAX_GPU) then
+       l_eff = LMAX_GPU 
+    else
+       l_eff = l
+    endif
 
     pl(0) = 1.0_r8
-    if (l < 1) return
+    if (l_eff < 1) return
     pl(1) = x
-    do il = 1, l - 1
+    
+    do il = 1, l_eff - 1
       pl(il+1) = ((2.0_r8*il + 1.0_r8)*x*pl(il) - il*pl(il-1)) / real(il+1, r8)
     enddo
   end subroutine calpleg_d
@@ -106,14 +120,18 @@ contains
     real(r8), value   :: x
     real(r8), intent(out) :: pl(0:LMAX_GPU), d1pl(0:LMAX_GPU), d2pl(0:LMAX_GPU)
     integer(4) :: il
+    real(r8) :: twolp1, invl
 
     pl(0)=1.0_r8; d1pl(0)=0.0_r8; d2pl(0)=0.0_r8
     if (l < 1) return
     pl(1)=x; d1pl(1)=1.0_r8; d2pl(1)=0.0_r8
     do il = 1, l-1
-      pl(il+1)   = ((2.0_r8*il+1.0_r8)*x*pl(il)   - il*pl(il-1))   / real(il+1, r8)
-      d1pl(il+1) =  (2.0_r8*il+1.0_r8)*pl(il)   + d1pl(il-1)
-      d2pl(il+1) =  (2.0_r8*il+1.0_r8)*d1pl(il) + d2pl(il-1)
+      twolp1 = 2.0_r8*il + 1.0_r8
+      invl   = 1.0_r8 / real(il+1, r8)
+      
+      pl(il+1)   = (twolp1*x*pl(il) - real(il, r8)*pl(il-1)) * invl
+      d1pl(il+1) = twolp1*pl(il) + d1pl(il-1)
+      d2pl(il+1) = twolp1*d1pl(il) + d2pl(il-1)
     enddo
   end subroutine calderpleg_d
 
@@ -127,21 +145,44 @@ contains
     real(r8), parameter :: C6=1.367452140_r8, C8=0.421238070_r8
     real(r8), parameter :: C10=0.174733180_r8, BETA=-2.279651050_r8
     real(r8), parameter :: D=1.48260_r8, EPS=10.9480_r8, RM=2.9630_r8
-    real(r8) :: x, f
-
+    real(r8) :: x, f, invx2, invx6
     x = r / RM
-    f = merge(exp(-(D/x - 1.0_r8)**2), 1.0_r8, x < D)
-    v = (A*exp(-ALPHA*x + BETA*x*x) - f*(C6/x**6 + C8/x**8 + C10/x**10)) * EPS
-  end function aziz_nuevo_d
+    if (x < 0.01_r8) then 
+          v = 1.0e10_r8 ! Un potencial repulsivo muy alto, pero no NaN
+          return
+        endif
+
+        if (x < D) then
+          f = exp(-(D/x - 1.0_r8)**2)
+        else
+          f = 1.0_r8
+        endif
+
+        invx2 = 1.0_r8 / (x*x)
+        invx6 = invx2 * invx2 * invx2
+        
+        v = (A*exp(-ALPHA*x + BETA*x*x) - f*invx6*(C6 + C8*invx2 + C10*invx2*invx2)) * EPS
+    end function aziz_nuevo_d
 
   attributes(device) function azizgen_d(r) result(v)
     real(r8), value :: r
-    real(r8) :: v, x, f
+    real(r8) :: v, x, f, invx
 
     x = r / d_rm_aziz
-    f = merge(exp(-(d_d_aziz/x - 1.0_r8)**2), 1.0_r8, x < d_d_aziz)
+    if (x < 0.01_r8) then
+       v = 1.0e10_r8
+       return
+    endif
+
+    if (x < d_d_aziz) then
+       f = exp(-(d_d_aziz/x - 1.0_r8)**2)
+    else
+       f = 1.0_r8
+    endif
+    
+    invx = 1.0_r8 / x
     v = (d_a_aziz*exp(-d_alpha_aziz*x) - &
-         f*(d_c6_aziz/x**6 + d_c7_aziz/x**7 + d_c8_aziz/x**8)) * d_eps_aziz
+         f*(d_c6_aziz*invx**6 + d_c7_aziz*invx**7 + d_c8_aziz*invx**8)) * d_eps_aziz
   end function azizgen_d
 
   !===========================================================================
@@ -192,6 +233,7 @@ contains
     real(r8) :: d
     real(r8) :: a(NFERMAX_GPU, NFERMAX_GPU), s, pivot, piv
     integer(4) :: i, j, k, ipiv
+
 
     a = b
     d = 1.0_r8
@@ -452,6 +494,13 @@ contains
     real(r8) :: atom(3, NATOM_MAX)
     real(r8) :: wfp, wfm, dend1, dend2, sumd2
     integer(4) :: dum_sup, dum_sdw, ihe3, iatom, ic
+    real(r8), parameter :: WF_MIN = 1.0e-30_r8 
+
+    if (abs(wf0) < WF_MIN) then
+        d1wf = 0.0_r8
+        d2wf = 0.0_r8
+        return
+    endif
 
     dend1 = 2.0_r8 * DX_NUM * wf0
     dend2 = DX_NUM**2 * wf0
@@ -726,6 +775,7 @@ contains
            + 2.0_r8*dot_product(d1he4(:,iatom), d1x(:,iatom))   &
            + 2.0_r8*dot_product(d1mix(:,iatom), d1x(:,iatom))
       kin = kin - hb2m(iatom)*der2
+      print *, "DEBUG GPU: hb2m=", hb2m(iatom), " der2=", der2
     enddo
     do ihe3 = 1, d_nhe3
       iatom = d_nhe4 + ihe3
@@ -776,10 +826,9 @@ contains
       dwf=0.0_r8; dphi=0.0_r8
       return
     endif
-
-    call derananum_d(atom, sprop, b_val, hb2m, &
-         wf, wfhe4, wfhe3, wfm, wfx, kin, erot, eimp, &
-         signoup, signodw, dwf, dphi)
+  call derananum_d(atom, sprop, b_val, hb2m, &
+          wf, wfhe4, wfhe3, wfm, wfx, kin, erot, eimp, &
+          signoup, signodw, dwf, dphi)
     call vpot_d(atom, sprop, pot)
     ene = kin + pot
   end subroutine hpsi_d
@@ -864,11 +913,14 @@ contains
          kin, pot, ene, erot, eimp,   &
          signoup, signodw, dwf, dphi)
 
+    print *, "DEBUG GPU: Kin=", kin, " Pot=", pot, " Ene=", ene
+    
+
     if (supold /= signoup .or. sdwold /= signodw) then
       d_soa_nsons(iw) = 0;  return
     endif
     wftest = (wf / wfold)**2
-    if (wftest < d_ratio) then
+    if (wftest < d_ratio .and. rn1_d(iw) > wftest/d_ratio) then
       d_soa_nsons(iw) = 0;  return
     endif
 
@@ -897,7 +949,7 @@ contains
       d_soa_nsons(iw) = 0;  return
     endif
     wftest = (wf / wfold)**2
-    if (wftest < d_ratio) then
+    if (wftest < d_ratio .and. rn1_d(iw) > wftest/d_ratio) then
       d_soa_nsons(iw) = 0;  return
     endif
 

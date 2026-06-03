@@ -39,8 +39,8 @@ heh2m.pot
      01               !bloques de equilibrio                                              
      10               !pasos de descorrelacion                                            
      10               !bloques de calculo                                                 
-  20000               !pasos por bloque                                                   
-   2000               !numero de walkers                                                  
+     10               !pasos por bloque                                                   
+      1               !numero de walkers                                                  
    0010               !pasos para cambiar etrial en los bloques de equilibrio             
 !----------------------                                                                   
 !#3: DATOS FUNCION DE ONDA                                                                

@@ -1,0 +1,230 @@
+! mderwavefm_gpu.cuf
+!
+! Modulo CUDA para calcular derwavefm en GPU.
+! Implementa la misma logica que derwavefm() de mwavef.f90,
+! con un hilo por walker (patron SIMT).
+!
+! Convenio SOA: (componente, atomo, walker) -> (3, ngatom, nw)
+! Esto sigue el mismo convenio que dmc_gpu_params.cuf en la version SIMT.
+!
+! Flujo de uso:
+!   1. call derwavefm_gpu_init(nhe4, nhe3, ngatom, pmix)     ! una vez al inicio
+!   2. call derwavefm_gpu_alloc(nwalkers, ngatom)             ! una vez al inicio
+!   3. call aos_to_soa(wsim, nwalkers, ngatom)                ! antes del kernel (H2D)
+!   4. call derwavefm_gpu_run(nwalkers)                       ! lanza el kernel
+!   5. call soa_to_aos(nwalkers, ngatom, d1wf_out, d2wf_out) ! tras el kernel (D2H)
+!      -> d1wf_out(ic, ia, iw): componente ic del gradiente, atomo ia, walker iw
+!      -> d2wf_out(ia, iw):     laplaciano del atomo ia, walker iw
+!      En CPU: d1wfm(ia)%comp(ic) = d1wf_out(ic, ia, iw)
+!              d2wfm(ia)          = d2wf_out(ia, iw)
+!
+!   Alternativa de una sola llamada (wrapper completo):
+!      call derwavefm_gpu(wsim, nwalkers, ngatom, d1wf_out, d2wf_out)
+!
+module mderwavefm_gpu
+  use cudafor
+  implicit none
+
+  integer, private, parameter :: r8 = selected_real_kind(15,9)
+  integer, private, parameter :: i4 = selected_int_kind(9)
+
+  ! Tamanho maximo de ngatom en compilacion (nhe4 + nhe3).
+  ! Ajustar si el sistema tiene mas atomos de helio.
+  integer(i4), parameter, public :: NGATOM_MAX_GPU = 25
+
+  !---------------------------------------------------------------------------
+  ! Parametros escalares en device (copias de mparametros)
+  !---------------------------------------------------------------------------
+  integer(i4), device, public :: d_nhe4_m
+  integer(i4), device, public :: d_nhe3_m
+  integer(i4), device, public :: d_ngatom_m
+  real(r8),    device, public :: d_pmix_m(3)
+
+  !---------------------------------------------------------------------------
+  ! Arrays SOA en device
+  ! d_atom_soa_m(ic, ia, iw) : posicion componente ic del atomo ia, walker iw
+  ! d_d1wf_soa_m(ic, ia, iw) : gradiente log-derivada
+  ! d_d2wf_soa_m(ia, iw)     : laplaciano log-derivada
+  !---------------------------------------------------------------------------
+  real(r8), device, allocatable, public :: d_atom_soa_m(:,:,:)
+  real(r8), device, allocatable, public :: d_d1wf_soa_m(:,:,:)
+  real(r8), device, allocatable, public :: d_d2wf_soa_m(:,:)
+
+contains
+
+  !===========================================================================
+  ! Copiar parametros del Jastrow mixto He4-He3 a device.
+  ! Llamar una vez tras leer los datos de entrada.
+  !===========================================================================
+  subroutine derwavefm_gpu_init(nhe4_h, nhe3_h, ngatom_h, pmix_h)
+    integer(i4), intent(in) :: nhe4_h, nhe3_h, ngatom_h
+    real(r8),    intent(in) :: pmix_h(3)
+
+    d_nhe4_m   = nhe4_h
+    d_nhe3_m   = nhe3_h
+    d_ngatom_m = ngatom_h
+    d_pmix_m   = pmix_h
+  end subroutine derwavefm_gpu_init
+
+  !===========================================================================
+  ! Reservar arrays SOA en device para nw walkers y ng atomos.
+  ! Llamar tras conocer nwalkers y ngatom.
+  !===========================================================================
+  subroutine derwavefm_gpu_alloc(nw, ng)
+    integer(i4), intent(in) :: nw, ng
+    integer :: istat
+
+    if (allocated(d_atom_soa_m)) then
+      deallocate(d_atom_soa_m, d_d1wf_soa_m, d_d2wf_soa_m)
+    end if
+    allocate(d_atom_soa_m(3, ng, nw),  stat=istat)
+    allocate(d_d1wf_soa_m(3, ng, nw), stat=istat)
+    allocate(d_d2wf_soa_m(ng, nw),    stat=istat)
+  end subroutine derwavefm_gpu_alloc
+
+  !===========================================================================
+  ! AOS -> SOA (H2D)
+  ! Empaqueta las posiciones de wsim en el array SOA de device.
+  ! wsim(iw)%atom(ia)%comp(ic)  ->  d_atom_soa_m(ic, ia, iw)
+  !===========================================================================
+  subroutine aos_to_soa(wsim, nw, ng)
+    use mtipos, only: walker
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw, ng
+    real(r8) :: h_soa(3, ng, nw)
+    integer(i4) :: iw, ia
+
+    do iw = 1, nw
+      do ia = 1, ng
+        h_soa(1, ia, iw) = wsim(iw)%atom(ia)%comp(1)
+        h_soa(2, ia, iw) = wsim(iw)%atom(ia)%comp(2)
+        h_soa(3, ia, iw) = wsim(iw)%atom(ia)%comp(3)
+      end do
+    end do
+    d_atom_soa_m = h_soa
+  end subroutine aos_to_soa
+
+  !===========================================================================
+  ! KERNEL: un hilo por walker.
+  !
+  ! Calcula el gradiente y el laplaciano del factor de Jastrow mixto He4-He3:
+  !   u_mix(i,j) = -pmix(1)/rij^pmix(2) - pmix(3)*rij
+  ! para todos los pares (i in He4, j in He3).
+  !
+  ! Salida en d_d1wf_soa_m y d_d2wf_soa_m (log-derivadas de psi_T).
+  !===========================================================================
+  attributes(global) subroutine derwavefm_kernel(nw)
+    integer(i4), value :: nw
+    integer(i4) :: iw, i, j, jhe3, ic
+    real(r8) :: atom(3, NGATOM_MAX_GPU)
+    real(r8) :: d1wf(3, NGATOM_MAX_GPU)
+    real(r8) :: d2wf(NGATOM_MAX_GPU)
+    real(r8) :: rt(3), ujasp, ujass, rij
+
+    iw = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+    if (iw > nw) return
+
+    ! Cargar posiciones del walker en registros (evita accesos repetidos a global)
+    do i = 1, d_ngatom_m
+      do ic = 1, 3
+        atom(ic, i) = d_atom_soa_m(ic, i, iw)
+      end do
+    end do
+
+    ! Inicializar salida a cero
+    do i = 1, d_ngatom_m
+      d1wf(1, i) = 0.0_r8
+      d1wf(2, i) = 0.0_r8
+      d1wf(3, i) = 0.0_r8
+      d2wf(i)    = 0.0_r8
+    end do
+
+    ! Contribuciones de todos los pares He4(i) - He3(j)
+    do i = 1, d_nhe4_m
+      do jhe3 = 1, d_nhe3_m
+        j = d_nhe4_m + jhe3
+        rt(1) = atom(1, i) - atom(1, j)
+        rt(2) = atom(2, i) - atom(2, j)
+        rt(3) = atom(3, i) - atom(3, j)
+        rij   = sqrt(rt(1)**2 + rt(2)**2 + rt(3)**2)
+        ujasp = d_pmix_m(1)*d_pmix_m(2) / rij**(d_pmix_m(2)+1.0_r8)
+        ujass = -(d_pmix_m(2)+1.0_r8) * ujasp / rij
+        ujasp = (ujasp - d_pmix_m(3)) / rij
+        d1wf(1, i) = d1wf(1, i) + ujasp*rt(1)
+        d1wf(2, i) = d1wf(2, i) + ujasp*rt(2)
+        d1wf(3, i) = d1wf(3, i) + ujasp*rt(3)
+        d1wf(1, j) = d1wf(1, j) - ujasp*rt(1)
+        d1wf(2, j) = d1wf(2, j) - ujasp*rt(2)
+        d1wf(3, j) = d1wf(3, j) - ujasp*rt(3)
+        d2wf(i) = d2wf(i) + ujass + 2.0_r8*ujasp
+        d2wf(j) = d2wf(j) + ujass + 2.0_r8*ujasp
+      end do
+    end do
+
+    ! Sumar |grad ln(psi_T)|^2 al laplaciano (termino cuadratico)
+    do i = 1, d_ngatom_m
+      d2wf(i) = d2wf(i) + d1wf(1,i)**2 + d1wf(2,i)**2 + d1wf(3,i)**2
+    end do
+
+    ! Escribir resultados al SOA de device
+    do i = 1, d_ngatom_m
+      do ic = 1, 3
+        d_d1wf_soa_m(ic, i, iw) = d1wf(ic, i)
+      end do
+      d_d2wf_soa_m(i, iw) = d2wf(i)
+    end do
+
+  end subroutine derwavefm_kernel
+
+  !===========================================================================
+  ! Lanzar el kernel con la configuracion de bloques estandar.
+  ! 256 hilos por bloque: buen equilibrio entre ocupacion y registros.
+  !===========================================================================
+  subroutine derwavefm_gpu_run(nw)
+    integer(i4), intent(in) :: nw
+    integer(i4), parameter  :: NTHREADS = 256
+    integer(i4) :: nblocks
+    integer      :: istat
+
+    nblocks = (nw + NTHREADS - 1) / NTHREADS
+    call derwavefm_kernel<<<nblocks, NTHREADS>>>(nw)
+    istat = cudaDeviceSynchronize()
+  end subroutine derwavefm_gpu_run
+
+  !===========================================================================
+  ! SOA -> AOS (D2H)
+  ! Copia los resultados del device a arrays host.
+  !
+  ! d1wf_aos(ic, ia, iw): componente ic del gradiente del atomo ia, walker iw
+  ! d2wf_aos(ia, iw):     laplaciano del atomo ia, walker iw
+  !
+  ! Para recuperar el formato de la CPU (tipo vec3) por walker iw:
+  !   d1wfm(ia)%comp(ic) = d1wf_aos(ic, ia, iw)
+  !   d2wfm(ia)          = d2wf_aos(ia, iw)
+  !===========================================================================
+  subroutine soa_to_aos(nw, ng, d1wf_aos, d2wf_aos)
+    integer(i4), intent(in)  :: nw, ng
+    real(r8),    intent(out) :: d1wf_aos(3, ng, nw)
+    real(r8),    intent(out) :: d2wf_aos(ng, nw)
+
+    d1wf_aos = d_d1wf_soa_m
+    d2wf_aos = d_d2wf_soa_m
+  end subroutine soa_to_aos
+
+  !===========================================================================
+  ! Wrapper completo: AOS->SOA, kernel, SOA->AOS en una sola llamada.
+  ! Util para uso aislado sin reutilizar buffers SOA entre llamadas.
+  !===========================================================================
+  subroutine derwavefm_gpu(wsim, nw, ng, d1wf_aos, d2wf_aos)
+    use mtipos, only: walker
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw, ng
+    real(r8),    intent(out) :: d1wf_aos(3, ng, nw)
+    real(r8),    intent(out) :: d2wf_aos(ng, nw)
+
+    call aos_to_soa(wsim, nw, ng)
+    call derwavefm_gpu_run(nw)
+    call soa_to_aos(nw, ng, d1wf_aos, d2wf_aos)
+  end subroutine derwavefm_gpu
+
+end module mderwavefm_gpu

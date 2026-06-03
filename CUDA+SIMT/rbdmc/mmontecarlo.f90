@@ -13,8 +13,6 @@ module mmontecarlo
  use mdmcpromedia
  use mrandom
  use mparalelo
- use dmc_gpu_params, only: gpu_alloc_device_soa, gpu_init_rng, &
-                            gpu_init_from_mparametros
 
  implicit none
  integer, private, parameter :: i4=selected_int_kind(9)
@@ -30,20 +28,6 @@ module mmontecarlo
 
 
 contains
-
- ! ============================================================
- ! Subrutina para verificar y gestionar la estructura SOA
- ! para comunicación con GPU/CUDA
- ! ============================================================
-
- subroutine checkear_soa(nwpaso, wsim)
-   integer(kind=i4), intent(inout) :: nwpaso
-   type(walker), intent(inout) :: wsim(2*nwalkers)
-
-   if (.not. is_soa_allocated()) call allocate_walkers_soa(nwalkers, natom)
-   call aos_to_soa(wsim, nwpaso, natom)
-
- end subroutine checkear_soa
 
  subroutine dmc
   real(kind=r8) :: egrow
@@ -85,7 +69,6 @@ contains
      call dmcceroblo
      call densceroblo
      call difusceroblo
-     call checkear_soa(nwpaso, wsim)
      call difusfijaorigen(nwpaso,wsim)
      do ipaso=1,npasosblo
        call pasodmc(nwpaso,egrow,wsim)
@@ -518,16 +501,6 @@ contains
    enddo
 
    nwsim=nwalkers
-
-   ! ----------------------------------------------------------------
-   ! Inicializacion GPU para el kernel DMC
-   ! gpu_alloc_device_soa: reserva arrays SOA en device
-   ! gpu_init_rng:         semillas RNG independientes por walker
-   ! gpu_init_from_mparametros: copia todos los parametros fisicos a device
-   ! ----------------------------------------------------------------
-   call gpu_alloc_device_soa(nwalkers, natom)
-   call gpu_init_rng(irncal, nwalkers)
-   call gpu_init_from_mparametros()
 
    if(soydire) then
      write(6,'("configuraciones iniciales totales",t40,i10)') nwsim

@@ -1,0 +1,346 @@
+! mhedihydrogen_gpu.cuf
+!
+! Kernel CUDA para el potencial He-H2+ (opot=4) de Breton et al.
+! Porta potenbh + ccuerpo + He_dihydrogen a codigo device.
+!
+! CAMBIOS respecto a He_dihydrogen en bh_heh2m.f:
+!
+! 1. ELIMINADOS todos los bloques IF(GTEST)...END IF (tres bloques: en ENERGY1,
+!    ENERGY2 y ENERGY3). potenbh siempre llama con test=.false., por lo que
+!    el calculo de gradientes jamas se ejecuta. Esto elimina ~250 lineas.
+!
+! 2. VARIABLES ELIMINADAS (solo aparecian en bloques GTEST):
+!    - Arrays: V(3*N), R2(N,N), G(N,N)
+!    - Escalares: DUMMY, Vp_hehe, V_RGTH, b, rh3, E_total, xdumm
+!    - Gradientes angulares: drrdx(3), dfidx(3), dthetadx(3), dbbbdx(3), dVdx(3)
+!    - Derivadas de amortiguamiento: DF0..DF6, DFN1, DFN2
+!    - Derivadas de energia: dvdR, dvdtheta, datheta, dbtheta, dc6theta
+!    - Jacobiano del campo: dExdx..dEzdz, dExtot, dEytot, dEztot
+!    - Derivadas de distancia: drh1dx..dr0dz
+!
+! 3. FUNCIONES DE SENTENCIA (F77) -> funciones device:
+!    F00..F6, FN1, FN2 convertidas a attributes(device) functions.
+!    DF0..DFN2 eliminadas (solo en GTEST).
+!
+! 4. INCLUDE 'param_atoms_bh.h' -> constantes parameter en el modulo.
+!    Todos los parametros fisicos (a0,a1..., b0..., c60..., conve3, etc.)
+!    copiados como parameter de Fortran.
+!
+! 5. COMMON /datosbh/ dhcm -> variable device d_dhcm_hd.
+!
+! 6. ccuerpo INLINEADA: transforma posiciones He al sistema de la molecula.
+!    Se inlinea directamente en el kernel usando atom y sprop del SOA.
+!
+! 7. r_dih y orHH calculados desde dhcm (potenbh siempre los inicializa
+!    igual: r_dih(3,1)=+dhcm, r_dih(3,2)=-dhcm, orHH(3,1)=-2*dhcm).
+!    Se eliminan como argumentos.
+!
+! 8. rHH eliminado: siempre es cero en potenbh y rvec=r_RGTH directamente.
+!
+! 9. GTEST eliminado: argumentos y logica de control suprimidos.
+!
+! 10. Fortran 77 formato fijo -> formato libre CUDA Fortran.
+!
+module mhedihydrogen_gpu
+  use cudafor
+  implicit none
+
+  integer, private, parameter :: r8 = selected_real_kind(15,9)
+  integer, private, parameter :: i4 = selected_int_kind(9)
+
+  integer(i4), parameter, public :: NATOM_MAX_HD = 26
+  integer(i4), parameter, public :: NGATOM_MAX_HD = 25
+
+  !---------------------------------------------------------------------------
+  ! Constantes fisicas de param_atoms_bh.h (cambio 4)
+  ! Todas definidas como parameter de Fortran en lugar de INCLUDE + PARAMETER
+  !---------------------------------------------------------------------------
+  real(r8), private, parameter :: &
+    a0    = 65344.8145d0,   a1 = -0.42497d0,  a2 = 3.95634d0,  a3 = 0.07852d0,  &
+    b0    = 3.49361d0,      b1 =  0.13908d0,  b2 = 1.89258d0,  b3 = -0.01065d0, &
+    c60   = 4091.45747d0,  c61 = 106.89633d0, c62 = 226.68798d0, c63 = -117.37656d0, &
+    conve3 = 27.2d3,        pi   = 3.141592d0, pi12 = pi/2.0d0, &
+    A_HeHe     = 1.89635353d5,   c6_HeHe  = 1.34687065d0,  &
+    c8_HeHe    = 0.41308398d0,   c10_HeHe = 0.17060159d0,  &
+    alpha_HeHe = 10.70203539d0,  beta_HeHe = -1.90740649d0, &
+    D_HeHe     = 1.4088d0,       req_HeHe  = 2.9695d0,      &
+    eps_HeHe   = 10.97d0 * 0.695d0 * 4.55633538d-6,         &
+    Aa_HeHe    = 0.0026d0,       xx1_HeHe  = 1.003535949d0, &
+    xx2_HeHe   = 1.454790369d0,  Ba_HeHe   = 2.0d0*pi/(xx2_HeHe-xx1_HeHe), &
+    cte_ind    = 14393.894d0,    alpha_ind = 1.38d0*(0.5291772d0)**3, &
+    q_ind      = 0.7435d0
+
+  !---------------------------------------------------------------------------
+  ! Parametros en device (cambio 5: COMMON -> device)
+  !---------------------------------------------------------------------------
+  real(r8),    device, public :: d_dhcm_hd     ! medio H-H en bohr
+  integer(i4), device, public :: d_ngatom_hd   ! numero de atomos He4+He3
+  integer(i4), device, public :: d_natom_hd    ! natom = ngatom+1 (incluye CM impureza)
+
+  !---------------------------------------------------------------------------
+  ! SOA en device
+  ! Entrada: atom(natom, nw), sprop(3, 3, nw)
+  ! Salida:  vpot(nw)
+  !---------------------------------------------------------------------------
+  real(r8), device, allocatable, public :: d_atom_soa_hd(:,:,:)
+  real(r8), device, allocatable, public :: d_sprop_soa_hd(:,:,:)
+  real(r8), device, allocatable, public :: d_vpot_hd(:)
+
+contains
+
+  !===========================================================================
+  subroutine hedihydrogen_gpu_init(ngatom_h, natom_h, dhcm_h)
+    integer(i4), intent(in) :: ngatom_h, natom_h
+    real(r8),    intent(in) :: dhcm_h
+    d_ngatom_hd = ngatom_h
+    d_natom_hd  = natom_h
+    d_dhcm_hd   = dhcm_h
+  end subroutine hedihydrogen_gpu_init
+
+  !===========================================================================
+  subroutine hedihydrogen_gpu_alloc(nw, na)
+    integer(i4), intent(in) :: nw, na
+    integer :: istat
+    if (allocated(d_atom_soa_hd)) deallocate(d_atom_soa_hd, d_sprop_soa_hd, d_vpot_hd)
+    allocate(d_atom_soa_hd(3, na, nw),  stat=istat)
+    allocate(d_sprop_soa_hd(3, 3, nw), stat=istat)
+    allocate(d_vpot_hd(nw),             stat=istat)
+  end subroutine hedihydrogen_gpu_alloc
+
+  !===========================================================================
+  ! AOS -> SOA (H2D)
+  !===========================================================================
+  subroutine aos_to_soa_hd(wsim, nw, na)
+    use mtipos, only: walker
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw, na
+    real(r8) :: h_atom(3, na, nw), h_sprop(3, 3, nw)
+    integer(i4) :: iw, ia, iv
+    do iw = 1, nw
+      do ia = 1, na
+        h_atom(1,ia,iw) = wsim(iw)%atom(ia)%comp(1)
+        h_atom(2,ia,iw) = wsim(iw)%atom(ia)%comp(2)
+        h_atom(3,ia,iw) = wsim(iw)%atom(ia)%comp(3)
+      end do
+      do iv = 1, 3
+        h_sprop(1,iv,iw) = wsim(iw)%sprop(iv)%comp(1)
+        h_sprop(2,iv,iw) = wsim(iw)%sprop(iv)%comp(2)
+        h_sprop(3,iv,iw) = wsim(iw)%sprop(iv)%comp(3)
+      end do
+    end do
+    d_atom_soa_hd  = h_atom
+    d_sprop_soa_hd = h_sprop
+  end subroutine aos_to_soa_hd
+
+  !===========================================================================
+  ! Device: funciones de amortiguamiento (cambio 3)
+  ! Conversion de statement functions F77 a device functions libres.
+  ! Expanden inline las dependencias para que nvfortran las integre.
+  !===========================================================================
+  attributes(device) function FN1_d(x) result(f)
+    real(r8), value :: x
+    real(r8) :: ex, f
+    ex = exp(-x)
+    ! FN1 = F0+F1+F2+F3+F4+F5+F6 = 1 - exp(-x)*(1 + x + x^2/2 + ... + x^6/720)
+    f = 1.0d0 - ex*(1.0d0 + x + x**2/2.0d0 + x**3/6.0d0 + &
+                    x**4/24.0d0 + x**5/120.0d0 + x**6/720.0d0)
+  end function FN1_d
+
+  attributes(device) function FN2_d(x) result(f)
+    real(r8), value :: x
+    real(r8) :: ex, f
+    ex = exp(-x)
+    ! FN2 = F0+F1+F2 = 1 - exp(-x)*(1 + x + x^2/2)
+    f = 1.0d0 - ex*(1.0d0 + x + x**2/2.0d0)
+  end function FN2_d
+
+  !===========================================================================
+  ! Device: potencial He-He (cambio 3, porta V_hehe de bh_heh2m.f)
+  ! Los parametros A_HeHe, c6_HeHe... son parameter del modulo.
+  !===========================================================================
+  attributes(device) function V_hehe_d(r) result(v)
+    real(r8), value :: r
+    real(r8) :: v, x, x2, x6, x8, x10, F, vsum, addin
+    x   = r / req_HeHe
+    x2  = x*x;  x6 = x2*x2*x2;  x8 = x6*x2;  x10 = x8*x2
+    F   = 1.0d0
+    if (x < D_HeHe) F = exp(-(D_HeHe/x - 1.0d0)**2)
+    vsum = A_HeHe*exp(-alpha_HeHe*x + beta_HeHe*x2) - F*(c6_HeHe/x6 + c8_HeHe/x8 + c10_HeHe/x10)
+    addin = 0.0d0
+    if (x >= xx1_HeHe .and. x <= xx2_HeHe) &
+      addin = Aa_HeHe*(sin(Ba_HeHe*(x - xx1_HeHe) - pi12) + 1.0d0)
+    v = eps_HeHe * (vsum + addin)
+  end function V_hehe_d
+
+  !===========================================================================
+  ! Kernel principal: un hilo por walker
+  ! Inlinea ccuerpo + potenbh + He_dihydrogen (sin GTEST)
+  !===========================================================================
+  attributes(global) subroutine hedihydrogen_kernel(nw)
+    integer(i4), value :: nw
+    integer(i4) :: iw, jatom, ic, jc, j, j1, j2
+    ! (cambio 6) ccuerpo inlineada: posiciones en sistema molecular
+    real(r8) :: rtemp(3), x_mol(3*NGATOM_MAX_HD), sprop(3,3)
+    ! (cambio 7) r_dih y orHH calculados desde d_dhcm_hd
+    real(r8) :: dhcm, rdih1(3), rdih2(3), orHH(3)
+    ! Variables de calculo (solo las necesarias sin GTEST, cambio 2)
+    real(r8) :: energy1, energy2, energy3
+    real(r8) :: R, r_RGTH(3), rvec(3), rnorm, onorm, theta, ror, fi
+    real(r8) :: atheta, btheta, c6theta
+    real(r8) :: rh1, rh2, r0
+    real(r8) :: Ex0, Ey0, Ez0
+    real(r8) :: q0_loc
+    integer(i4) :: N
+
+    iw = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+    if (iw > nw) return
+
+    N    = d_ngatom_hd
+    dhcm = d_dhcm_hd
+
+    ! (cambio 7) Setup de geometria H2: r_dih y orHH desde dhcm
+    rdih1(1) = 0.0d0;  rdih1(2) = 0.0d0;  rdih1(3) =  dhcm   ! H atom 1
+    rdih2(1) = 0.0d0;  rdih2(2) = 0.0d0;  rdih2(3) = -dhcm   ! H atom 2
+    orHH(1)  = 0.0d0;  orHH(2)  = 0.0d0;  orHH(3)  = -2.0d0*dhcm
+
+    ! (cambio 6) ccuerpo inlineada: transforma a sistema molecular
+    ! sprop(ic)%comp(jc) -> sprop_soa(jc, ic, iw) en nuestro SOA
+    do ic = 1, 3
+      do jc = 1, 3
+        sprop(jc, ic) = d_sprop_soa_hd(jc, ic, iw)
+      end do
+    end do
+    do jatom = 1, N
+      rtemp(1) = d_atom_soa_hd(1, jatom, iw) - d_atom_soa_hd(1, d_natom_hd, iw)
+      rtemp(2) = d_atom_soa_hd(2, jatom, iw) - d_atom_soa_hd(2, d_natom_hd, iw)
+      rtemp(3) = d_atom_soa_hd(3, jatom, iw) - d_atom_soa_hd(3, d_natom_hd, iw)
+      do ic = 1, 3
+        x_mol(3*(jatom-1)+ic) = sprop(1,ic)*rtemp(1) + sprop(2,ic)*rtemp(2) + sprop(3,ic)*rtemp(3)
+      end do
+    end do
+
+    !=========================================================================
+    ! ENERGY1: pares He-He (cambio 1: IF(GTEST) eliminado, cambio 2: R2,G suprimidos)
+    !=========================================================================
+    energy1 = 0.0d0
+    do j1 = 1, N-1
+      do j2 = j1+1, N
+        R = sqrt( (x_mol(3*(j1-1)+1) - x_mol(3*(j2-1)+1))**2 &
+                + (x_mol(3*(j1-1)+2) - x_mol(3*(j2-1)+2))**2 &
+                + (x_mol(3*(j1-1)+3) - x_mol(3*(j2-1)+3))**2 )
+        energy1 = energy1 + V_hehe_d(R)
+      end do
+    end do
+    energy1 = energy1 * conve3
+
+    !=========================================================================
+    ! ENERGY2: rep+disp TT (cambio 1: IF(GTEST) eliminado)
+    ! (cambio 2: drrdx, dfidx, dthetadx, datheta, dbtheta... suprimidos)
+    ! (cambio 8: rHH=0, rvec = r_RGTH directamente)
+    !=========================================================================
+    energy2 = 0.0d0
+    onorm = sqrt(orHH(1)**2 + orHH(2)**2 + orHH(3)**2)
+
+    do j = 1, N
+      r_RGTH(1) = x_mol(3*(j-1)+1)
+      r_RGTH(2) = x_mol(3*(j-1)+2)
+      r_RGTH(3) = x_mol(3*(j-1)+3)
+      rvec  = r_RGTH
+      rnorm = sqrt(rvec(1)**2 + rvec(2)**2 + rvec(3)**2)
+      ror   = rvec(1)*orHH(1) + rvec(2)*orHH(2) + rvec(3)*orHH(3)
+      fi    = ror / (rnorm * onorm)
+      ! acos protegido contra fi fuera de [-1,1] por precision
+      fi     = min(1.0d0, max(-1.0d0, fi))
+      theta  = acos(fi)
+
+      atheta  = a1*cos(theta)**2 + a2*cos(theta)**4 + a3*cos(theta)**6
+      btheta  = b0 + b1*cos(theta)**2 + b2*cos(theta)**4 + b3*cos(theta)**6
+      c6theta = c60 + c61*sin(theta)**2 + c62*sin(theta)**4 + c63*sin(theta)**6
+
+      energy2 = energy2 + a0*exp(atheta - rnorm*btheta) &
+                         - FN1_d(rnorm*btheta)*c6theta/rnorm**6
+    end do
+
+    !=========================================================================
+    ! ENERGY3: termino de induccion (cambio 1: IF(GTEST) eliminado)
+    ! (cambio 2: drh1dx..., dbbbdx, dEx... suprimidos)
+    !=========================================================================
+    energy3    = 0.0d0
+    q0_loc     = 2.0d0*q_ind - 1.0d0
+
+    do j = 1, N
+      rh1 = sqrt( (x_mol(3*(j-1)+1) - rdih1(1))**2 &
+                + (x_mol(3*(j-1)+2) - rdih1(2))**2 &
+                + (x_mol(3*(j-1)+3) - rdih1(3))**2 )
+      rh2 = sqrt( (x_mol(3*(j-1)+1) - rdih2(1))**2 &
+                + (x_mol(3*(j-1)+2) - rdih2(2))**2 &
+                + (x_mol(3*(j-1)+3) - rdih2(3))**2 )
+      r0  = sqrt( x_mol(3*(j-1)+1)**2 + x_mol(3*(j-1)+2)**2 + x_mol(3*(j-1)+3)**2 )
+
+      ! Angulo para btheta (mismo que en ENERGY2)
+      r_RGTH(1) = x_mol(3*(j-1)+1)
+      r_RGTH(2) = x_mol(3*(j-1)+2)
+      r_RGTH(3) = x_mol(3*(j-1)+3)
+      rvec  = r_RGTH
+      rnorm = sqrt(rvec(1)**2 + rvec(2)**2 + rvec(3)**2)
+      ror   = rvec(1)*orHH(1) + rvec(2)*orHH(2) + rvec(3)*orHH(3)
+      fi    = min(1.0d0, max(-1.0d0, ror/(rnorm*onorm)))
+      theta = acos(fi)
+      btheta = b0 + b1*cos(theta)**2 + b2*cos(theta)**4 + b3*cos(theta)**6
+
+      ! Campo electrico de las dos cargas H y del CM
+      Ex0 = q_ind*FN2_d(btheta*rh1)*(x_mol(3*(j-1)+1)-rdih1(1))/rh1**3 &
+          + q_ind*FN2_d(btheta*rh2)*(x_mol(3*(j-1)+1)-rdih2(1))/rh2**3 &
+          - q0_loc*FN2_d(btheta*r0)*(x_mol(3*(j-1)+1))/r0**3
+
+      Ey0 = q_ind*FN2_d(btheta*rh1)*(x_mol(3*(j-1)+2)-rdih1(2))/rh1**3 &
+          + q_ind*FN2_d(btheta*rh2)*(x_mol(3*(j-1)+2)-rdih2(2))/rh2**3 &
+          - q0_loc*FN2_d(btheta*r0)*(x_mol(3*(j-1)+2))/r0**3
+
+      Ez0 = q_ind*FN2_d(btheta*rh1)*(x_mol(3*(j-1)+3)-rdih1(3))/rh1**3 &
+          + q_ind*FN2_d(btheta*rh2)*(x_mol(3*(j-1)+3)-rdih2(3))/rh2**3 &
+          - q0_loc*FN2_d(btheta*r0)*(x_mol(3*(j-1)+3))/r0**3
+
+      energy3 = energy3 + Ex0*Ex0 + Ey0*Ey0 + Ez0*Ez0
+    end do
+    energy3 = -0.5d0 * alpha_ind * cte_ind * energy3
+
+    d_vpot_hd(iw) = energy1 + energy2 + energy3
+  end subroutine hedihydrogen_kernel
+
+  !===========================================================================
+  subroutine hedihydrogen_gpu_run(nw)
+    integer(i4), intent(in) :: nw
+    integer(i4), parameter  :: NTHREADS = 64
+    integer(i4) :: nblocks; integer :: istat
+    nblocks = (nw + NTHREADS - 1) / NTHREADS
+    call hedihydrogen_kernel<<<nblocks, NTHREADS>>>(nw)
+    istat = cudaDeviceSynchronize()
+  end subroutine hedihydrogen_gpu_run
+
+  !===========================================================================
+  ! SOA -> AOS (D2H)
+  !===========================================================================
+  subroutine soa_to_aos_hd(nw, vpot_out)
+    integer(i4), intent(in)  :: nw
+    real(r8),    intent(out) :: vpot_out(nw)
+    vpot_out = d_vpot_hd
+  end subroutine soa_to_aos_hd
+
+  !===========================================================================
+  ! Wrapper completo
+  !===========================================================================
+  subroutine hedihydrogen_gpu(wsim, nw, na, dhcm_h, vpot_out)
+    use mtipos, only: walker
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw, na
+    real(r8),     intent(in) :: dhcm_h
+    real(r8),    intent(out) :: vpot_out(nw)
+    call hedihydrogen_gpu_init(na-1, na, dhcm_h)
+    call hedihydrogen_gpu_alloc(nw, na)
+    call aos_to_soa_hd(wsim, nw, na)
+    call hedihydrogen_gpu_run(nw)
+    call soa_to_aos_hd(nw, vpot_out)
+  end subroutine hedihydrogen_gpu
+
+end module mhedihydrogen_gpu

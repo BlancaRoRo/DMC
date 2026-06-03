@@ -1,6 +1,6 @@
 V34 :0x24 mimagina
 12 mimagina.f90 S624 0
-04/24/2026  21:39:46
+04/28/2026  14:15:53
 use mtipos public 0 direct
 use mlegendre public 0 direct
 enduse

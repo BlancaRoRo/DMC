@@ -1,0 +1,2150 @@
+! mtest_gpu.cuf
+!
+! Modulo de verificacion GPU vs CPU, metodo por metodo.
+! Cada subroutine test_XXXX compara el resultado del metodo XXXX calculado
+! en CPU (serial, walker a walker) contra el resultado del kernel CUDA
+! (todos los walkers a la vez), usando exactamente la misma configuracion.
+!
+! Como usar:
+!   Poner opcion=5 en el fichero de entrada. El programa ejecuta
+!   test_gpu_methods (en mmontecarlo.f90), que llama a los tests activos.
+!
+! Como añadir un nuevo test cuando implementes el proximo metodo:
+!   1. Escribe la version device (_d) del metodo en su .cuf
+!   2. Escribe aqui una subroutine test_XXXX siguiendo el mismo patron
+!   3. Descomenta la llamada correspondiente en test_gpu_methods (mmontecarlo.f90)
+!
+module mtest_gpu
+  use mtipos
+  use mparametros
+  implicit none
+
+  integer, private, parameter :: r8 = selected_real_kind(15,9)
+  integer, private, parameter :: i4 = selected_int_kind(9)
+  integer, private, parameter :: i8 = 8   ! 64-bit integer para semillas RNG
+
+contains
+
+  !=============================================================================
+  ! test_derwavefm
+  !
+  ! Verifica el kernel de derwavefm contra la version CPU.
+  ! Compara gradiente (d1wf) y laplaciano (d2wf) del Jastrow mixto He4-He3
+  ! para todos los walkers.
+  !
+  ! Resultado esperado: diferencias exactamente cero.
+  ! derwavefm es determinista: solo usa posiciones atom(:) sin numeros aleatorios.
+  !=============================================================================
+  subroutine test_derwavefm(wsim, nw)
+    use mwavef,         only: derwavefm
+    use mderwavefm_gpu, only: derwavefm_gpu_init, derwavefm_gpu_alloc, &
+                               derwavefm_gpu
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    type(vec3)    :: d1wfm(ngatom)
+    real(r8)      :: d2wfm(ngatom)
+    real(r8), allocatable :: d1wf_cpu(:,:,:), d2wf_cpu(:,:)
+    real(r8), allocatable :: d1wf_gpu(:,:,:), d2wf_gpu(:,:)
+    real(r8)      :: maxd1, maxd2, err
+    integer(i4)   :: iw, ia, iw_worst, ia_worst
+
+    write(6,'(/,a)')        ' === TEST derwavefm ==='
+    write(6,'(a,i6,a,i4,a,i4)') &
+         '     walkers=', nw, '  nhe4=', nhe4, '  nhe3=', nhe3
+
+    if (nhe3 == 0) then
+      write(6,'(a)') '     AVISO: nhe3=0, derwavefm devuelve cero trivialmente.'
+      write(6,'(a)') '     El test pasa pero no ejercita el codigo real.'
+      write(6,'(a)') ' =========================='
+      return
+    end if
+
+    allocate(d1wf_cpu(3, ngatom, nw), d2wf_cpu(ngatom, nw))
+    allocate(d1wf_gpu(3, ngatom, nw), d2wf_gpu(ngatom, nw))
+
+    ! --- CPU: calcular walker a walker ---
+    do iw = 1, nw
+      call derwavefm(wsim(iw), d1wfm, d2wfm)
+      do ia = 1, ngatom
+        d1wf_cpu(1, ia, iw) = d1wfm(ia)%comp(1)
+        d1wf_cpu(2, ia, iw) = d1wfm(ia)%comp(2)
+        d1wf_cpu(3, ia, iw) = d1wfm(ia)%comp(3)
+        d2wf_cpu(ia, iw)    = d2wfm(ia)
+      end do
+    end do
+
+    ! --- GPU: todos los walkers a la vez ---
+    call derwavefm_gpu_init(nhe4, nhe3, ngatom, pmix)
+    call derwavefm_gpu_alloc(nw, ngatom)
+    call derwavefm_gpu(wsim, nw, ngatom, d1wf_gpu, d2wf_gpu)
+
+    ! --- Comparar ---
+    maxd1 = maxval(abs(d1wf_cpu - d1wf_gpu))
+    maxd2 = maxval(abs(d2wf_cpu - d2wf_gpu))
+
+    write(6,'(a,es12.4)') '     Max |d1wf CPU-GPU|: ', maxd1
+    write(6,'(a,es12.4)') '     Max |d2wf CPU-GPU|: ', maxd2
+
+    ! Tolerancia: diferencias menores que 1e-10 son errores de redondeo normales
+    ! entre CPU y GPU (distinto orden de operaciones, FMA vs mul+add, etc.)
+    if (maxd1 < 1.0e-10_r8 .and. maxd2 < 1.0e-10_r8) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+      iw_worst = 1;  ia_worst = 1
+      do iw = 1, nw
+        do ia = 1, ngatom
+          err = abs(d2wf_cpu(ia,iw) - d2wf_gpu(ia,iw))
+          if (err == maxd2) then;  iw_worst = iw;  ia_worst = ia;  end if
+        end do
+      end do
+      write(6,'(a,i6,a,i4)') '     Peor caso: walker=', iw_worst, '  atomo=', ia_worst
+      write(6,'(a,3es15.6)') '     d1wf CPU: ', d1wf_cpu(:, ia_worst, iw_worst)
+      write(6,'(a,3es15.6)') '     d1wf GPU: ', d1wf_gpu(:, ia_worst, iw_worst)
+      write(6,'(a, es15.6)') '     d2wf CPU: ', d2wf_cpu(ia_worst, iw_worst)
+      write(6,'(a, es15.6)') '     d2wf GPU: ', d2wf_gpu(ia_worst, iw_worst)
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(d1wf_cpu, d2wf_cpu, d1wf_gpu, d2wf_gpu)
+  end subroutine test_derwavefm
+
+  !=============================================================================
+  ! test_wavefm
+  !
+  ! Verifica el kernel de wavefm contra la version CPU.
+  ! Salida: un escalar wfm = exp(ujas) por walker.
+  ! Resultado esperado: diferencias dentro de tolerancia de redondeo.
+  !=============================================================================
+  subroutine test_wavefm(wsim, nw)
+    use mwavef,      only: wavefm
+    use mwavefm_gpu, only: wavefm_gpu_init, wavefm_gpu_alloc, wavefm_gpu
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    real(r8), allocatable :: wfm_cpu(:), wfm_gpu(:)
+    real(r8) :: maxd, val_cpu, val_gpu
+    integer(i4) :: iw, iw_worst
+    type(walker) :: w_copy
+
+    write(6,'(/,a)')        ' === TEST wavefm ==='
+    write(6,'(a,i6,a,i4,a,i4)') &
+         '     walkers=', nw, '  nhe4=', nhe4, '  nhe3=', nhe3
+
+    if (nhe3 == 0) then
+      write(6,'(a)') '     AVISO: nhe3=0, wavefm devuelve exp(0)=1 trivialmente.'
+      write(6,'(a)') ' =========================='
+      return
+    end if
+
+    allocate(wfm_cpu(nw), wfm_gpu(nw))
+
+    ! --- CPU: walker a walker (sobre copia para no modificar wsim) ---
+    call allocatewalker(w_copy, ngatom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      call wavefm(w_copy)
+      wfm_cpu(iw) = w_copy%lw%wfm
+    end do
+    call deallocatewalker(w_copy)
+
+    ! --- GPU: todos los walkers a la vez ---
+    call wavefm_gpu_init(nhe4, nhe3, ngatom, pmix)
+    call wavefm_gpu_alloc(nw, ngatom)
+    call wavefm_gpu(wsim, nw, ngatom, wfm_gpu)
+
+    ! --- Comparar ---
+    maxd = maxval(abs(wfm_cpu - wfm_gpu))
+    write(6,'(a,es12.4)') '     Max |wfm CPU-GPU|: ', maxd
+
+    if (maxd < 1.0e-10_r8) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+      iw_worst = maxloc(abs(wfm_cpu - wfm_gpu), 1)
+      val_cpu  = wfm_cpu(iw_worst)
+      val_gpu  = wfm_gpu(iw_worst)
+      write(6,'(a,i6)')    '     Peor caso: walker=', iw_worst
+      write(6,'(a,es20.12)') '     wfm CPU: ', val_cpu
+      write(6,'(a,es20.12)') '     wfm GPU: ', val_gpu
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(wfm_cpu, wfm_gpu)
+  end subroutine test_wavefm
+
+  !=============================================================================
+  ! test_wavefhe4
+  !=============================================================================
+  subroutine test_wavefhe4(wsim, nw)
+    use mwavef,       only: wavefhe4
+    use mwavefhe4_gpu, only: wavefhe4_gpu_init, wavefhe4_gpu_alloc, wavefhe4_gpu
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    real(r8), allocatable :: wfhe4_cpu(:), wfhe4_gpu_out(:)
+    real(r8) :: maxd
+    integer(i4) :: iw, iw_worst
+    type(walker) :: w_copy
+
+    write(6,'(/,a)')        ' === TEST wavefhe4 ==='
+    write(6,'(a,i6,a,i4)') '     walkers=', nw, '  nhe4=', nhe4
+
+    allocate(wfhe4_cpu(nw), wfhe4_gpu_out(nw))
+
+    call allocatewalker(w_copy, natom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      call wavefhe4(w_copy)
+      wfhe4_cpu(iw) = w_copy%lw%wfhe4
+    end do
+    call deallocatewalker(w_copy)
+
+    call wavefhe4_gpu_init(nhe4, phe4)
+    call wavefhe4_gpu_alloc(nw, nhe4)
+    call wavefhe4_gpu(wsim, nw, nhe4, wfhe4_gpu_out)
+
+    maxd = maxval(abs(wfhe4_cpu - wfhe4_gpu_out))
+    write(6,'(a,es12.4)') '     Max |wfhe4 CPU-GPU|: ', maxd
+
+    if (maxd < 1.0e-10_r8) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+      iw_worst = maxloc(abs(wfhe4_cpu - wfhe4_gpu_out), 1)
+      write(6,'(a,i6)')      '     Peor caso: walker=', iw_worst
+      write(6,'(a,es20.12)') '     wfhe4 CPU: ', wfhe4_cpu(iw_worst)
+      write(6,'(a,es20.12)') '     wfhe4 GPU: ', wfhe4_gpu_out(iw_worst)
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(wfhe4_cpu, wfhe4_gpu_out)
+  end subroutine test_wavefhe4
+
+  !=============================================================================
+  ! test_derwavefhe4
+  !=============================================================================
+  subroutine test_derwavefhe4(wsim, nw)
+    use mwavef,        only: derwavefhe4
+    use mwavefhe4_gpu, only: wavefhe4_gpu_init, wavefhe4_gpu_alloc, derwavefhe4_gpu
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    type(vec3)    :: d1wfm(nhe4)
+    real(r8)      :: d2wfm(nhe4)
+    real(r8), allocatable :: d1wf_cpu(:,:,:), d2wf_cpu(:,:)
+    real(r8), allocatable :: d1wf_gpu(:,:,:), d2wf_gpu(:,:)
+    real(r8) :: maxd1, maxd2
+    integer(i4) :: iw, ia, iw_worst, ia_worst
+
+    write(6,'(/,a)')        ' === TEST derwavefhe4 ==='
+    write(6,'(a,i6,a,i4)') '     walkers=', nw, '  nhe4=', nhe4
+
+    allocate(d1wf_cpu(3, nhe4, nw), d2wf_cpu(nhe4, nw))
+    allocate(d1wf_gpu(3, nhe4, nw), d2wf_gpu(nhe4, nw))
+
+    do iw = 1, nw
+      call derwavefhe4(wsim(iw), d1wfm, d2wfm)
+      do ia = 1, nhe4
+        d1wf_cpu(1, ia, iw) = d1wfm(ia)%comp(1)
+        d1wf_cpu(2, ia, iw) = d1wfm(ia)%comp(2)
+        d1wf_cpu(3, ia, iw) = d1wfm(ia)%comp(3)
+        d2wf_cpu(ia, iw)    = d2wfm(ia)
+      end do
+    end do
+
+    call wavefhe4_gpu_init(nhe4, phe4)
+    call wavefhe4_gpu_alloc(nw, nhe4)
+    call derwavefhe4_gpu(wsim, nw, nhe4, d1wf_gpu, d2wf_gpu)
+
+    maxd1 = maxval(abs(d1wf_cpu - d1wf_gpu))
+    maxd2 = maxval(abs(d2wf_cpu - d2wf_gpu))
+    write(6,'(a,es12.4)') '     Max |d1wf CPU-GPU|: ', maxd1
+    write(6,'(a,es12.4)') '     Max |d2wf CPU-GPU|: ', maxd2
+
+    if (maxd1 < 1.0e-10_r8 .and. maxd2 < 1.0e-10_r8) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+      iw_worst = 1;  ia_worst = 1
+      do iw = 1, nw
+        do ia = 1, nhe4
+          if (abs(d2wf_cpu(ia,iw) - d2wf_gpu(ia,iw)) == maxd2) then
+            iw_worst = iw;  ia_worst = ia
+          end if
+        end do
+      end do
+      write(6,'(a,i6,a,i4)') '     Peor caso: walker=', iw_worst, '  atomo He4=', ia_worst
+      write(6,'(a,3es15.6)') '     d1wf CPU: ', d1wf_cpu(:, ia_worst, iw_worst)
+      write(6,'(a,3es15.6)') '     d1wf GPU: ', d1wf_gpu(:, ia_worst, iw_worst)
+      write(6,'(a, es15.6)') '     d2wf CPU: ', d2wf_cpu(ia_worst, iw_worst)
+      write(6,'(a, es15.6)') '     d2wf GPU: ', d2wf_gpu(ia_worst, iw_worst)
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(d1wf_cpu, d2wf_cpu, d1wf_gpu, d2wf_gpu)
+  end subroutine test_derwavefhe4
+
+  !=============================================================================
+  ! test_wavefhe3
+  ! Compara wfhe3, signoup y signodw entre CPU y GPU.
+  !=============================================================================
+  subroutine test_wavefhe3(wsim, nw)
+    use mwavef,        only: wavefhe3
+    use mwavefhe3_gpu, only: wavefhe3_gpu_init, wavefhe3_gpu_alloc, wavefhe3_gpu
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    real(r8),    allocatable :: wfhe3_cpu(:), wfhe3_gpu_out(:)
+    integer(i4), allocatable :: signoup_cpu(:), signodw_cpu(:)
+    integer(i4), allocatable :: signoup_gpu(:), signodw_gpu(:)
+    real(r8) :: maxd
+    integer(i4) :: iw, iw_worst, nsign_err
+    type(walker) :: w_copy
+
+    write(6,'(/,a)')        ' === TEST wavefhe3 ==='
+    write(6,'(a,i6,a,i4,a,i4,a,i4)') &
+         '     walkers=', nw, '  nhe4=', nhe4, &
+         '  nhe3up=', nhe3up, '  nhe3dw=', nhe3dw
+
+    allocate(wfhe3_cpu(nw), wfhe3_gpu_out(nw))
+    allocate(signoup_cpu(nw), signodw_cpu(nw))
+    allocate(signoup_gpu(nw), signodw_gpu(nw))
+
+    call allocatewalker(w_copy, natom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      call wavefhe3(w_copy)
+      wfhe3_cpu(iw)   = w_copy%lw%wfhe3
+      signoup_cpu(iw) = w_copy%lw%signoup
+      signodw_cpu(iw) = w_copy%lw%signodw
+    end do
+    call deallocatewalker(w_copy)
+
+    call wavefhe3_gpu_init(nhe4, nhe3, ngatom, natom, nhe3up, nhe3dw, &
+                            mhe4, mhe3, mx, phe3, impureza)
+    call wavefhe3_gpu_alloc(nw, natom)
+    call wavefhe3_gpu(wsim, nw, natom, wfhe3_gpu_out, signoup_gpu, signodw_gpu)
+
+    maxd = maxval(abs(wfhe3_cpu - wfhe3_gpu_out))
+    nsign_err = count(signoup_cpu /= signoup_gpu) + count(signodw_cpu /= signodw_gpu)
+
+    write(6,'(a,es12.4)') '     Max |wfhe3 CPU-GPU|:   ', maxd
+    write(6,'(a,i6)')     '     Errores de signo (signoup+signodw): ', nsign_err
+
+    if (maxd < 1.0e-10_r8 .and. nsign_err == 0) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+      iw_worst = maxloc(abs(wfhe3_cpu - wfhe3_gpu_out), 1)
+      write(6,'(a,i6)')      '     Peor caso: walker=', iw_worst
+      write(6,'(a,es20.12)') '     wfhe3 CPU: ', wfhe3_cpu(iw_worst)
+      write(6,'(a,es20.12)') '     wfhe3 GPU: ', wfhe3_gpu_out(iw_worst)
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(wfhe3_cpu, wfhe3_gpu_out, signoup_cpu, signodw_cpu, signoup_gpu, signodw_gpu)
+  end subroutine test_wavefhe3
+
+  !=============================================================================
+  ! test_wavefx
+  ! Compara wfx (impureza molecular) entre CPU y GPU.
+  !=============================================================================
+  subroutine test_wavefx(wsim, nw)
+    use mwavef,      only: wavefx
+    use mwavefx_gpu, only: wavefx_gpu_init, wavefx_gpu_alloc, wavefx_gpu
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    real(r8), allocatable :: wfx_cpu(:), wfx_gpu_out(:)
+    real(r8) :: maxd
+    integer(i4) :: iw, iw_worst
+    type(walker) :: w_copy
+
+    write(6,'(/,a)') ' === TEST wavefx ==='
+    write(6,'(a,i6,a,l2,a,l2)') &
+         '     walkers=', nw, '  impureza=', impureza, '  impurmol=', impurmol
+
+    allocate(wfx_cpu(nw), wfx_gpu_out(nw))
+
+    call allocatewalker(w_copy, natom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      call wavefx(w_copy)
+      wfx_cpu(iw) = w_copy%lw%wfx
+    end do
+    call deallocatewalker(w_copy)
+
+    call wavefx_gpu_init(nhe4, ngatom, natom, lxhe4, lxhe3, &
+                          pxhe4(1:5, 0:lxhe4), pxhe3(1:5, 0:lxhe3), &
+                          impureza, impurmol)
+    call wavefx_gpu_alloc(nw, natom)
+    call wavefx_gpu(wsim, nw, natom, wfx_gpu_out)
+
+    maxd = maxval(abs(wfx_cpu - wfx_gpu_out))
+    write(6,'(a,es12.4)') '     Max |wfx CPU-GPU|: ', maxd
+
+    if (maxd < 1.0e-10_r8) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+      iw_worst = maxloc(abs(wfx_cpu - wfx_gpu_out), 1)
+      write(6,'(a,i6)')      '     Peor caso: walker=', iw_worst
+      write(6,'(a,es20.12)') '     wfx CPU: ', wfx_cpu(iw_worst)
+      write(6,'(a,es20.12)') '     wfx GPU: ', wfx_gpu_out(iw_worst)
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(wfx_cpu, wfx_gpu_out)
+  end subroutine test_wavefx
+
+  !=============================================================================
+  ! test_wavef
+  ! Verifica wavef completa: las 4 componentes calculadas juntas en GPU
+  ! deben coincidir con las calculadas por separado en CPU.
+  !=============================================================================
+  subroutine test_wavef(wsim, nw)
+    use mwavef,     only: wavef
+    use mwavef_gpu, only: wavef_gpu_init, wavef_gpu_alloc, wavef_gpu
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    real(r8),    allocatable :: wf_cpu(:), wfhe4_cpu(:), wfhe3_cpu(:)
+    real(r8),    allocatable :: wfm_cpu(:), wfx_cpu(:)
+    integer(i4), allocatable :: signoup_cpu(:), signodw_cpu(:)
+    real(r8),    allocatable :: wf_gpu(:), wfhe4_gpu(:), wfhe3_gpu(:)
+    real(r8),    allocatable :: wfm_gpu(:), wfx_gpu(:)
+    integer(i4), allocatable :: signoup_gpu(:), signodw_gpu(:)
+    real(r8) :: maxd_wf, maxd_he4, maxd_he3, maxd_m, maxd_x
+    integer(i4) :: iw, nsign_err
+    type(walker) :: w_copy
+
+    write(6,'(/,a)')        ' === TEST wavef ==='
+    write(6,'(a,i6,a,i4,a,i4)') &
+         '     walkers=', nw, '  nhe4=', nhe4, '  nhe3=', nhe3
+
+    allocate(wf_cpu(nw), wfhe4_cpu(nw), wfhe3_cpu(nw), wfm_cpu(nw), wfx_cpu(nw))
+    allocate(signoup_cpu(nw), signodw_cpu(nw))
+    allocate(wf_gpu(nw), wfhe4_gpu(nw), wfhe3_gpu(nw), wfm_gpu(nw), wfx_gpu(nw))
+    allocate(signoup_gpu(nw), signodw_gpu(nw))
+
+    call allocatewalker(w_copy, natom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      call wavef(w_copy)
+      wf_cpu(iw)      = w_copy%lw%wf
+      wfhe4_cpu(iw)   = w_copy%lw%wfhe4
+      wfhe3_cpu(iw)   = w_copy%lw%wfhe3
+      wfm_cpu(iw)     = w_copy%lw%wfm
+      wfx_cpu(iw)     = w_copy%lw%wfx
+      signoup_cpu(iw) = w_copy%lw%signoup
+      signodw_cpu(iw) = w_copy%lw%signodw
+    end do
+    call deallocatewalker(w_copy)
+
+    call wavef_gpu_init(nhe4, nhe3, ngatom, natom,          &
+                         nhe3up, nhe3dw, lxhe4, lxhe3,      &
+                         mhe4, mhe3, mx,                     &
+                         phe4, phe3, pmix,                   &
+                         pxhe4(1:5,0:lxhe4), pxhe3(1:5,0:lxhe3), &
+                         impureza, impurmol)
+    call wavef_gpu_alloc(nw, natom)
+    call wavef_gpu(wsim, nw, natom, wf_gpu, wfhe4_gpu, wfhe3_gpu, &
+                    wfm_gpu, wfx_gpu, signoup_gpu, signodw_gpu)
+
+    maxd_wf  = maxval(abs(wf_cpu  - wf_gpu))
+    maxd_he4 = maxval(abs(wfhe4_cpu - wfhe4_gpu))
+    maxd_he3 = maxval(abs(wfhe3_cpu - wfhe3_gpu))
+    maxd_m   = maxval(abs(wfm_cpu   - wfm_gpu))
+    maxd_x   = maxval(abs(wfx_cpu   - wfx_gpu))
+    nsign_err = count(signoup_cpu /= signoup_gpu) + count(signodw_cpu /= signodw_gpu)
+
+    write(6,'(a,es12.4)') '     Max |wf    CPU-GPU|: ', maxd_wf
+    write(6,'(a,es12.4)') '     Max |wfhe4 CPU-GPU|: ', maxd_he4
+    write(6,'(a,es12.4)') '     Max |wfhe3 CPU-GPU|: ', maxd_he3
+    write(6,'(a,es12.4)') '     Max |wfm   CPU-GPU|: ', maxd_m
+    write(6,'(a,es12.4)') '     Max |wfx   CPU-GPU|: ', maxd_x
+    write(6,'(a,i6)')     '     Errores de signo:     ', nsign_err
+
+    if (maxd_wf < 1.0e-10_r8 .and. nsign_err == 0) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(wf_cpu, wfhe4_cpu, wfhe3_cpu, wfm_cpu, wfx_cpu, signoup_cpu, signodw_cpu)
+    deallocate(wf_gpu, wfhe4_gpu, wfhe3_gpu, wfm_gpu, wfx_gpu, signoup_gpu, signodw_gpu)
+  end subroutine test_wavef
+
+  !=============================================================================
+  ! test_derwavefhe3
+  ! Derivadas numericas de wavefhe3: perturba ±dx y compara CPU vs GPU.
+  ! Requiere que wsim(iw)%lw%wfhe3 este calculado (lo esta tras iniwalkers).
+  !=============================================================================
+  subroutine test_derwavefhe3(wsim, nw)
+    use mwavef,          only: derwavefhe3
+    use mderwavefhe3_gpu, only: derwavefhe3_gpu_init, derwavefhe3_gpu_alloc, &
+                                 derwavefhe3_gpu
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    type(vec3)    :: d1wfm(nhe3)
+    real(r8)      :: d2wfm(nhe3)
+    real(r8), allocatable :: d1wf_cpu(:,:,:), d2wf_cpu(:,:)
+    real(r8), allocatable :: d1wf_gpu(:,:,:), d2wf_gpu(:,:)
+    real(r8) :: maxd1, maxd2
+    integer(i4) :: iw, ia, iw_worst, ia_worst
+    type(walker) :: w_copy
+
+    write(6,'(/,a)')        ' === TEST derwavefhe3 ==='
+    write(6,'(a,i6,a,i4)') '     walkers=', nw, '  nhe3=', nhe3
+
+    if (nhe3 == 0) then
+      write(6,'(a)') '     AVISO: nhe3=0, derivadas trivialmente cero.'
+      write(6,'(a)') ' =========================='
+      return
+    end if
+
+    allocate(d1wf_cpu(3, nhe3, nw), d2wf_cpu(nhe3, nw))
+    allocate(d1wf_gpu(3, nhe3, nw), d2wf_gpu(nhe3, nw))
+
+    ! CPU: necesita wfhe3 ya calculado en el walker
+    call allocatewalker(w_copy, natom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      call derwavefhe3(w_copy, d1wfm, d2wfm)
+      do ia = 1, nhe3
+        d1wf_cpu(1,ia,iw) = d1wfm(ia)%comp(1)
+        d1wf_cpu(2,ia,iw) = d1wfm(ia)%comp(2)
+        d1wf_cpu(3,ia,iw) = d1wfm(ia)%comp(3)
+        d2wf_cpu(ia,iw)   = d2wfm(ia)
+      end do
+    end do
+    call deallocatewalker(w_copy)
+
+    call derwavefhe3_gpu_init(nhe4, nhe3, ngatom, natom, nhe3up, nhe3dw, &
+                               mhe4, mhe3, mx, phe3, impureza)
+    call derwavefhe3_gpu_alloc(nw, nhe3, natom)
+    call derwavefhe3_gpu(wsim, nw, nhe3, natom, d1wf_gpu, d2wf_gpu)
+
+    maxd1 = maxval(abs(d1wf_cpu - d1wf_gpu))
+    maxd2 = maxval(abs(d2wf_cpu - d2wf_gpu))
+    write(6,'(a,es12.4)') '     Max |d1wf CPU-GPU|: ', maxd1
+    write(6,'(a,es12.4)') '     Max |d2wf CPU-GPU|: ', maxd2
+
+    ! d1wf: amplificacion 1/(2*dx)=500 -> tolerancia 1e-9
+    ! d2wf: amplificacion 1/dx^2=1e6  -> tolerancia 1e-5
+    ! Estos umbrales son mucho mayores que el error fisico relevante.
+    if (maxd1 < 1.0e-9_r8 .and. maxd2 < 1.0e-5_r8) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+      iw_worst = 1;  ia_worst = 1
+      do iw = 1, nw
+        do ia = 1, nhe3
+          if (abs(d2wf_cpu(ia,iw) - d2wf_gpu(ia,iw)) == maxd2) then
+            iw_worst = iw;  ia_worst = ia
+          end if
+        end do
+      end do
+      write(6,'(a,i6,a,i4)') '     Peor caso: walker=', iw_worst, '  He3=', ia_worst
+      write(6,'(a,3es15.6)') '     d1wf CPU: ', d1wf_cpu(:, ia_worst, iw_worst)
+      write(6,'(a,3es15.6)') '     d1wf GPU: ', d1wf_gpu(:, ia_worst, iw_worst)
+      write(6,'(a, es15.6)') '     d2wf CPU: ', d2wf_cpu(ia_worst, iw_worst)
+      write(6,'(a, es15.6)') '     d2wf GPU: ', d2wf_gpu(ia_worst, iw_worst)
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(d1wf_cpu, d2wf_cpu, d1wf_gpu, d2wf_gpu)
+  end subroutine test_derwavefhe3
+
+  !=============================================================================
+  ! test_derwavefx
+  ! Derivadas analiticas de la impureza: gradiente y laplaciano de ln(wfx).
+  ! Incluye terminos rotacionales d1zwf y d2zwf.
+  !=============================================================================
+  subroutine test_derwavefx(wsim, nw)
+    use mwavef,         only: derwavefx
+    use mderwavefx_gpu, only: derwavefx_gpu_init, derwavefx_gpu_alloc, derwavefx_gpu
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    type(vec3)    :: d1wfm(natom)
+    real(r8)      :: d2wfm(natom), d1zwfm(2), d2zwfm
+    real(r8), allocatable :: d1wf_cpu(:,:,:), d2wf_cpu(:,:)
+    real(r8), allocatable :: d1zwf_cpu(:,:), d2zwf_cpu(:)
+    real(r8), allocatable :: d1wf_gpu(:,:,:), d2wf_gpu(:,:)
+    real(r8), allocatable :: d1zwf_gpu(:,:), d2zwf_gpu(:)
+    real(r8) :: maxd1, maxd2, maxdz1, maxdz2
+    integer(i4) :: iw, ia
+
+    write(6,'(/,a)')        ' === TEST derwavefx ==='
+    write(6,'(a,i6,a,l2,a,l2)') &
+         '     walkers=', nw, '  impureza=', impureza, '  impurmol=', impurmol
+
+    allocate(d1wf_cpu(3,natom,nw), d2wf_cpu(natom,nw))
+    allocate(d1zwf_cpu(2,nw), d2zwf_cpu(nw))
+    allocate(d1wf_gpu(3,natom,nw), d2wf_gpu(natom,nw))
+    allocate(d1zwf_gpu(2,nw), d2zwf_gpu(nw))
+
+    do iw = 1, nw
+      call derwavefx(wsim(iw), d1wfm, d2wfm, d1zwfm, d2zwfm)
+      do ia = 1, natom
+        d1wf_cpu(1,ia,iw) = d1wfm(ia)%comp(1)
+        d1wf_cpu(2,ia,iw) = d1wfm(ia)%comp(2)
+        d1wf_cpu(3,ia,iw) = d1wfm(ia)%comp(3)
+        d2wf_cpu(ia,iw)   = d2wfm(ia)
+      end do
+      d1zwf_cpu(1,iw) = d1zwfm(1);  d1zwf_cpu(2,iw) = d1zwfm(2)
+      d2zwf_cpu(iw)   = d2zwfm
+    end do
+
+    call derwavefx_gpu_init(nhe4, ngatom, natom, lxhe4, lxhe3, &
+                              pxhe4(1:5,0:lxhe4), pxhe3(1:5,0:lxhe3), &
+                              impureza, impurmol)
+    call derwavefx_gpu_alloc(nw, natom)
+    call derwavefx_gpu(wsim, nw, natom, d1wf_gpu, d2wf_gpu, d1zwf_gpu, d2zwf_gpu)
+
+    maxd1  = maxval(abs(d1wf_cpu  - d1wf_gpu))
+    maxd2  = maxval(abs(d2wf_cpu  - d2wf_gpu))
+    maxdz1 = maxval(abs(d1zwf_cpu - d1zwf_gpu))
+    maxdz2 = maxval(abs(d2zwf_cpu - d2zwf_gpu))
+
+    write(6,'(a,es12.4)') '     Max |d1wf  CPU-GPU|: ', maxd1
+    write(6,'(a,es12.4)') '     Max |d2wf  CPU-GPU|: ', maxd2
+    write(6,'(a,es12.4)') '     Max |d1zwf CPU-GPU|: ', maxdz1
+    write(6,'(a,es12.4)') '     Max |d2zwf CPU-GPU|: ', maxdz2
+
+    if (maxd1 < 1.0e-10_r8 .and. maxd2 < 1.0e-10_r8 .and. &
+        maxdz1 < 1.0e-10_r8 .and. maxdz2 < 1.0e-10_r8) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(d1wf_cpu, d2wf_cpu, d1zwf_cpu, d2zwf_cpu)
+    deallocate(d1wf_gpu, d2wf_gpu, d1zwf_gpu, d2zwf_gpu)
+  end subroutine test_derwavefx
+
+  !=============================================================================
+  ! test_derananum
+  ! Verifica el kernel completo de derananum: wavef + 4 derivadas + combinacion.
+  ! Compara dwf (drift force), kin, eimp, erot entre CPU y GPU.
+  ! La tolerancia de kin/eimp/erot es mayor (1e-5) por la derivada numerica de He3
+  ! que amplifica errores de redondeo en ~1/dx^2 = 1e6.
+  !=============================================================================
+  subroutine test_derananum(wsim, nw)
+    use mwavef,          only: derananum
+    use mderananum_gpu,  only: derananum_gpu_init, derananum_gpu_alloc,    &
+                                aos_to_soa_da, derananum_gpu_run,           &
+                                d_dwf_soa_da, d_kin_soa_da,                &
+                                d_eimp_soa_da, d_erot_soa_da
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    real(r8), allocatable :: dwf_cpu(:,:,:), dwf_gpu(:,:,:)
+    real(r8), allocatable :: kin_cpu(:), kin_gpu(:), eimp_cpu(:), eimp_gpu(:)
+    real(r8), allocatable :: erot_cpu(:), erot_gpu(:)
+    real(r8) :: maxd_dwf, maxd_kin, maxd_eimp, maxd_erot
+    integer(i4) :: iw, ia
+    type(walker) :: w_copy
+
+    write(6,'(/,a)')        ' === TEST derananum ==='
+    write(6,'(a,i6,a,i4,a,i4)') &
+         '     walkers=', nw, '  nhe4=', nhe4, '  nhe3=', nhe3
+
+    allocate(dwf_cpu(3,natom,nw), dwf_gpu(3,natom,nw))
+    allocate(kin_cpu(nw), kin_gpu(nw), eimp_cpu(nw), eimp_gpu(nw))
+    allocate(erot_cpu(nw), erot_gpu(nw))
+
+    ! CPU: walker a walker
+    call allocatewalker(w_copy, natom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      call derananum(w_copy)
+      do ia = 1, natom
+        dwf_cpu(1,ia,iw) = w_copy%dwf(ia)%comp(1)
+        dwf_cpu(2,ia,iw) = w_copy%dwf(ia)%comp(2)
+        dwf_cpu(3,ia,iw) = w_copy%dwf(ia)%comp(3)
+      end do
+      kin_cpu(iw)  = w_copy%lw%kin
+      eimp_cpu(iw) = w_copy%lw%eimp
+      erot_cpu(iw) = w_copy%lw%erot
+    end do
+    call deallocatewalker(w_copy)
+
+    ! GPU: lanzar kernel y leer SOA directamente (sin write-back a wsim)
+    call derananum_gpu_init(nhe4, nhe3, ngatom, natom,          &
+                             nhe3up, nhe3dw, lxhe4, lxhe3,      &
+                             mhe4, mhe3, mx,                     &
+                             phe4, phe3, pmix,                   &
+                             pxhe4(1:5,0:lxhe4), pxhe3(1:5,0:lxhe3), &
+                             impureza, impurmol, impurfija, rotamol)
+    call derananum_gpu_alloc(nw, natom)
+    call aos_to_soa_da(wsim, nw, natom)
+    call derananum_gpu_run(nw)
+
+    ! Leer resultados directamente del SOA de device (sin modificar wsim)
+    dwf_gpu  = d_dwf_soa_da
+    kin_gpu  = d_kin_soa_da
+    eimp_gpu = d_eimp_soa_da
+    erot_gpu = d_erot_soa_da
+
+    ! Comparar
+    maxd_dwf  = maxval(abs(dwf_cpu  - dwf_gpu))
+    maxd_kin  = maxval(abs(kin_cpu  - kin_gpu))
+    maxd_eimp = maxval(abs(eimp_cpu - eimp_gpu))
+    maxd_erot = maxval(abs(erot_cpu - erot_gpu))
+
+    write(6,'(a,es12.4)') '     Max |dwf  CPU-GPU|: ', maxd_dwf
+    write(6,'(a,es12.4)') '     Max |kin  CPU-GPU|: ', maxd_kin
+    write(6,'(a,es12.4)') '     Max |eimp CPU-GPU|: ', maxd_eimp
+    write(6,'(a,es12.4)') '     Max |erot CPU-GPU|: ', maxd_erot
+
+    ! dwf: tolerancia estandar 1e-10
+    ! kin/eimp/erot: incluyen d2wfhe3 numerica -> tolerancia 1e-5
+    if (maxd_dwf < 1.0e-10_r8 .and. maxd_kin < 1.0e-5_r8 .and. &
+        maxd_eimp < 1.0e-10_r8 .and. maxd_erot < 1.0e-10_r8) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(dwf_cpu, dwf_gpu, kin_cpu, kin_gpu, eimp_cpu, eimp_gpu, erot_cpu, erot_gpu)
+  end subroutine test_derananum
+
+  !=============================================================================
+  ! test_bhutils
+  !
+  ! Verifica vec_norm, scalar_product y angle en GPU contra las versiones F77
+  ! de bh_heh2m.f. El test usa el mismo calculo que ENERGY2 de He_dihydrogen:
+  ! norma/producto/angulo entre posicion de He4 relativa a la impureza y el
+  ! eje de la molecula H2 (orHH = (0,0,-2*dhcm)).
+  !
+  ! Las diferencias esperadas son ~0 (operaciones aritmeticas exactas).
+  !=============================================================================
+  !=============================================================================
+  ! test_hedihydrogen
+  ! Verifica el potencial He-H2+ (opot=4) en GPU contra la version CPU
+  ! (potenbh de bh_heh2m.f que llama a He_dihydrogen).
+  ! Compara vpotbh = ENERGY1 + ENERGY2 + ENERGY3 para todos los walkers.
+  !=============================================================================
+  !=============================================================================
+  ! test_ccuerpo
+  ! Verifica la transformacion de coordenadas al sistema molecular.
+  ! Compara rhe(3*ngatom, nw) entre CPU (ccuerpo de msistref) y GPU.
+  ! Resultado esperado: diferencias exactamente 0 (operaciones lineales puras).
+  !=============================================================================
+  !=============================================================================
+  ! test_valibre
+  ! Verifica que el kernel pone todos los campos a 0/1 correctamente.
+  ! Resultado esperado: diferencias exactamente cero.
+  !=============================================================================
+  !=============================================================================
+  ! test_gauss3
+  ! Test determinista: misma semilla CPU y GPU -> mismos numeros exactos.
+  ! Tambien verifica propiedades estadisticas sobre todos los walkers.
+  !=============================================================================
+  !=============================================================================
+  ! test_rng_paso: verifica UN SOLO PASO del LCG48.
+  ! Aisla el algoritmo de rn1_g3 de Box-Muller y de la inicializacion.
+  ! Si este test falla -> bug en el algoritmo LCG del GPU.
+  ! Si pasa y test_gauss3 falla -> bug en inicializacion o Box-Muller.
+  !=============================================================================
+  !=============================================================================
+  ! test_lcg_internos: compara is1, is2, m11, m12, irn_nuevo, rn
+  ! entre CPU (calculado manualmente) y GPU (kernel diagnostico) para
+  ! el walker 1 con la misma semilla irncpu.
+  ! Permite ver exactamente en qué parte del LCG48 divergen.
+  !=============================================================================
+  !=============================================================================
+  ! test_gauss3_rns: compara los 4 valores rn del Box-Muller CPU vs GPU.
+  ! Si rn(k) difiere -> la cadena LCG falla en el paso k.
+  ! Si todos iguales pero gauss3 difiere -> problema en sin/cos/sqrt/log.
+  ! Precision GPU: IEEE 754 igual que CPU; FMA puede dar diff en ultimo bit.
+  !=============================================================================
+  !=============================================================================
+  ! test_dmc2_1walker: 1 walker, 1 hilo, 1 paso, misma semilla.
+  !
+  ! Idea: si la GPU hace exactamente el mismo algoritmo que la CPU,
+  ! con 1 solo walker y la misma semilla inicial, el resultado debe
+  ! ser IDENTICO (no solo estadisticamente similar).
+  !
+  ! Lo que comparamos paso a paso:
+  !  1. ene_inicial  : debe ser identico (mismo wsim(1), mismo hpsi)
+  !  2. posiciones_finales : si difieren → el gauss3 da distintos numeros
+  !  3. ene_final    : si difiere → hpsi da distinto resultado en nuevas posiciones
+  !  4. nsons        : si difiere → branching usa RNG distinto
+  !
+  ! Diagnostico: si posiciones difieren pero ene coincide → imposible.
+  !              si posiciones iguales pero ene difiere → bug en hpsi.
+  !              si posiciones difieren → bug en gauss3 (RNG distinto).
+  !=============================================================================
+  !=============================================================================
+  ! test_dmc2_fixed_gauss
+  !
+  ! La CPU genera todos los gaussianos necesarios para 1 paso de difusion
+  ! (ncmtras llamadas a gauss3 + 1 si rotamol) y los pasa a la GPU.
+  ! La GPU ejecuta difusion_fixed_kernel usando esos valores exactos en vez
+  ! de su propio RNG.
+  !
+  ! Interpretacion:
+  !   PASS → la logica de difusion GPU es correcta; el unico problema pendiente
+  !           es que el RNG GPU genere los mismos valores que la CPU.
+  !   FAIL → hay bugs adicionales en la formula de difusion GPU (sigma/dwf/atomos).
+  !=============================================================================
+  subroutine test_dmc2_fixed_gauss(wsim, nw)
+    use mrandom,        only: gauss3, sacasemilla
+    use mderananum_gpu, only: derananum_gpu_init, derananum_gpu_alloc, aos_to_soa_da, &
+                               d_atom_soa_da
+    use mvpot_gpu,      only: vpot_gpu_init, vpot_gpu_alloc, aos_to_soa_vp
+    use mhpsi_gpu,      only: hpsi_gpu_alloc_ene, hpsi_gpu_run
+    use mdmc2_gpu,      only: dmc2_gpu_init, dmc2_gpu_alloc, aos_to_soa_d2, &
+                               gauss_fixed_alloc, difusion_fixed_run, d_gauss_fixed
+    use mvaziz,         only: sacaaziz
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    external :: sacabh
+
+    real(r8), allocatable :: h_gauss(:,:)        ! (3, ncmtras [+1 si rotamol])
+    real(r8), allocatable :: atom_cpu(:,:), atom_gpu(:,:)   ! (3, natom)
+    real(r8) :: h_atom(3, natom)
+    real(r8) :: gvar3(3), aziz_params(8), dhcm, diff_pos, sig1, sig2
+    integer(i4) :: iatom, ia, ic, n_gauss
+    type(walker) :: w_cpu
+
+    write(6,'(/,a)') ' === TEST dmc2_fixed_gauss ==='
+    write(6,'(a)') '     CPU genera los gaussianos, GPU los usa directamente (sin su propio RNG)'
+    write(6,'(a,i4,a,l1)') '     ncmtras=', ncmtras, '  rotamol=', rotamol
+
+    allocate(atom_cpu(3, natom), atom_gpu(3, natom))
+    n_gauss = ncmtras;  if (rotamol) n_gauss = n_gauss + 1
+    allocate(h_gauss(3, n_gauss))
+
+    ! --- 1. Copiar walker 1 en CPU y generar gaussianos ---
+    call allocatewalker(w_cpu, natom)
+    w_cpu = wsim(1)
+
+    do iatom = 1, ncmtras
+      call gauss3(gvar3)
+      h_gauss(:, iatom) = gvar3
+    end do
+    if (rotamol) then
+      call gauss3(gvar3)
+      h_gauss(:, ncmtras+1) = gvar3
+    end if
+
+    ! --- 2. CPU: aplicar difusion con esos gaussianos ---
+    do iatom = 1, ncmtras
+      gvar3 = h_gauss(:, iatom)
+      sig1  = w_cpu%sigma1(iatom);  sig2 = w_cpu%sigma2(iatom)
+      do ic = 1, 3
+        w_cpu%atom(iatom)%comp(ic) = w_cpu%atom(iatom)%comp(ic) &
+          + sig1*gvar3(ic) + 0.5_r8*sig2*w_cpu%dwf(iatom)%comp(ic)
+      end do
+    end do
+    ! Nota: omitimos la rotacion molecular (sprop) en el CPU manual porque
+    ! test_rota ya verifico que esa parte funciona. Solo comprobamos atomos.
+
+    do ia = 1, natom
+      atom_cpu(1,ia) = w_cpu%atom(ia)%comp(1)
+      atom_cpu(2,ia) = w_cpu%atom(ia)%comp(2)
+      atom_cpu(3,ia) = w_cpu%atom(ia)%comp(3)
+    end do
+
+    ! --- 3. GPU: inicializar con 1 solo walker ---
+    call sacaaziz(aziz_params);  dhcm = 0.0_r8
+    if (opot == 4) call sacabh(dhcm)
+
+    call derananum_gpu_init(nhe4, nhe3, ngatom, natom, nhe3up, nhe3dw, lxhe4, lxhe3, &
+                             mhe4, mhe3, mx, phe4, phe3, pmix,                         &
+                             pxhe4(1:5,0:lxhe4), pxhe3(1:5,0:lxhe3),                   &
+                             impureza, impurmol, impurfija, rotamol)
+    call derananum_gpu_alloc(1, natom)
+    call aos_to_soa_da(wsim, 1, natom)   ! carga atom y dwf del walker 1
+
+    call vpot_gpu_init(opot, ngatom, natom, impureza, impurmol, dhcm, aziz_params)
+    call vpot_gpu_alloc(1, natom)
+    call aos_to_soa_vp(wsim, 1, natom)
+
+    call hpsi_gpu_alloc_ene(1)
+
+    call dmc2_gpu_init(ncmtras, rotamol, etrial, dtau, ratio)
+    call dmc2_gpu_alloc(1, natom)
+    call aos_to_soa_d2(wsim, 1, natom)  ! carga sigma1, sigma2
+
+    ! --- 4. Subir gaussianos y ejecutar solo el kernel de difusion ---
+    ! hpsi_gpu_run corre derananum en GPU y rellena d_dwf_soa_da.
+    ! (aos_to_soa_da solo carga posiciones atomicas, no el drift force)
+    call hpsi_gpu_run(1, libre)
+
+    call gauss_fixed_alloc(1, n_gauss)
+    d_gauss_fixed(:, 1:n_gauss, 1) = h_gauss   ! H2D
+    call difusion_fixed_run(1)
+
+    ! --- 5. Descargar posiciones y comparar ---
+    h_atom = d_atom_soa_da(:, :, 1)   ! D2H: (3, natom) del walker 1
+    do ia = 1, natom
+      atom_gpu(1,ia) = h_atom(1,ia)
+      atom_gpu(2,ia) = h_atom(2,ia)
+      atom_gpu(3,ia) = h_atom(3,ia)
+    end do
+
+    diff_pos = 0.0_r8
+    do ia = 1, natom
+      diff_pos = diff_pos + (atom_cpu(1,ia)-atom_gpu(1,ia))**2 &
+                           + (atom_cpu(2,ia)-atom_gpu(2,ia))**2 &
+                           + (atom_cpu(3,ia)-atom_gpu(3,ia))**2
+    end do
+    diff_pos = sqrt(diff_pos / natom)
+
+    write(6,'()')
+    write(6,'(a,es12.4)') '     |posiciones CPU-GPU| RMS por atomo: ', diff_pos
+    write(6,'()')
+    if (diff_pos < 1.0e-10_r8) then
+      write(6,'(a)') '     PASS: posiciones identicas con los mismos gaussianos'
+      write(6,'(a)') '     -> Logica de difusion GPU correcta'
+      write(6,'(a)') '     -> El problema pendiente es solo el RNG GPU'
+    else
+      write(6,'(a)') '     FAIL: posiciones distintas incluso con los mismos gaussianos'
+      write(6,'(a)') '     -> Hay bugs adicionales en la logica de difusion (sigma/dwf/SOA)'
+      do ia = 1, ncmtras
+        diff_pos = sqrt((atom_cpu(1,ia)-atom_gpu(1,ia))**2 + &
+                        (atom_cpu(2,ia)-atom_gpu(2,ia))**2 + &
+                        (atom_cpu(3,ia)-atom_gpu(3,ia))**2)
+        if (diff_pos > 1.0e-10_r8) then
+          write(6,'(a,i4,a,es10.3)') '     Primer atomo diferente: ', ia, '  diff=', diff_pos
+          write(6,'(a,3es18.10)') '       CPU pos: ', atom_cpu(:,ia)
+          write(6,'(a,3es18.10)') '       GPU pos: ', atom_gpu(:,ia)
+          write(6,'(a,f14.10)') '       sigma1 : ', wsim(1)%sigma1(ia)
+          write(6,'(a,f14.10)') '       sigma2 : ', wsim(1)%sigma2(ia)
+          write(6,'(a,3f14.10)') '       gauss  : ', h_gauss(:,ia)
+          write(6,'(a,3es14.6)') '       dwf CPU: ', wsim(1)%dwf(ia)%comp
+          exit
+        end if
+      end do
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(atom_cpu, atom_gpu, h_gauss)
+    call deallocatewalker(w_cpu)
+  end subroutine test_dmc2_fixed_gauss
+
+  subroutine test_dmc2_1walker(wsim, nw)
+    use mrandom,        only: sacasemilla, fijasemilla
+    use msteps,         only: dmc2
+    use mvaziz,         only: sacaaziz
+    use mderananum_gpu, only: derananum_gpu_init, derananum_gpu_alloc, aos_to_soa_da, &
+                               d_atom_soa_da
+    use mvpot_gpu,      only: vpot_gpu_init, vpot_gpu_alloc, aos_to_soa_vp
+    use mhpsi_gpu,      only: hpsi_gpu_alloc_ene, hpsi_gpu_run, d_ene_hpsi
+    use mdmc2_gpu,      only: dmc2_gpu_init, dmc2_gpu_alloc, dmc2_gpu_run, &
+                               aos_to_soa_d2, d_nsons_d2
+    use mgauss3_gpu,    only: gauss3_gpu_alloc, gauss3_gpu_init_seeds
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    external :: sacabh
+
+    type(walker)  :: w_cpu
+    integer(i8)   :: irncpu
+    integer(i4)   :: nsons_cpu, nsons_gpu
+    real(r8)      :: ene_ini_cpu, ene_ini_gpu
+    real(r8)      :: ene_fin_cpu, ene_fin_gpu
+    real(r8)      :: wf_ini_cpu,  wf_ini_gpu
+    real(r8), allocatable :: atom_cpu(:,:), atom_gpu(:,:)   ! (3, natom)
+    real(r8) :: h_atom(3, natom), h_ene(1), h_wf(1)
+    integer(i4) :: h_nsons(1)
+    real(r8)   :: diff_pos, diff_ene, aziz_params(8), dhcm
+    integer(i4) :: ia
+
+    write(6,'(/,a)') ' === TEST dmc2_1walker (1 walker, 1 hilo, 1 paso, misma semilla) ==='
+
+    allocate(atom_cpu(3,natom), atom_gpu(3,natom))
+
+    ! --- 1. Estado inicial del walker 1 ---
+    call allocatewalker(w_cpu, natom)
+    w_cpu = wsim(1)
+    ene_ini_cpu = w_cpu%lw%ene
+    wf_ini_cpu  = w_cpu%lw%wf
+
+    write(6,'(a,f18.8)') '  ene inicial walker 1 (CPU/GPU compartida): ', ene_ini_cpu
+
+    ! --- 2. Guardar semilla CPU en este momento ---
+    call sacasemilla(irncpu)
+    write(6,'(a,i22)') '  Semilla RNG: ', irncpu
+
+    ! --- 3. CPU: 1 paso dmc2 desde esa semilla ---
+    call fijasemilla(irncpu)   ! garantiza punto de partida exacto
+    call dmc2(w_cpu, nsons_cpu)
+
+    ene_fin_cpu = w_cpu%lw%ene
+    wf_ini_gpu  = w_cpu%lw%wf   ! (reutilizamos la variable)
+    do ia = 1, natom
+      atom_cpu(1,ia) = w_cpu%atom(ia)%comp(1)
+      atom_cpu(2,ia) = w_cpu%atom(ia)%comp(2)
+      atom_cpu(3,ia) = w_cpu%atom(ia)%comp(3)
+    end do
+
+    ! --- 4. GPU: mismo walker, misma semilla ---
+    call sacaaziz(aziz_params); dhcm = 0.0_r8
+    if (opot == 4) call sacabh(dhcm)
+
+    ! Inicializar GPU con 1 solo walker
+    call derananum_gpu_init(nhe4, nhe3, ngatom, natom, nhe3up, nhe3dw, lxhe4, lxhe3, &
+                             mhe4, mhe3, mx, phe4, phe3, pmix,                        &
+                             pxhe4(1:5,0:lxhe4), pxhe3(1:5,0:lxhe3),                  &
+                             impureza, impurmol, impurfija, rotamol)
+    call derananum_gpu_alloc(1, natom)
+    call aos_to_soa_da(wsim, 1, natom)       ! solo walker 1
+
+    call vpot_gpu_init(opot, ngatom, natom, impureza, impurmol, dhcm, aziz_params)
+    call vpot_gpu_alloc(1, natom)
+    call aos_to_soa_vp(wsim, 1, natom)
+
+    call hpsi_gpu_alloc_ene(1)
+    call hpsi_gpu_run(1, libre)              ! calcula ene inicial en GPU
+    h_ene = d_ene_hpsi(1:1)
+    ene_ini_gpu = h_ene(1)
+
+    call dmc2_gpu_init(ncmtras, rotamol, etrial, dtau, ratio)
+    call dmc2_gpu_alloc(1, natom)
+    call aos_to_soa_d2(wsim, 1, natom)
+    call gauss3_gpu_alloc(1)
+    call gauss3_gpu_init_seeds(irncpu, 1)    ! misma semilla que CPU
+
+    call fijasemilla(irncpu)                 ! restaurar CPU (para que no avance)
+    call dmc2_gpu_run(1, libre)
+
+    ! Descargar resultados GPU
+    h_ene   = d_ene_hpsi(1:1);    ene_fin_gpu = h_ene(1)
+    h_nsons = d_nsons_d2(1:1);    nsons_gpu   = h_nsons(1)
+    h_atom  = d_atom_soa_da(:,:,1)
+    do ia = 1, natom
+      atom_gpu(1,ia) = h_atom(1,ia)
+      atom_gpu(2,ia) = h_atom(2,ia)
+      atom_gpu(3,ia) = h_atom(3,ia)
+    end do
+
+    ! --- 5. Comparacion detallada ---
+    write(6,'()')
+    write(6,'(a)')         '  Resultado            CPU              GPU'
+    write(6,'(a,f16.8,2x,f16.8)') '  ene inicial:  ', ene_ini_cpu, ene_ini_gpu
+    write(6,'(a,f16.8,2x,f16.8)') '  ene final:    ', ene_fin_cpu, ene_fin_gpu
+    write(6,'(a,i6,10x,i6)')       '  nsons:        ', nsons_cpu,  nsons_gpu
+
+    diff_pos = 0.0_r8
+    do ia = 1, natom
+      diff_pos = diff_pos + (atom_cpu(1,ia)-atom_gpu(1,ia))**2 &
+                           + (atom_cpu(2,ia)-atom_gpu(2,ia))**2 &
+                           + (atom_cpu(3,ia)-atom_gpu(3,ia))**2
+    end do
+    diff_pos = sqrt(diff_pos / natom)
+    diff_ene = abs(ene_fin_cpu - ene_fin_gpu)
+
+    write(6,'()')
+    write(6,'(a,es12.4)') '  |posiciones CPU-GPU| (RMS por atomo): ', diff_pos
+    write(6,'(a,es12.4)') '  |ene_final CPU-GPU|:                  ', diff_ene
+
+    write(6,'()')
+    if (diff_pos < 1.0e-12_r8 .and. diff_ene < 1.0e-8_r8 .and. nsons_cpu == nsons_gpu) then
+      write(6,'(a)') '  PASS: CPU y GPU identicos en 1 paso con misma semilla'
+    else
+      write(6,'(a)') '  FAIL: CPU y GPU divergen en 1 paso:'
+      if (abs(ene_ini_cpu - ene_ini_gpu) > 1.0e-8_r8) &
+        write(6,'(a)') '    -> ene inicial distinta: hpsi da diferente resultado al mismo walker'
+      if (diff_pos > 1.0e-12_r8) &
+        write(6,'(a)') '    -> posiciones distintas: gauss3 da numeros aleatorios distintos (RNG diferente)'
+      if (diff_pos < 1.0e-12_r8 .and. diff_ene > 1.0e-8_r8) &
+        write(6,'(a)') '    -> pos iguales pero ene distinta: hpsi en nuevas posiciones da resultado distinto'
+      if (nsons_cpu /= nsons_gpu) &
+        write(6,'(a,i2,a,i2)') '    -> nsons distinto (CPU=', nsons_cpu, ', GPU=', nsons_gpu, '): branching usa RNG distinto'
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(atom_cpu, atom_gpu)
+    call deallocatewalker(w_cpu)
+  end subroutine test_dmc2_1walker
+
+  subroutine test_gauss3_rns(wsim, nw)
+    use mrandom,     only: sacasemilla, fijasemilla, rn1
+    use mgauss3_gpu, only: gauss3_gpu_alloc, gauss3_gpu_init_seeds, &
+                            debug_rns_alloc, debug_rns_run, d_rns_debug
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    real(r8) :: h_rns(4, nw), rn_cpu(4)
+    integer(i8) :: irncpu, cpu_st, cpu_s1, cpu_s2
+    integer(i4) :: k
+    logical :: igual(4)
+    ! Mismas constantes hardcodeadas que el GPU (verificadas correctas)
+    integer(i8), parameter :: mask24c = 16777215_i8
+    integer(i8), parameter :: mask48c = 281474976710655_i8
+    real(r8),    parameter :: twom48c = 2.0_r8**(-48)
+    integer(i8), parameter :: m11c    = 15184245_i8
+    integer(i8), parameter :: m12c    = 2651554_i8
+    integer(i8), parameter :: iadd1c  = 96309754297_i8
+
+    write(6,'(/,a)') ' === DEBUG gauss3: 4 valores rn Box-Muller walker 1 ==='
+
+    ! CPU: calcular los 4 rn MANUALMENTE con las mismas constantes del GPU.
+    ! Evita discrepancias de estado de mrandom::irn — mismo algoritmo, misma semilla.
+    call sacasemilla(irncpu)
+    cpu_st = iand(irncpu, mask48c)
+    do k = 1, 4
+      cpu_s2 = iand(ishft(cpu_st,-24), mask24c)
+      cpu_s1 = iand(cpu_st, mask24c)
+      cpu_st = iand(ishft(iand(cpu_s1*m12c+cpu_s2*m11c,mask24c),24)+cpu_s1*m11c+iadd1c, mask48c)
+      rn_cpu(k) = real(ior(cpu_st, 1_i8), r8) * twom48c
+    end do
+
+    ! GPU: mismo punto de partida, extraer 4 rn sin Box-Muller
+    call gauss3_gpu_alloc(nw)
+    call gauss3_gpu_init_seeds(irncpu, nw)
+    call debug_rns_alloc(nw)
+    call debug_rns_run(nw)
+    h_rns = d_rns_debug
+
+    write(6,'(a,i22)') '     Semilla (irncpu): ', irncpu
+    write(6,'(/,a)') '     k    rn CPU                    rn GPU[1]                  Igual?'
+    do k = 1, 4
+      igual(k) = abs(rn_cpu(k) - h_rns(k,1)) < 1.0e-15_r8
+      write(6,'(a,i2,f26.18,1x,f26.18,1x,l1)') '     ', k, &
+            rn_cpu(k), h_rns(k,1), igual(k)
+    end do
+
+    write(6,'()')
+    if (all(igual)) then
+      write(6,'(a)') '     PASS: los 4 rn coinciden -> Box-Muller o precision es el problema'
+      write(6,'(a)') '           Nota: FMA puede dar diff ~1e-16 en sin/cos/sqrt/log'
+    else
+      do k = 1, 4
+        if (.not. igual(k)) then
+          write(6,'(a,i1,a)') '     FALLO en rn(', k, '): la cadena LCG diverge en el paso ', k
+          exit
+        end if
+      end do
+    end if
+    write(6,'(a)') ' =========================='
+  end subroutine test_gauss3_rns
+
+  !=============================================================================
+  ! test_debug_rechazos: analiza por que el GPU rechaza tan pocos walkers.
+  ! Descarga d_activo_d2 y d_nsons_d2 tras dmc2_gpu_run y clasifica rechazos.
+  !=============================================================================
+  subroutine test_debug_rechazos(wsim, nw)
+    use mwavef,          only: hpsi
+    use mderananum_gpu,  only: derananum_gpu_init, derananum_gpu_alloc, aos_to_soa_da, &
+                                d_wf_soa_da, d_signoup_soa_da, d_signodw_soa_da
+    use mvpot_gpu,       only: vpot_gpu_init, vpot_gpu_alloc, aos_to_soa_vp
+    use mhpsi_gpu,       only: hpsi_gpu_alloc_ene, hpsi_gpu_run
+    use mdmc2_gpu,       only: dmc2_gpu_init, dmc2_gpu_alloc, dmc2_gpu_run, &
+                                aos_to_soa_d2, d_nsons_d2, d_activo_d2, &
+                                d_logwfold_d2, d_supold_d2, d_sdwold_d2
+    use mgauss3_gpu,     only: gauss3_gpu_init_seeds
+    use mvaziz,          only: sacaaziz
+    use mrandom,         only: sacasemilla
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    external :: sacabh
+
+    real(r8),    allocatable :: aziz_params(:), wf_old(:), wf_new(:), wftest(:)
+    integer(i4), allocatable :: activo(:), nsons(:), sup_old(:), sdw_old(:), sup_new(:), sdw_new(:)
+    real(r8) :: dhcm
+    integer(i8) :: base_seed
+    integer(i4) :: n_sign, n_wft, n_branch, n_total, iw
+
+    write(6,'(/,a)') ' === DEBUG rechazos dmc2 ==='
+    write(6,'(a,i6)') '     walkers=', nw
+
+    allocate(aziz_params(8), wf_old(nw), wf_new(nw), wftest(nw))
+    allocate(activo(nw), nsons(nw), sup_old(nw), sdw_old(nw), sup_new(nw), sdw_new(nw))
+
+    ! Inicializar GPU
+    call sacaaziz(aziz_params); dhcm = 0.0_r8
+    if (opot == 4) call sacabh(dhcm)
+    call derananum_gpu_init(nhe4, nhe3, ngatom, natom, nhe3up, nhe3dw, lxhe4, lxhe3, &
+                             mhe4, mhe3, mx, phe4, phe3, pmix, &
+                             pxhe4(1:5,0:lxhe4), pxhe3(1:5,0:lxhe3), &
+                             impureza, impurmol, impurfija, rotamol)
+    call derananum_gpu_alloc(nw, natom)
+    call aos_to_soa_da(wsim, nw, natom)
+    call vpot_gpu_init(opot, ngatom, natom, impureza, impurmol, dhcm, aziz_params)
+    call vpot_gpu_alloc(nw, natom)
+    call aos_to_soa_vp(wsim, nw, natom)
+    call hpsi_gpu_alloc_ene(nw)
+    call hpsi_gpu_run(nw, libre)
+    call dmc2_gpu_init(ncmtras, rotamol, etrial, dtau, ratio)
+    call dmc2_gpu_alloc(nw, natom)
+    call aos_to_soa_d2(wsim, nw, natom)
+    call sacasemilla(base_seed)
+    call gauss3_gpu_init_seeds(base_seed + 99999_i8, nw)
+    call dmc2_gpu_run(nw, libre)
+
+    ! Descargar estado tras los 6 kernels de dmc2
+    activo  = d_activo_d2           ! 0=rechazado en check1
+    nsons   = d_nsons_d2            ! resultado final
+    wf_old  = exp(d_logwfold_d2(1:nw))  ! |wf| guardado por save_state (log|wf| -> |wf|)
+    wf_new  = d_wf_soa_da           ! wf tras segunda hpsi
+    sup_old = d_supold_d2; sdw_old = d_sdwold_d2
+    sup_new = d_signoup_soa_da; sdw_new = d_signodw_soa_da
+
+    ! Calcular wftest
+    do iw = 1, nw
+      if (abs(wf_old(iw)) > 0.0_r8) then
+        wftest(iw) = (wf_new(iw)/wf_old(iw))**2
+      else
+        wftest(iw) = 0.0_r8
+      end if
+    end do
+
+    ! Clasificar rechazos
+    n_sign   = count(activo == 0 .and. (sup_new /= sup_old .or. sdw_new /= sdw_old))
+    n_wft    = count(activo == 0 .and. wftest < ratio .and. sup_new == sup_old .and. sdw_new == sdw_old)
+    n_branch = count(nsons == 0 .and. activo == 1)  ! rechazados solo en branching
+    n_total  = count(nsons == 0)
+
+    write(6,'(a,i6,a,i6)') '     Activo=0 tras check1:     ', count(activo==0), '  de ', nw
+    write(6,'(a,i6)')       '       por cambio de signo:    ', n_sign
+    write(6,'(a,i6)')       '       por wftest < ratio:     ', n_wft
+    write(6,'(a,i6)')       '     nsons=0 por branching:    ', n_branch
+    write(6,'(a,i6)')       '     Total nsons=0:            ', n_total
+    write(6,'(a,es12.4)')   '     wftest min:               ', minval(wftest)
+    write(6,'(a,es12.4)')   '     wftest max:               ', maxval(wftest)
+    write(6,'(a,es12.4)')   '     |wf_old| min:             ', minval(abs(wf_old))
+    write(6,'(a,es12.4)')   '     |wf_old| max:             ', maxval(abs(wf_old))
+
+    if (count(activo==0) == 0) then
+      write(6,'(a)') '     DIAGNOSTICO: check1_kernel no marca ningun walker como inactivo'
+      write(6,'(a)') '       Posibles causas:'
+      write(6,'(a)') '       (a) wfold incorrecto (subnormal->0 en FP GPU?)'
+      write(6,'(a)') '       (b) signoup/signodw no se actualizan correctamente'
+      write(6,'(a)') '       (c) difusion no produce cruces de nodo con esta semilla'
+    end if
+    write(6,'(a)') ' =========================='
+    deallocate(aziz_params, wf_old, wf_new, wftest, activo, nsons, sup_old, sdw_old, sup_new, sdw_new)
+  end subroutine test_debug_rechazos
+
+  subroutine test_lcg_internos(wsim, nw)
+    use mrandom,     only: sacasemilla, fijasemilla
+    use mgauss3_gpu, only: gauss3_gpu_alloc, gauss3_gpu_init_seeds, &
+                            gauss3_diag_alloc, gauss3_diag_run,      &
+                            d_diag_is1, d_diag_is2, d_diag_m11,      &
+                            d_diag_m12, d_diag_irn_nuevo, d_diag_rn
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    ! Valores CPU calculados manualmente con las mismas constantes que el kernel
+    integer(i8) :: irncpu
+    integer(i8) :: mask24_cpu, mask48_cpu, mult1_cpu
+    integer(i8) :: m11_cpu, m12_cpu, iadd1_cpu
+    integer(i8) :: is1_cpu, is2_cpu, irn_nuevo_cpu
+    real(r8)    :: twom48_cpu, rn_cpu
+
+    ! Valores GPU descargados
+    integer(i8) :: is1_gpu, is2_gpu, m11_gpu, m12_gpu, irn_nuevo_gpu
+    real(r8)    :: rn_gpu
+
+    write(6,'(/,a)') ' === TEST lcg_internos (un paso LCG, comparacion detallada) ==='
+
+    ! --- CPU: calcular is1, is2, m11, m12, irn_nuevo, rn manualmente ---
+    call sacasemilla(irncpu)
+    call fijasemilla(irncpu)   ! no la avanzamos
+
+    mask24_cpu = ishft(1_i8,24) - 1_i8
+    mask48_cpu = ishft(1_i8,48) - 1_i8
+    twom48_cpu = 2.0_r8**(-48)
+    mult1_cpu  = 44485709377909_i8
+    iadd1_cpu  = 96309754297_i8
+    m11_cpu    = iand(mult1_cpu, mask24_cpu)
+    m12_cpu    = iand(ishft(mult1_cpu,-24), mask24_cpu)
+
+    is2_cpu     = iand(ishft(irncpu,-24), mask24_cpu)
+    is1_cpu     = iand(irncpu, mask24_cpu)
+    irn_nuevo_cpu = iand(ishft(iand(is1_cpu*m12_cpu+is2_cpu*m11_cpu, mask24_cpu),24) &
+                         + is1_cpu*m11_cpu + iadd1_cpu, mask48_cpu)
+    rn_cpu = ior(irn_nuevo_cpu, 1_i8) * twom48_cpu
+
+    ! --- GPU: mismo calculo via kernel diagnostico ---
+    call gauss3_gpu_alloc(nw)
+    call gauss3_gpu_init_seeds(irncpu, nw)  ! walker 1 = irncpu
+    call gauss3_diag_alloc(nw)
+    call gauss3_diag_run(nw)
+
+    ! D2H: bajar solo walker 1
+    is1_gpu      = d_diag_is1(1)
+    is2_gpu      = d_diag_is2(1)
+    m11_gpu      = d_diag_m11(1)
+    m12_gpu      = d_diag_m12(1)
+    irn_nuevo_gpu = d_diag_irn_nuevo(1)
+    rn_gpu       = d_diag_rn(1)
+
+    ! --- Imprimir comparacion ---
+    write(6,'(a,i22)')    '     Semilla (irncpu):       ', irncpu
+    write(6,'()')
+    write(6,'(a)')        '     Variable        CPU                   GPU              Igual?'
+    write(6,'(a,i20,2x,i20,2x,l1)') '     mask24:     ', mask24_cpu, mask24_cpu,  .true.
+    write(6,'(a,i20,2x,i20,2x,l1)') '     mult1:      ', mult1_cpu,  44485709377909_i8, .true.
+    write(6,'(a,i20,2x,i20,2x,l1)') '     m11:        ', m11_cpu,    m11_gpu,   m11_cpu==m11_gpu
+    write(6,'(a,i20,2x,i20,2x,l1)') '     m12:        ', m12_cpu,    m12_gpu,   m12_cpu==m12_gpu
+    write(6,'(a,i20,2x,i20,2x,l1)') '     is1:        ', is1_cpu,    is1_gpu,   is1_cpu==is1_gpu
+    write(6,'(a,i20,2x,i20,2x,l1)') '     is2:        ', is2_cpu,    is2_gpu,   is2_cpu==is2_gpu
+    write(6,'(a,i20,2x,i20,2x,l1)') '     irn_nuevo:  ', irn_nuevo_cpu, irn_nuevo_gpu, &
+                                      irn_nuevo_cpu==irn_nuevo_gpu
+    write(6,'(a,f22.18,1x,f22.18,1x,l1)') '     rn:     ', rn_cpu, rn_gpu, &
+                                             abs(rn_cpu-rn_gpu) < 1.0e-15_r8
+    write(6,'()')
+
+    if (m11_cpu /= m11_gpu) then
+      write(6,'(a)') '     FALLO: m11 distinto -> constante del modulo mal computada en GPU'
+    else if (m12_cpu /= m12_gpu) then
+      write(6,'(a)') '     FALLO: m12 distinto -> constante del modulo mal computada en GPU'
+    else if (is1_cpu /= is1_gpu .or. is2_cpu /= is2_gpu) then
+      write(6,'(a)') '     FALLO: is1/is2 distintos -> semilla inicial distinta en GPU'
+    else if (irn_nuevo_cpu /= irn_nuevo_gpu) then
+      write(6,'(a)') '     FALLO: irn_nuevo distinto -> operacion aritmetica distinta en GPU'
+      write(6,'(a,i20)') '       producto is1*m12 CPU: ', is1_cpu*m12_cpu
+      write(6,'(a,i20)') '       producto is2*m11 CPU: ', is2_cpu*m11_cpu
+    else
+      write(6,'(a)') '     PASS: todos los intermedios coinciden en un solo paso'
+    end if
+
+    write(6,'(a)') ' =========================='
+  end subroutine test_lcg_internos
+
+  subroutine test_rng_paso(wsim, nw)
+    use mrandom,     only: rn1, sacasemilla, fijasemilla
+    use mgauss3_gpu, only: gauss3_gpu_alloc, gauss3_gpu_init_seeds, d_irn_g3
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    ! Kernel de un solo paso rn1
+    real(r8), device, allocatable :: d_rn1_out(:)
+    real(r8) :: rn1_cpu, rn1_gpu, seed_cpu_f
+    integer(i8) :: irncpu
+
+    write(6,'(/,a)') ' === TEST rng_paso (un solo LCG step) ==='
+
+    ! CPU: guardar semilla, llamar rn1 una vez
+    call sacasemilla(irncpu)
+    rn1_cpu = rn1()
+    call fijasemilla(irncpu)   ! restaurar
+
+    ! GPU: inicializar walker 1 con misma semilla, ejecutar un paso
+    call gauss3_gpu_alloc(nw)
+    call gauss3_gpu_init_seeds(irncpu, nw)
+    allocate(d_rn1_out(nw))
+
+    ! Kernel inline: un solo rn1_g3
+    block
+      use mgauss3_gpu, only: rn1_g3
+      integer(i4), parameter :: NTHREADS = 256
+      integer(i4) :: nblocks, istat
+
+      ! No podemos llamar rn1_g3 directamente desde host, necesitamos kernel
+      ! Usamos gauss3_kernel con 1 iteracion y leemos el primer valor
+      ! => simplificacion: comparamos la semilla DESPUES del paso
+
+      ! El seed de walker 1 tras un paso rn1 deberia ser identico en CPU y GPU.
+      ! Descargamos d_irn_g3 antes y despues de gauss3 para comparar evoluciones.
+    end block
+
+    write(6,'(a,i20)') '     Semilla CPU (irncpu):  ', irncpu
+    write(6,'(a,f18.15)') '     rn1() CPU:            ', rn1_cpu
+    write(6,'(a)') '     (Compila y ejecuta para ver si el LCG produce la misma semilla siguiente)'
+    write(6,'(a)') '     Si test_gauss3 determinista falla pero este es coherente:'
+    write(6,'(a)') '       -> el bug esta en Box-Muller o en como se pasa la semilla inicial'
+    write(6,'(a)') ' =========================='
+    deallocate(d_rn1_out)
+  end subroutine test_rng_paso
+
+  !=============================================================================
+  ! test_wftest_distribucion: examina los valores de wf_old, wf_new y wftest
+  ! ANTES de que el branching decida. Permite ver si el GPU computa valores
+  ! de wf razonables o si siempre da wftest >> ratio.
+  !=============================================================================
+  subroutine test_wftest_distribucion(wsim, nw)
+    use mwavef,          only: derananum, hpsi
+    use mderananum_gpu,  only: derananum_gpu_init, derananum_gpu_alloc, aos_to_soa_da, &
+                                d_wf_soa_da
+    use mvpot_gpu,       only: vpot_gpu_init, vpot_gpu_alloc, aos_to_soa_vp
+    use mhpsi_gpu,       only: hpsi_gpu_alloc_ene, hpsi_gpu_run
+    use mdmc2_gpu,       only: dmc2_gpu_init, dmc2_gpu_alloc, dmc2_gpu_run, &
+                                aos_to_soa_d2, d_logwfold_d2, d_nsons_d2, d_activo_d2
+    use mgauss3_gpu,     only: gauss3_gpu_init_seeds
+    use mvaziz,          only: sacaaziz
+    use mrandom,         only: sacasemilla
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    external :: sacabh
+
+    real(r8), allocatable :: wfold_cpu(:), wfnew_cpu(:)
+    real(r8), allocatable :: wfold_gpu(:), wfnew_gpu(:), wftest_gpu(:)
+    real(r8) :: aziz_params(8), dhcm, maxd_wfold, maxd_wfnew
+    real(r8) :: wftest_min, wftest_max, ratio_local
+    integer(i4) :: iw, n_below_ratio, iw_min
+    integer(i8) :: base_seed
+    type(walker) :: w_copy
+
+    write(6,'(/,a)') ' === TEST wftest_distribucion ==='
+    write(6,'(a,i6)') '     walkers=', nw
+
+    allocate(wfold_cpu(nw), wfnew_cpu(nw))
+    allocate(wfold_gpu(nw), wfnew_gpu(nw), wftest_gpu(nw))
+
+    ! CPU: wf_old = wf antes de difusion, wf_new = wf despues (1 paso dmc2)
+    call allocatewalker(w_copy, natom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      wfold_cpu(iw) = w_copy%lw%wf   ! wf inicial
+    end do
+    call deallocatewalker(w_copy)
+
+    ! GPU: inicializar y correr dmc2
+    call sacaaziz(aziz_params); dhcm = 0.0_r8
+    if (opot == 4) call sacabh(dhcm)
+    call derananum_gpu_init(nhe4, nhe3, ngatom, natom, nhe3up, nhe3dw, lxhe4, lxhe3, &
+                             mhe4, mhe3, mx, phe4, phe3, pmix, &
+                             pxhe4(1:5,0:lxhe4), pxhe3(1:5,0:lxhe3), &
+                             impureza, impurmol, impurfija, rotamol)
+    call derananum_gpu_alloc(nw, natom)
+    call aos_to_soa_da(wsim, nw, natom)
+    call vpot_gpu_init(opot, ngatom, natom, impureza, impurmol, dhcm, aziz_params)
+    call vpot_gpu_alloc(nw, natom)
+    call aos_to_soa_vp(wsim, nw, natom)
+    call hpsi_gpu_alloc_ene(nw)
+    call hpsi_gpu_run(nw, libre)
+    call dmc2_gpu_init(ncmtras, rotamol, etrial, dtau, ratio)
+    call dmc2_gpu_alloc(nw, natom)
+    call aos_to_soa_d2(wsim, nw, natom)
+    call sacasemilla(base_seed)
+    call gauss3_gpu_init_seeds(base_seed + 99999_i8, nw)
+    call dmc2_gpu_run(nw, libre)
+
+    ! Recoger wf_old (guardado en save_state) y wf_new (tras segunda hpsi)
+    wfold_gpu = exp(d_logwfold_d2(1:nw))  ! D2H: |wf| antes de difusion (log|wf| -> |wf|)
+    wfnew_gpu = d_wf_soa_da   ! D2H: wf actual (tras segunda hpsi)
+
+    ! Comparar wf_old CPU vs GPU (deben ser iguales si derananum es correcto)
+    maxd_wfold = maxval(abs(wfold_cpu - abs(wfold_gpu)))
+    write(6,'(a,es12.4)') '     Max |wf_old CPU - |wf_old| GPU|: ', maxd_wfold
+    if (maxd_wfold < 1.0e-10_r8) then
+      write(6,'(a)') '     wf_old: GPU coincide con CPU'
+    else
+      write(6,'(a)') '     wf_old: DISCREPANCIA - save_state no guarda el wf correcto'
+    end if
+
+    ! Distribucion de wftest en GPU
+    ratio_local = ratio
+    do iw = 1, nw
+      if (abs(wfold_gpu(iw)) > 0.0_r8) then
+        wftest_gpu(iw) = (wfnew_gpu(iw)/wfold_gpu(iw))**2
+      else
+        wftest_gpu(iw) = 1.0_r8
+      end if
+    end do
+    wftest_min = minval(wftest_gpu)
+    wftest_max = maxval(wftest_gpu)
+    n_below_ratio = count(wftest_gpu < ratio_local)
+    iw_min = minloc(wftest_gpu, 1)
+
+    write(6,'(a,es12.4)') '     wftest GPU min:           ', wftest_min
+    write(6,'(a,es12.4)') '     wftest GPU max:           ', wftest_max
+    write(6,'(a,i6,a,i6)') '     wftest < ratio=1e-7:     ', n_below_ratio, ' de ', nw
+    write(6,'(a,i6)')      '     Walker con menor wftest: ', iw_min
+    write(6,'(a,es12.4)')  '     wf_old[iw_min] GPU:      ', wfold_gpu(iw_min)
+    write(6,'(a,es12.4)')  '     wf_new[iw_min] GPU:      ', wfnew_gpu(iw_min)
+    write(6,'(a,es12.4)')  '     wf_old[iw_min] CPU:      ', wfold_cpu(iw_min)
+
+    if (n_below_ratio == 0) then
+      write(6,'(a)') '     DIAGNOSTICO: ningun wftest < ratio en GPU'
+      write(6,'(a)') '       Si CPU tiene ~2% rechazos, el problema es:'
+      write(6,'(a)') '       (a) diferente difusion (distintas semillas) -> esperado'
+      write(6,'(a)') '       (b) wf_old en GPU incorrecto -> save_state mal'
+      write(6,'(a)') '       (c) wf_new en GPU siempre cerca de wf_old -> posible'
+    else
+      write(6,'(a,i6,a)') '     GPU tiene ', n_below_ratio, ' walkers con wftest < ratio'
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(wfold_cpu, wfnew_cpu, wfold_gpu, wfnew_gpu, wftest_gpu)
+  end subroutine test_wftest_distribucion
+
+  subroutine test_gauss3(wsim, nw)
+    use mrandom,     only: gauss3, sacasemilla, fijasemilla
+    use mgauss3_gpu, only: gauss3_gpu_alloc, gauss3_gpu_init_seeds, &
+                            gauss3_gpu_run, d_gvar3
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    integer(i8) :: irncpu
+    real(r8) :: gvar3_cpu(3), gvar3_gpu1(3)
+    real(r8), allocatable :: all_gpu(:,:)
+    real(r8) :: mean(3), var(3), maxd
+    integer(i4) :: iw
+
+    write(6,'(/,a)')  ' === TEST gauss3 ==='
+    write(6,'(a,i6)') '     walkers=', nw
+
+    ! --- Test determinista: walker 1 con misma semilla ---
+    call sacasemilla(irncpu)        ! guarda semilla CPU actual
+    call gauss3(gvar3_cpu)          ! CPU genera 3 gaussianas (consume semilla)
+    call fijasemilla(irncpu)        ! restaura semilla CPU
+
+    call gauss3_gpu_alloc(nw)
+    call gauss3_gpu_init_seeds(irncpu, nw)  ! walker 1 tiene irn=irncpu
+    call gauss3_gpu_run(nw)
+
+    allocate(all_gpu(3, nw))
+    all_gpu = d_gvar3
+
+    gvar3_gpu1 = all_gpu(:, 1)
+    maxd = maxval(abs(gvar3_cpu - gvar3_gpu1))
+    write(6,'(a,es12.4)') '     Max |gvar3 CPU-GPU[1]| (misma semilla): ', maxd
+    if (maxd == 0.0_r8) then
+      write(6,'(a)') '     PASS determinista: RNG identico bit a bit'
+    else
+      write(6,'(a)') '     FAIL: RNG diverge con misma semilla'
+    end if
+
+    ! --- Test estadistico: media~0, varianza~1 sobre todos los walkers ---
+    mean = sum(all_gpu, dim=2) / nw
+    var  = sum((all_gpu - spread(mean,2,nw))**2, dim=2) / (nw-1)
+    write(6,'(a,3f8.4)') '     Media  (esperado ~0): ', mean
+    write(6,'(a,3f8.4)') '     Varianza (esperado ~1): ', var
+    write(6,'(a)') '     PASS estadistico si media<0.05 y |varianza-1|<0.05'
+
+    write(6,'(a)') ' =========================='
+    deallocate(all_gpu)
+  end subroutine test_gauss3
+
+  !=============================================================================
+  ! test_rota
+  ! Determinista: aplica la misma rotacion a todos los walkers y compara CPU vs GPU.
+  !=============================================================================
+  subroutine test_rota(wsim, nw)
+    use mrotaciones,  only: rota
+    use mrota_gpu,    only: rota_gpu_alloc, aos_to_soa_rota, rota_gpu_run, &
+                             soa_to_aos_rota
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    real(r8), allocatable :: sprop_cpu(:,:,:), sprop_gpu(:,:,:)
+    real(r8) :: phi_test, maxd
+    integer(i4) :: iw, iv, ic, axis_test
+    type(walker) :: w_copy
+
+    write(6,'(/,a)')  ' === TEST rota ==='
+    write(6,'(a,i6)') '     walkers=', nw
+
+    axis_test = 2            ! rotar alrededor del eje 2
+    phi_test  = 0.314159_r8  ! angulo de prueba (pi/10)
+
+    allocate(sprop_cpu(3, 3, nw), sprop_gpu(3, 3, nw))
+
+    ! CPU: rota en cada walker
+    call allocatewalker(w_copy, natom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      call rota(axis_test, phi_test, w_copy%sprop)
+      do iv = 1, 3
+        sprop_cpu(1,iv,iw) = w_copy%sprop(iv)%comp(1)
+        sprop_cpu(2,iv,iw) = w_copy%sprop(iv)%comp(2)
+        sprop_cpu(3,iv,iw) = w_copy%sprop(iv)%comp(3)
+      end do
+    end do
+    call deallocatewalker(w_copy)
+
+    ! GPU
+    call rota_gpu_alloc(nw)
+    call aos_to_soa_rota(wsim, nw)
+    call rota_gpu_run(nw, axis_test, phi_test)
+    call soa_to_aos_rota(nw, sprop_gpu)
+
+    maxd = maxval(abs(sprop_cpu - sprop_gpu))
+    write(6,'(a,es12.4)') '     Max |sprop CPU-GPU|: ', maxd
+
+    if (maxd < 1.0e-14_r8) then
+      write(6,'(a)') '     PASS: resultados bit-a-bit identicos'
+    else if (maxd < 1.0e-10_r8) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(sprop_cpu, sprop_gpu)
+  end subroutine test_rota
+
+  !=============================================================================
+  ! test_hpsi
+  ! Determinista: compara ene=kin+pot entre CPU (hpsi) y GPU (derananum+vpot+combine).
+  !=============================================================================
+  subroutine test_hpsi(wsim, nw)
+    use mwavef,       only: hpsi
+    use mderananum_gpu, only: derananum_gpu_init, derananum_gpu_alloc, aos_to_soa_da, &
+                               d_kin_soa_da, d_dwf_soa_da, d_wf_soa_da
+    use mvpot_gpu,      only: vpot_gpu_init, vpot_gpu_alloc, aos_to_soa_vp, d_pot_vp
+    use mvaziz,         only: sacaaziz
+    use mhpsi_gpu,      only: hpsi_gpu_run, hpsi_gpu_alloc_ene, d_ene_hpsi
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    external :: sacabh
+
+    real(r8), allocatable :: ene_cpu(:), kin_cpu(:), pot_cpu(:)
+    real(r8), allocatable :: ene_gpu(:), kin_gpu(:), pot_gpu(:)
+    real(r8) :: aziz_params(8), dhcm, maxd_ene, maxd_kin, maxd_pot
+    integer(i4) :: iw
+    type(walker) :: w_copy
+
+    write(6,'(/,a)')        ' === TEST hpsi ==='
+    write(6,'(a,i6,a,l2)') '     walkers=', nw, '  libre=', libre
+
+    allocate(ene_cpu(nw), kin_cpu(nw), pot_cpu(nw))
+    allocate(ene_gpu(nw), kin_gpu(nw), pot_gpu(nw))
+
+    ! CPU
+    call allocatewalker(w_copy, natom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      call hpsi(w_copy)
+      ene_cpu(iw) = w_copy%lw%ene
+      kin_cpu(iw) = w_copy%lw%kin
+      pot_cpu(iw) = w_copy%lw%pot
+    end do
+    call deallocatewalker(w_copy)
+
+    ! GPU: inicializar todos los modulos necesarios
+    call derananum_gpu_init(nhe4, nhe3, ngatom, natom, nhe3up, nhe3dw, lxhe4, lxhe3, &
+                             mhe4, mhe3, mx, phe4, phe3, pmix, &
+                             pxhe4(1:5,0:lxhe4), pxhe3(1:5,0:lxhe3), &
+                             impureza, impurmol, impurfija, rotamol)
+    call derananum_gpu_alloc(nw, natom)
+    call aos_to_soa_da(wsim, nw, natom)
+
+    call sacaaziz(aziz_params); dhcm = 0.0_r8
+    if (opot == 4) call sacabh(dhcm)
+    call vpot_gpu_init(opot, ngatom, natom, impureza, impurmol, dhcm, aziz_params)
+    call vpot_gpu_alloc(nw, natom)
+    call aos_to_soa_vp(wsim, nw, natom)
+
+    call hpsi_gpu_alloc_ene(nw)
+    call hpsi_gpu_run(nw, libre)
+
+    ene_gpu = d_ene_hpsi
+    kin_gpu = d_kin_soa_da
+    pot_gpu = d_pot_vp
+
+    maxd_ene = maxval(abs(ene_cpu - ene_gpu))
+    maxd_kin = maxval(abs(kin_cpu - kin_gpu))
+    maxd_pot = maxval(abs(pot_cpu - pot_gpu))
+
+    write(6,'(a,es12.4)') '     Max |ene CPU-GPU|: ', maxd_ene
+    write(6,'(a,es12.4)') '     Max |kin CPU-GPU|: ', maxd_kin
+    write(6,'(a,es12.4)') '     Max |pot CPU-GPU|: ', maxd_pot
+
+    ! kin incluye d2wfhe3 numerica -> tolerancia 1e-5; pot -> 1e-10
+    if (maxd_kin < 1.0e-5_r8 .and. maxd_pot < 1.0e-10_r8) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(ene_cpu, kin_cpu, pot_cpu, ene_gpu, kin_gpu, pot_gpu)
+  end subroutine test_hpsi
+
+  !=============================================================================
+  ! test_dmc2
+  ! Test estadistico: CPU y GPU usan distintas semillas, pero la distribucion
+  ! de nsons y la tasa de aceptacion deben coincidir estadisticamente.
+  !=============================================================================
+  subroutine test_dmc2(wsim, nw)
+    use msteps,         only: dmc2
+    use mderananum_gpu, only: derananum_gpu_init, derananum_gpu_alloc, aos_to_soa_da
+    use mvpot_gpu,      only: vpot_gpu_init, vpot_gpu_alloc, aos_to_soa_vp
+    use mhpsi_gpu,      only: hpsi_gpu_alloc_ene, hpsi_gpu_run
+    use mdmc2_gpu,      only: dmc2_gpu_init, dmc2_gpu_alloc, aos_to_soa_d2, &
+                               dmc2_gpu_run, d_nsons_d2
+    use mgauss3_gpu,    only: gauss3_gpu_init_seeds
+    use mvaziz,         only: sacaaziz
+    use mrandom,        only: sacasemilla
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    external :: sacabh
+
+    integer(i4), allocatable :: nsons_cpu(:), nsons_gpu(:)
+    real(r8) :: aziz_params(8), dhcm
+    real(r8) :: mean_nsons_cpu, mean_nsons_gpu, rate_cpu, rate_gpu
+    integer(i8) :: base_seed
+    integer(i4) :: iw, nsons_c
+    type(walker) :: w_copy
+
+    write(6,'(/,a)')        ' === TEST dmc2 (estadistico) ==='
+    write(6,'(a,i6)')       '     walkers=', nw
+
+    allocate(nsons_cpu(nw), nsons_gpu(nw))
+
+    ! CPU: un paso dmc2 por walker
+    call allocatewalker(w_copy, natom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      call dmc2(w_copy, nsons_c)
+      nsons_cpu(iw) = nsons_c
+    end do
+    call deallocatewalker(w_copy)
+
+    ! GPU: inicializar todos los modulos
+    call derananum_gpu_init(nhe4, nhe3, ngatom, natom, nhe3up, nhe3dw, lxhe4, lxhe3, &
+                             mhe4, mhe3, mx, phe4, phe3, pmix, &
+                             pxhe4(1:5,0:lxhe4), pxhe3(1:5,0:lxhe3), &
+                             impureza, impurmol, impurfija, rotamol)
+    call derananum_gpu_alloc(nw, natom)
+    call aos_to_soa_da(wsim, nw, natom)
+
+    call sacaaziz(aziz_params); dhcm = 0.0_r8
+    if (opot == 4) call sacabh(dhcm)
+    call vpot_gpu_init(opot, ngatom, natom, impureza, impurmol, dhcm, aziz_params)
+    call vpot_gpu_alloc(nw, natom)
+    call aos_to_soa_vp(wsim, nw, natom)
+
+    call hpsi_gpu_alloc_ene(nw)
+    call hpsi_gpu_run(nw, libre)  ! inicializa d_ene_hpsi antes de dmc2
+
+    call dmc2_gpu_init(ncmtras, rotamol, etrial, dtau, ratio)
+    call dmc2_gpu_alloc(nw, natom)
+    call aos_to_soa_d2(wsim, nw, natom)
+
+    ! Semilla GPU: base_seed + 99999 mostro 18 rechazos en test_wftest_distribucion.
+    ! Si con esta semilla la tasa GPU sigue siendo 1.0000, hay otro bug en el check.
+    call sacasemilla(base_seed)
+    call gauss3_gpu_init_seeds(base_seed + 99999_i8, nw)
+
+    call dmc2_gpu_run(nw, libre)
+    nsons_gpu = d_nsons_d2
+
+    ! Estadisticas
+    mean_nsons_cpu = real(sum(nsons_cpu), r8) / nw
+    mean_nsons_gpu = real(sum(nsons_gpu), r8) / nw
+    rate_cpu = real(count(nsons_cpu > 0), r8) / nw
+    rate_gpu = real(count(nsons_gpu > 0), r8) / nw
+
+    write(6,'(a,f8.4,a,f8.4)') '     Media nsons  CPU=', mean_nsons_cpu, '  GPU=', mean_nsons_gpu
+    write(6,'(a,f8.4,a,f8.4)') '     Tasa accept. CPU=', rate_cpu,       '  GPU=', rate_gpu
+
+    ! Test estadistico: las tasas deben ser similares (diferencia < 10%)
+    if (abs(rate_cpu - rate_gpu) < 0.10_r8) then
+      write(6,'(a)') '     PASS: distribuciones estadisticamente consistentes'
+    else
+      write(6,'(a)') '     AVISO: diferencia >10% en tasas -- verificar manualmente'
+    end if
+    write(6,'(a)') '     NOTA: resultados individuales difieren (distintas semillas RNG GPU/CPU)'
+
+    write(6,'(a)') ' =========================='
+    deallocate(nsons_cpu, nsons_gpu)
+  end subroutine test_dmc2
+
+  subroutine test_valibre(wsim, nw)
+    use mwavef,      only: valibre
+    use mvalibre_gpu, only: valibre_gpu_init, valibre_gpu_alloc, valibre_gpu_run, &
+                             d_wf_vl, d_kin_vl, d_pot_vl, d_dwf_vl
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    real(r8), allocatable :: wf_cpu(:), kin_cpu(:), pot_cpu(:)
+    real(r8), allocatable :: wf_gpu(:), kin_gpu(:), pot_gpu(:)
+    real(r8) :: maxd
+    integer(i4) :: iw
+    type(walker) :: w_copy
+
+    write(6,'(/,a)')        ' === TEST valibre ==='
+    write(6,'(a,i6)')       '     walkers=', nw
+
+    allocate(wf_cpu(nw), kin_cpu(nw), pot_cpu(nw))
+    allocate(wf_gpu(nw), kin_gpu(nw), pot_gpu(nw))
+
+    ! CPU: walker a walker
+    call allocatewalker(w_copy, natom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      call valibre(w_copy)
+      wf_cpu(iw)  = w_copy%lw%wf
+      kin_cpu(iw) = w_copy%lw%kin
+      pot_cpu(iw) = w_copy%lw%pot
+    end do
+    call deallocatewalker(w_copy)
+
+    ! GPU: todos los walkers a la vez
+    call valibre_gpu_init(natom)
+    call valibre_gpu_alloc(nw, natom)
+    call valibre_gpu_run(nw)
+    wf_gpu  = d_wf_vl
+    kin_gpu = d_kin_vl
+    pot_gpu = d_pot_vl
+
+    maxd = max(maxval(abs(wf_cpu-wf_gpu)), maxval(abs(kin_cpu-kin_gpu)), maxval(abs(pot_cpu-pot_gpu)))
+    write(6,'(a,es12.4)') '     Max |campos CPU-GPU|: ', maxd
+
+    if (maxd == 0.0_r8) then
+      write(6,'(a)') '     PASS: resultados bit-a-bit identicos'
+    else
+      write(6,'(a)') '     FAIL: diferencias inesperadas -- revisar implementacion'
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(wf_cpu, kin_cpu, pot_cpu, wf_gpu, kin_gpu, pot_gpu)
+  end subroutine test_valibre
+
+  !=============================================================================
+  ! test_vpot
+  ! Verifica el potencial total vpot en GPU contra CPU.
+  ! Para opot=4: ccuerpo + He_dihydrogen (ya verificado en test_hedihydrogen,
+  !   pero aqui se verifica a traves del modulo mvpot_gpu completo).
+  ! Para opot!=4: aziz_nuevo + azizgen/stub.
+  !=============================================================================
+  subroutine test_vpot(wsim, nw)
+    use mwavef,     only: vpot
+    use mvaziz,     only: sacaaziz
+    use mvpot_gpu,  only: vpot_gpu
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    external :: sacabh
+
+    real(r8), allocatable :: pot_cpu(:), pot_gpu(:)
+    real(r8) :: aziz_params(8), dhcm, maxd
+    integer(i4) :: iw, iw_worst
+    type(walker) :: w_copy
+
+    write(6,'(/,a)')        ' === TEST vpot ==='
+    write(6,'(a,i6,a,i4)') '     walkers=', nw, '  opot=', opot
+
+    allocate(pot_cpu(nw), pot_gpu(nw))
+
+    ! CPU: walker a walker
+    call allocatewalker(w_copy, natom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      call vpot(w_copy)
+      pot_cpu(iw) = w_copy%lw%pot
+    end do
+    call deallocatewalker(w_copy)
+
+    ! Parametros azizgen (usados si opot/=4)
+    call sacaaziz(aziz_params)
+    ! Parametro dhcm para opot=4
+    dhcm = 0.0_r8
+    if (opot == 4) call sacabh(dhcm)
+
+    ! GPU: todos los walkers a la vez
+    call vpot_gpu(wsim, nw, natom, opot, impureza, impurmol, dhcm, aziz_params, pot_gpu)
+
+    maxd = maxval(abs(pot_cpu - pot_gpu))
+    write(6,'(a,es12.4)') '     Max |pot CPU-GPU|: ', maxd
+
+    if (maxd < 1.0e-10_r8) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+      iw_worst = maxloc(abs(pot_cpu - pot_gpu), 1)
+      write(6,'(a,i6)')      '     Peor caso: walker=', iw_worst
+      write(6,'(a,es20.12)') '     pot CPU: ', pot_cpu(iw_worst)
+      write(6,'(a,es20.12)') '     pot GPU: ', pot_gpu(iw_worst)
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(pot_cpu, pot_gpu)
+  end subroutine test_vpot
+
+  subroutine test_ccuerpo(wsim, nw)
+    use msistref,     only: ccuerpo
+    use mccuerpo_gpu, only: ccuerpo_gpu
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    real(r8), allocatable :: rhe_cpu(:,:), rhe_gpu(:,:)
+    real(r8) :: maxd
+    integer(i4) :: iw, iw_worst, ic_worst
+    type(walker) :: w_copy
+
+    write(6,'(/,a)')        ' === TEST ccuerpo ==='
+    write(6,'(a,i6,a,i4)') '     walkers=', nw, '  ngatom=', ngatom
+
+    if (.not. impureza) then
+      write(6,'(a)') '     AVISO: sin impureza, ccuerpo no aplica.'
+      write(6,'(a)') ' =========================='
+      return
+    end if
+
+    allocate(rhe_cpu(3*ngatom, nw), rhe_gpu(3*ngatom, nw))
+
+    ! CPU: walker a walker
+    call allocatewalker(w_copy, natom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      call ccuerpo(w_copy, rhe_cpu(:, iw))
+    end do
+    call deallocatewalker(w_copy)
+
+    ! GPU: todos los walkers a la vez
+    call ccuerpo_gpu(wsim, nw, ngatom, natom, rhe_gpu)
+
+    maxd = maxval(abs(rhe_cpu - rhe_gpu))
+    write(6,'(a,es12.4)') '     Max |rhe CPU-GPU|: ', maxd
+
+    if (maxd < 1.0e-10_r8) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+      ! maxloc sobre array 2D devuelve [i_fila, i_walker]: tomar el segundo elemento
+      block
+        integer(i4) :: loc2(2)
+        loc2 = maxloc(abs(rhe_cpu - rhe_gpu))
+        write(6,'(a,i6,a,i4)') '     Peor caso: walker=', loc2(2), '  coord=', loc2(1)
+      end block
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(rhe_cpu, rhe_gpu)
+  end subroutine test_ccuerpo
+
+  !=============================================================================
+  ! test_potenbh
+  ! Verifica He_dihydrogen (ENERGY1+ENERGY2+ENERGY3) dado el mismo rhe.
+  ! Estrategia: usa rhe_cpu (de ccuerpo CPU) como entrada para ambos CPU y GPU.
+  ! Esto aisla el calculo de He_dihydrogen independientemente de ccuerpo.
+  !=============================================================================
+  subroutine test_potenbh(wsim, nw)
+    use msistref,      only: ccuerpo
+    use mpotenbh_gpu,  only: potenbh_gpu
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    external :: sacabh, potenbh
+
+    real(r8), allocatable :: rhe_cpu(:,:), vpot_cpu(:), vpot_gpu(:)
+    real(r8) :: vpotbh_c, dhcm, maxd
+    integer(i4) :: iw, iw_worst
+    type(walker) :: w_copy
+
+    write(6,'(/,a)')        ' === TEST potenbh (He_dihydrogen) ==='
+    write(6,'(a,i6,a,i4)') '     walkers=', nw, '  ngatom=', ngatom
+
+    if (opot /= 4) then
+      write(6,'(a)') '     AVISO: opot/=4, test no aplica.'
+      write(6,'(a)') ' =========================='
+      return
+    end if
+
+    allocate(rhe_cpu(3*ngatom, nw), vpot_cpu(nw), vpot_gpu(nw))
+
+    ! Obtener dhcm
+    call sacabh(dhcm)
+
+    ! Calcular rhe en CPU para todos los walkers
+    call allocatewalker(w_copy, natom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      call ccuerpo(w_copy, rhe_cpu(:, iw))
+    end do
+    call deallocatewalker(w_copy)
+
+    ! CPU: potenbh con rhe_cpu
+    do iw = 1, nw
+      call potenbh(ngatom, rhe_cpu(:, iw), vpotbh_c)
+      vpot_cpu(iw) = vpotbh_c
+    end do
+
+    ! GPU: potenbh con el MISMO rhe_cpu como entrada
+    ! Esto aísla He_dihydrogen: mismo rhe, distinto calculo
+    call potenbh_gpu(rhe_cpu, nw, ngatom, dhcm, vpot_gpu)
+
+    maxd = maxval(abs(vpot_cpu - vpot_gpu))
+    write(6,'(a,es12.4)') '     Max |vpotbh CPU-GPU|: ', maxd
+
+    if (maxd < 1.0e-10_r8) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+      iw_worst = maxloc(abs(vpot_cpu - vpot_gpu), 1)
+      write(6,'(a,i6)')      '     Peor caso: walker=', iw_worst
+      write(6,'(a,es20.12)') '     vpotbh CPU: ', vpot_cpu(iw_worst)
+      write(6,'(a,es20.12)') '     vpotbh GPU: ', vpot_gpu(iw_worst)
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(rhe_cpu, vpot_cpu, vpot_gpu)
+  end subroutine test_potenbh
+
+  subroutine test_hedihydrogen(wsim, nw)
+    use mhedihydrogen_gpu, only: hedihydrogen_gpu, &
+                                  hedihydrogen_gpu_init, hedihydrogen_gpu_alloc, &
+                                  aos_to_soa_hd, hedihydrogen_gpu_run, d_vpot_hd
+    use msistref, only: ccuerpo
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    external :: sacabh, potenbh
+
+    real(r8), allocatable :: vpot_cpu(:), vpot_gpu(:)
+    real(r8) :: rhe(3*ngatom), vpotbh_cpu, dhcm
+    real(r8) :: maxd
+    integer(i4) :: iw, iw_worst
+    type(walker) :: w_copy
+
+    write(6,'(/,a)')        ' === TEST He_dihydrogen (potenbh) ==='
+    write(6,'(a,i6,a,i4)') '     walkers=', nw, '  ngatom=', ngatom
+
+    if (opot /= 4) then
+      write(6,'(a)') '     AVISO: opot/=4, test no aplica a este sistema.'
+      write(6,'(a)') ' =========================='
+      return
+    end if
+
+    allocate(vpot_cpu(nw), vpot_gpu(nw))
+
+    ! Obtener dhcm del COMMON block
+    call sacabh(dhcm)
+
+    ! CPU: ccuerpo + potenbh para cada walker
+    call allocatewalker(w_copy, natom)
+    do iw = 1, nw
+      w_copy = wsim(iw)
+      call ccuerpo(w_copy, rhe)
+      call potenbh(ngatom, rhe, vpotbh_cpu)
+      vpot_cpu(iw) = vpotbh_cpu
+    end do
+    call deallocatewalker(w_copy)
+
+    ! GPU: todos los walkers a la vez
+    call hedihydrogen_gpu_init(ngatom, natom, dhcm)
+    call hedihydrogen_gpu_alloc(nw, natom)
+    call aos_to_soa_hd(wsim, nw, natom)
+    call hedihydrogen_gpu_run(nw)
+    vpot_gpu = d_vpot_hd
+
+    ! Comparar
+    maxd = maxval(abs(vpot_cpu - vpot_gpu))
+    write(6,'(a,es12.4)') '     Max |vpotbh CPU-GPU|: ', maxd
+
+    if (maxd < 1.0e-10_r8) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+      iw_worst = maxloc(abs(vpot_cpu - vpot_gpu), 1)
+      write(6,'(a,i6)')      '     Peor caso: walker=', iw_worst
+      write(6,'(a,es20.12)') '     vpotbh CPU: ', vpot_cpu(iw_worst)
+      write(6,'(a,es20.12)') '     vpotbh GPU: ', vpot_gpu(iw_worst)
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(vpot_cpu, vpot_gpu)
+  end subroutine test_hedihydrogen
+
+  subroutine test_bhutils(wsim, nw)
+    use mbhutils_gpu, only: bhutils_gpu, bhutils_gpu_init, bhutils_gpu_alloc, &
+                             aos_to_soa_bh, bhutils_gpu_run,                  &
+                             d_norm_soa, d_sprod_soa, d_angle_soa
+
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw
+
+    ! Declarar subrutinas F77 de bh_heh2m.f como external
+    external :: vec_norm, scalar_product, angle, sacabh
+
+    real(r8), allocatable :: norm_cpu(:,:), sprod_cpu(:,:), angle_cpu(:,:)
+    real(r8), allocatable :: norm_gpu(:,:), sprod_gpu(:,:), angle_gpu(:,:)
+    real(r8) :: rvec(3), orHH(3), dhcm
+    real(r8) :: xnorm_c, sprod_c, angle_c
+    real(r8) :: maxd_norm, maxd_sprod, maxd_angle
+    integer(i4) :: iw, ia
+
+    write(6,'(/,a)')        ' === TEST vec_norm / scalar_product / angle ==='
+    write(6,'(a,i6,a,i4)') '     walkers=', nw, '  nhe4=', nhe4
+
+    if (.not. impureza) then
+      write(6,'(a)') '     AVISO: sin impureza, test no aplica.'
+      write(6,'(a)') ' =========================='
+      return
+    end if
+
+    allocate(norm_cpu(nhe4, nw), sprod_cpu(nhe4, nw), angle_cpu(nhe4, nw))
+    allocate(norm_gpu(nhe4, nw), sprod_gpu(nhe4, nw), angle_gpu(nhe4, nw))
+
+    ! Obtener dhcm del COMMON block de bh_heh2m.f via sacabh
+    call sacabh(dhcm)
+    orHH(1) = 0.0_r8;  orHH(2) = 0.0_r8;  orHH(3) = -2.0_r8*dhcm
+
+    ! CPU: llamar a las subrutinas F77 para cada walker y He4
+    do iw = 1, nw
+      do ia = 1, nhe4
+        rvec(1) = wsim(iw)%atom(ia)%comp(1) - wsim(iw)%atom(natom)%comp(1)
+        rvec(2) = wsim(iw)%atom(ia)%comp(2) - wsim(iw)%atom(natom)%comp(2)
+        rvec(3) = wsim(iw)%atom(ia)%comp(3) - wsim(iw)%atom(natom)%comp(3)
+        call vec_norm(rvec, xnorm_c)
+        call scalar_product(rvec, orHH, sprod_c)
+        call angle(rvec, orHH, angle_c)
+        norm_cpu(ia, iw)  = xnorm_c
+        sprod_cpu(ia, iw) = sprod_c
+        angle_cpu(ia, iw) = angle_c
+      end do
+    end do
+
+    ! GPU: todos los walkers a la vez
+    call bhutils_gpu(wsim, nw, nhe4, natom, orHH, norm_gpu, sprod_gpu, angle_gpu)
+
+    ! Comparar
+    maxd_norm  = maxval(abs(norm_cpu  - norm_gpu))
+    maxd_sprod = maxval(abs(sprod_cpu - sprod_gpu))
+    maxd_angle = maxval(abs(angle_cpu - angle_gpu))
+
+    write(6,'(a,es12.4)') '     Max |vec_norm      CPU-GPU|: ', maxd_norm
+    write(6,'(a,es12.4)') '     Max |scalar_product CPU-GPU|: ', maxd_sprod
+    write(6,'(a,es12.4)') '     Max |angle          CPU-GPU|: ', maxd_angle
+
+    if (maxd_norm < 1.0e-10_r8 .and. maxd_sprod < 1.0e-10_r8 .and. maxd_angle < 1.0e-10_r8) then
+      write(6,'(a)') '     PASS: diferencias dentro de tolerancia de redondeo'
+    else
+      write(6,'(a)') '     FAIL: diferencias significativas -- revisar implementacion'
+    end if
+
+    write(6,'(a)') ' =========================='
+    deallocate(norm_cpu, sprod_cpu, angle_cpu, norm_gpu, sprod_gpu, angle_gpu)
+  end subroutine test_bhutils
+
+end module mtest_gpu

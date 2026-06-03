@@ -1,0 +1,241 @@
+! mwavefx_gpu.cuf
+!
+! Kernel CUDA para wavefx (mwavef.f90).
+! Inlinea calpleg, uhe4x y uhe3x como device functions.
+!
+! Ademas de posiciones (atom), necesita la orientacion molecular (sprop)
+! de cada walker porque wavefx usa w1%sprop(3) para calcular cos(theta).
+! El SOA incluye atom(natom) + sprop(3,3).
+!
+module mwavefx_gpu
+  use cudafor
+  implicit none
+
+  integer, private, parameter :: r8 = selected_real_kind(15,9)
+  integer, private, parameter :: i4 = selected_int_kind(9)
+
+  integer(i4), parameter, public :: NATOM_MAX_WFX = 26
+  integer(i4), parameter, public :: LMAX_WFX      = 8
+
+  !---------------------------------------------------------------------------
+  ! Parametros en device
+  !---------------------------------------------------------------------------
+  integer(i4), device, public :: d_nhe4_x, d_ngatom_x, d_natom_x
+  integer(i4), device, public :: d_lxhe4_x, d_lxhe3_x
+  real(r8),    device, public :: d_pxhe4_x(5, 0:LMAX_WFX)
+  real(r8),    device, public :: d_pxhe3_x(5, 0:LMAX_WFX)
+  logical,     device, public :: d_impureza_x, d_impurmol_x
+
+  !---------------------------------------------------------------------------
+  ! SOA en device
+  ! d_atom_soa_x(ic, ia, iw)  : posiciones de natom atomos
+  ! d_sprop_soa_x(ic, iv, iw) : orientacion molecular (3 ejes x 3 componentes)
+  ! d_wfx_soa(iw)             : resultado
+  !---------------------------------------------------------------------------
+  real(r8), device, allocatable, public :: d_atom_soa_x(:,:,:)
+  real(r8), device, allocatable, public :: d_sprop_soa_x(:,:,:)
+  real(r8), device, allocatable, public :: d_wfx_soa(:)
+
+contains
+
+  !===========================================================================
+  subroutine wavefx_gpu_init(nhe4_h, ngatom_h, natom_h,    &
+                              lxhe4_h, lxhe3_h,             &
+                              pxhe4_h, pxhe3_h,             &
+                              impureza_h, impurmol_h)
+    integer(i4), intent(in) :: nhe4_h, ngatom_h, natom_h
+    integer(i4), intent(in) :: lxhe4_h, lxhe3_h
+    real(r8),    intent(in) :: pxhe4_h(5, 0:lxhe4_h)
+    real(r8),    intent(in) :: pxhe3_h(5, 0:lxhe3_h)
+    logical,     intent(in) :: impureza_h, impurmol_h
+    d_nhe4_x    = nhe4_h
+    d_ngatom_x  = ngatom_h
+    d_natom_x   = natom_h
+    d_lxhe4_x   = lxhe4_h
+    d_lxhe3_x   = lxhe3_h
+    d_pxhe4_x(1:5, 0:lxhe4_h) = pxhe4_h
+    d_pxhe3_x(1:5, 0:lxhe3_h) = pxhe3_h
+    d_impureza_x  = impureza_h
+    d_impurmol_x  = impurmol_h
+  end subroutine wavefx_gpu_init
+
+  !===========================================================================
+  subroutine wavefx_gpu_alloc(nw, na)
+    integer(i4), intent(in) :: nw, na
+    integer :: istat
+    if (allocated(d_atom_soa_x)) deallocate(d_atom_soa_x, d_sprop_soa_x, d_wfx_soa)
+    allocate(d_atom_soa_x(3, na, nw),  stat=istat)
+    allocate(d_sprop_soa_x(3, 3, nw), stat=istat)
+    allocate(d_wfx_soa(nw),            stat=istat)
+  end subroutine wavefx_gpu_alloc
+
+  !===========================================================================
+  ! AOS -> SOA (H2D): posiciones + orientacion molecular
+  !===========================================================================
+  subroutine aos_to_soa_x(wsim, nw, na)
+    use mtipos, only: walker
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw, na
+    real(r8) :: h_atom(3, na, nw)
+    real(r8) :: h_sprop(3, 3, nw)
+    integer(i4) :: iw, ia, iv
+    do iw = 1, nw
+      do ia = 1, na
+        h_atom(1, ia, iw) = wsim(iw)%atom(ia)%comp(1)
+        h_atom(2, ia, iw) = wsim(iw)%atom(ia)%comp(2)
+        h_atom(3, ia, iw) = wsim(iw)%atom(ia)%comp(3)
+      end do
+      do iv = 1, 3
+        h_sprop(1, iv, iw) = wsim(iw)%sprop(iv)%comp(1)
+        h_sprop(2, iv, iw) = wsim(iw)%sprop(iv)%comp(2)
+        h_sprop(3, iv, iw) = wsim(iw)%sprop(iv)%comp(3)
+      end do
+    end do
+    d_atom_soa_x  = h_atom
+    d_sprop_soa_x = h_sprop
+  end subroutine aos_to_soa_x
+
+  !===========================================================================
+  ! Device: polinomios de Legendre hasta grado l (replica calpleg de mlegendre)
+  !===========================================================================
+  attributes(device) subroutine calpleg_d_x(l, x, pl)
+    integer(i4), value :: l
+    real(r8), value    :: x
+    real(r8), intent(out) :: pl(0:LMAX_WFX)
+    integer(i4) :: il
+    pl(0) = 1.0_r8
+    if (l < 1) return
+    pl(1) = x
+    do il = 1, l-1
+      pl(il+1) = ((2.0_r8*il + 1.0_r8)*x*pl(il) - il*pl(il-1)) / real(il+1, r8)
+    end do
+  end subroutine calpleg_d_x
+
+  !===========================================================================
+  ! Device: potencial He4-impureza (replica uhe4x de mangwavef.f90)
+  !===========================================================================
+  attributes(device) function uhe4x_d_x(rij, cth) result(u)
+    real(r8), value :: rij, cth
+    real(r8) :: u, pl(0:LMAX_WFX), ul
+    integer(i4) :: il
+    call calpleg_d_x(d_lxhe4_x, cth, pl)
+    do il = 1, d_lxhe4_x
+      pl(il) = 1.0_r8 - pl(il)
+    end do
+    u = 0.0_r8
+    do il = 0, d_lxhe4_x
+      ul = -d_pxhe4_x(1,il)/rij**d_pxhe4_x(2,il) &
+           - d_pxhe4_x(3,il)*rij**d_pxhe4_x(4,il) &
+           - d_pxhe4_x(5,il)*log(rij)
+      u = u + ul*pl(il)
+    end do
+  end function uhe4x_d_x
+
+  !===========================================================================
+  ! Device: potencial He3-impureza (replica uhe3x de mangwavef.f90)
+  !===========================================================================
+  attributes(device) function uhe3x_d_x(rij, cth) result(u)
+    real(r8), value :: rij, cth
+    real(r8) :: u, pl(0:LMAX_WFX), ul
+    integer(i4) :: il
+    call calpleg_d_x(d_lxhe3_x, cth, pl)
+    do il = 1, d_lxhe3_x
+      pl(il) = 1.0_r8 - pl(il)
+    end do
+    u = 0.0_r8
+    do il = 0, d_lxhe3_x
+      ul = -d_pxhe3_x(1,il)/rij**d_pxhe3_x(2,il) &
+           - d_pxhe3_x(3,il)*rij**d_pxhe3_x(4,il) &
+           - d_pxhe3_x(5,il)*log(rij)
+      u = u + ul*pl(il)
+    end do
+  end function uhe3x_d_x
+
+  !===========================================================================
+  ! Kernel wavefx: un hilo por walker
+  !===========================================================================
+  attributes(global) subroutine wavefx_kernel(nw)
+    integer(i4), value :: nw
+    integer(i4) :: iw, jatom
+    real(r8) :: atom(3, NATOM_MAX_WFX), sprop3(3)
+    real(r8) :: ujas, rij, cth, dnor, rt(3)
+
+    iw = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+    if (iw > nw) return
+
+    if (.not. d_impureza_x) then
+      d_wfx_soa(iw) = 1.0_r8
+      return
+    end if
+
+    do jatom = 1, d_natom_x
+      atom(1,jatom) = d_atom_soa_x(1, jatom, iw)
+      atom(2,jatom) = d_atom_soa_x(2, jatom, iw)
+      atom(3,jatom) = d_atom_soa_x(3, jatom, iw)
+    end do
+    ! Solo se usa el eje molecular sprop(3) para calcular cos(theta)
+    sprop3(1) = d_sprop_soa_x(1, 3, iw)
+    sprop3(2) = d_sprop_soa_x(2, 3, iw)
+    sprop3(3) = d_sprop_soa_x(3, 3, iw)
+
+    cth  = 0.0_r8
+    ujas = 0.0_r8
+    if (d_impurmol_x) dnor = sqrt(sprop3(1)**2 + sprop3(2)**2 + sprop3(3)**2)
+
+    do jatom = 1, d_nhe4_x
+      rt(1) = atom(1,jatom) - atom(1,d_natom_x)
+      rt(2) = atom(2,jatom) - atom(2,d_natom_x)
+      rt(3) = atom(3,jatom) - atom(3,d_natom_x)
+      rij = sqrt(rt(1)**2 + rt(2)**2 + rt(3)**2)
+      if (d_impurmol_x) &
+        cth = (rt(1)*sprop3(1) + rt(2)*sprop3(2) + rt(3)*sprop3(3)) / (dnor*rij)
+      ujas = ujas + uhe4x_d_x(rij, cth)
+    end do
+
+    do jatom = d_nhe4_x+1, d_ngatom_x
+      rt(1) = atom(1,jatom) - atom(1,d_natom_x)
+      rt(2) = atom(2,jatom) - atom(2,d_natom_x)
+      rt(3) = atom(3,jatom) - atom(3,d_natom_x)
+      rij = sqrt(rt(1)**2 + rt(2)**2 + rt(3)**2)
+      if (d_impurmol_x) &
+        cth = (rt(1)*sprop3(1) + rt(2)*sprop3(2) + rt(3)*sprop3(3)) / (dnor*rij)
+      ujas = ujas + uhe3x_d_x(rij, cth)
+    end do
+
+    d_wfx_soa(iw) = exp(ujas)
+  end subroutine wavefx_kernel
+
+  !===========================================================================
+  subroutine wavefx_gpu_run(nw)
+    integer(i4), intent(in) :: nw
+    integer(i4), parameter  :: NTHREADS = 256
+    integer(i4) :: nblocks
+    integer      :: istat
+    nblocks = (nw + NTHREADS - 1) / NTHREADS
+    call wavefx_kernel<<<nblocks, NTHREADS>>>(nw)
+    istat = cudaDeviceSynchronize()
+  end subroutine wavefx_gpu_run
+
+  !===========================================================================
+  ! SOA -> AOS (D2H)
+  !===========================================================================
+  subroutine soa_to_aos_wfx(nw, wfx_out)
+    integer(i4), intent(in)  :: nw
+    real(r8),    intent(out) :: wfx_out(nw)
+    wfx_out = d_wfx_soa
+  end subroutine soa_to_aos_wfx
+
+  !===========================================================================
+  ! Wrapper completo
+  !===========================================================================
+  subroutine wavefx_gpu(wsim, nw, na, wfx_out)
+    use mtipos, only: walker
+    type(walker), intent(in) :: wsim(nw)
+    integer(i4),  intent(in) :: nw, na
+    real(r8),    intent(out) :: wfx_out(nw)
+    call aos_to_soa_x(wsim, nw, na)
+    call wavefx_gpu_run(nw)
+    call soa_to_aos_wfx(nw, wfx_out)
+  end subroutine wavefx_gpu
+
+end module mwavefx_gpu
