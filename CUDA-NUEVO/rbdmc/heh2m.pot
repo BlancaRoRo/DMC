@@ -1,7 +1,0 @@
-0.52943550
-! distancia del centro de masas a un atomo de H en H2
-
-
-0.086132964023519980     
-
-! esto es el valor de 1K en meV que se usa en las rutinas de calculo del potencial

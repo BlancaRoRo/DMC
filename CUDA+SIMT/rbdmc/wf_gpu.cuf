@@ -1,4 +1,0 @@
-! wf_gpu.cuf — stub vacio. GPU desactivada para depuracion.
-module wf_gpu
-  implicit none
-end module wf_gpu

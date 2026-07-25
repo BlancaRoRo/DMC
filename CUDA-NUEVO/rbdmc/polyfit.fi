@@ -1,9 +1,0 @@
-c  Polyfit common block: used in gen_polyfit and in rkhs2coef
-c  note that nn must be known in any routine that includes this file
-
-      integer maxnnp
-      parameter (maxnnp = 4)
-      common /polyfit/ fitmat,  nnp
-      integer nnp
-      double precision fitmat(maxnnp, nn)
-
