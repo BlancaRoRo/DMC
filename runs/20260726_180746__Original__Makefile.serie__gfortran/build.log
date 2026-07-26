@@ -1,0 +1,55 @@
+gfortran -O2 -c mparametros.f90
+gfortran -O2 -c mrandom2.f90
+gfortran -O2 -c mrandom.f90
+gfortran -O2 -c mconfiguraciones.f90
+gfortran -O2 -c mtipos.f90
+gfortran -O2 -c mlegendre.f90
+gfortran -O2 -c mangwavef.f90
+gfortran -O2 -c mrotaciones.f90
+gfortran -O2 -c msistref.f90
+gfortran -O2 -c mvaziz.f90
+gfortran -ffixed-line-length-132 -c bh_heh2m.f
+gfortran -O2 -c pw_heocs.f
+gfortran -O2 -c modlegendre.f
+modlegendre.f:42:72:
+
+   42 |   100 P2=P3
+      |                                                                        1
+Warning: Fortran 2018 deleted feature: DO termination statement which is not END DO or CONTINUE with label 100 at (1)
+modlegendre.f:53:72:
+
+   53 |   200 P2=P3
+      |                                                                        1
+Warning: Fortran 2018 deleted feature: DO termination statement which is not END DO or CONTINUE with label 200 at (1)
+modlegendre.f:65:72:
+
+   65 |   211 RAT=-0.5D0*Z*(XL+XI)*RAT
+      |                                                                        1
+Warning: Fortran 2018 deleted feature: DO termination statement which is not END DO or CONTINUE with label 211 at (1)
+modlegendre.f:81:72:
+
+   81 |   213 P1=-P1/((XL-XMU)*(XL+XMU+1.D0))
+      |                                                                        1
+Warning: Fortran 2018 deleted feature: DO termination statement which is not END DO or CONTINUE with label 213 at (1)
+modlegendre.f:92:72:
+
+   92 |  1100 XNORM=XNORM/(XLM*XLP)
+      |                                                                        1
+Warning: Fortran 2018 deleted feature: DO termination statement which is not END DO or CONTINUE with label 1100 at (1)
+gfortran -O2 -c mhh_heocs.f90
+gfortran -O2 -c kpcoef.f -llapack -lblas
+gfortran -O2 -c mkp_heco.f90
+gfortran -O2 -c mvmolecula.f90
+gfortran -O2 -c mlineal.f90
+gfortran -O2 -c mwavef.f90
+gfortran -O2 -c mdensidades.f90
+gfortran -O2 -c mmcvpromedia.f90
+gfortran -O2 -c msteps.f90
+gfortran -O2 -c mimagina.f90
+gfortran -O2 -c mdmcpromedia.f90
+gfortran -O2 -c mserie.f90
+gfortran -O2 -c mmontecarlo.f90
+gfortran -O2 -c mentradatos.f90
+gfortran -O2 -c mminimiza.f90
+gfortran -O2 -c qmccluster.f90
+gfortran -O2 -o qmccluster qmccluster.o mmontecarlo.o mminimiza.o mentradatos.o mconfiguraciones.o mparametros.o mrandom.o mrandom2.o mtipos.o mdensidades.o msteps.o mwavef.o mangwavef.o mimagina.o mrotaciones.o msistref.o mvaziz.o mvmolecula.o mmcvpromedia.o mdmcpromedia.o bh_heh2m.o pw_heocs.o mhh_heocs.o mkp_heco.o kpcoef.o mlineal.o mlegendre.o modlegendre.o  mserie.o -llapack -lblas
