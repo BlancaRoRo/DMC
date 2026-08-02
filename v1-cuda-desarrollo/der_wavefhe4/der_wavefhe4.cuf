@@ -1,0 +1,249 @@
+module der_wavefhe4
+ ! vec3: se reutiliza mtipos.f90, igual que en duhe4x. Aqui tampoco se
+ ! usan los operadores sobrecargados de vec3 (todo via %comp).
+ use mtipos, only: vec3
+ ! rij**phe4(2)/rij**(phe4(2)+1): exponente REAL (nu de in.mcv, no
+ ! entero) -> pow(), mismo motivo que en d_uhex4.cuf/der_wavefx.cuf.
+ ! Ver docs-kernels/glibc_math.md Parte 4.
+ use glibc_pow_mod, only: mypow
+
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! umax/umin SI son PARAMETER en el original (mwavef.f90), a diferencia
+ ! de nhe4/phe4 -- se declaran tal cual, sin necesitar copia a la GPU.
+ real(kind=r8), parameter :: umax = 200.0_r8, umin = -200.0_r8
+
+ ! nhe4 y phe4 son variables de verdad en mparametros.f90 (publicas,
+ ! sin "parameter"): mentradatos.f90 las rellena una vez al leer in.mcv
+ ! y se quedan fijas el resto de la simulacion. Mismo tratamiento que
+ ! lxhe4/impurmol/pxhe4 en duhe4x: device a nivel de modulo.
+ integer(kind=i4), device :: nhe4
+ real(kind=r8), device :: phe4(3)
+
+contains
+
+! ---- wavefhe4: la interfaz cambia de w1 (type walker) a atom(nhe4) ----
+! El original recibe el walker completo, pero type(walker) tiene
+! componentes ALLOCATABLE (atom, dwf, delta, hb2m, sigma1, sigma2) --
+! un tipo derivado con componentes allocatable no se puede usar como
+! dato device. wavefhe4 solo lee w1%atom(:) y escribe w1%lw%wfhe4, asi
+! que la interfaz se reduce a justo eso: el array de posiciones de
+! entrada, y un escalar de salida.
+attributes(host, device) subroutine wavefhe4(atom, wfhe4)
+  type(vec3), intent (in)  :: atom(nhe4)
+  real(kind=r8), intent (out) :: wfhe4
+  type(vec3) :: rtemp
+  real(kind=r8) :: ujas,rij
+  integer(kind=i4) :: iatom,jatom
+
+  ujas=0.0_r8
+  do iatom=1,nhe4-1
+    do jatom=iatom+1,nhe4
+      rtemp%comp=atom(iatom)%comp-atom(jatom)%comp
+      rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+      ujas=ujas-phe4(1)/mypow(rij,phe4(2))
+      ujas=ujas-phe4(3)*rij
+    enddo
+  enddo
+
+  ujas=min(ujas,umax)
+  ujas=max(ujas,umin)
+
+  wfhe4=exp(ujas)
+
+end subroutine wavefhe4
+
+! ---- derwavefhe4: apenas cambia -- ya escribia d1wf/d2wf aparte,
+! solo hacia falta sustituir w1%atom(:) por atom(:) ----
+attributes(host, device) subroutine derwavefhe4(atom, d1wf, d2wf)
+  type(vec3), intent (in)  :: atom(nhe4)
+  type(vec3), intent (out)   :: d1wf(nhe4)
+  real(kind=r8), intent (out) :: d2wf(nhe4)
+  type(vec3) :: rtemp
+  integer(kind=i4) :: iatom,jatom
+  real(kind=r8) :: ujasp,ujass,rij
+
+   do iatom=1,nhe4
+     d1wf(iatom)%comp(:)=0.0_r8
+     d2wf(iatom)=0.0_r8
+   enddo
+
+   do iatom=1,nhe4-1
+     do jatom=iatom+1,nhe4
+         rtemp%comp=atom(iatom)%comp-atom(jatom)%comp
+         rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+         ujasp=phe4(1)*phe4(2)/mypow(rij,phe4(2)+1.0_r8)
+         ujass=-(phe4(2)+1)*ujasp/rij
+         ujasp=(ujasp-phe4(3))/rij
+         d1wf(iatom)%comp(:)=d1wf(iatom)%comp(:)+ujasp*rtemp%comp(:)
+         d1wf(jatom)%comp(:)=d1wf(jatom)%comp(:)-ujasp*rtemp%comp(:)
+         d2wf(iatom)=d2wf(iatom)+ujass
+         d2wf(iatom)=d2wf(iatom)+2.0_r8*ujasp
+         d2wf(jatom)=d2wf(jatom)+ujass
+         d2wf(jatom)=d2wf(jatom)+2.0_r8*ujasp
+     enddo
+   enddo
+   do iatom=1,nhe4
+     d2wf(iatom)=d2wf(iatom)+dot_product(d1wf(iatom)%comp,d1wf(iatom)%comp)
+   enddo
+
+ end subroutine derwavefhe4
+
+! un hilo = un walker = un wfhe4
+attributes(global) subroutine k_wavefhe4(n, atom, wfhe4_out)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in)  :: atom(nhe4,n)
+  real(kind=r8), device, intent (out) :: wfhe4_out(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call wavefhe4(atom(:,i), wfhe4_out(i))
+  endif
+end subroutine k_wavefhe4
+
+! un hilo = un walker = un (d1wf,d2wf) de nhe4 componentes
+attributes(global) subroutine k_derwavefhe4(n, atom, d1wf, d2wf)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in)  :: atom(nhe4,n)
+  type(vec3), device, intent (out) :: d1wf(nhe4,n)
+  real(kind=r8), device, intent (out) :: d2wf(nhe4,n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call derwavefhe4(atom(:,i), d1wf(:,i), d2wf(:,i))
+  endif
+end subroutine k_derwavefhe4
+
+end module der_wavefhe4
+
+
+program test_derwavefhe4
+ ! CPU de confianza: wavefhe4/derwavefhe4 de mwavef.f90 sin tocar (estas
+ ! SI reciben el type(walker) completo, tal cual el original).
+ use mwavef, only: wavefhe4_cpu => wavefhe4, derwavefhe4_cpu => derwavefhe4
+ use mtipos, only: vec3, walker, allocatewalker
+ use mparametros, only: nhe4_real => nhe4, phe4_real => phe4
+ use der_wavefhe4
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ integer(kind=i4), parameter :: n_atoms = 4   ! nhe4 de prueba (no hace falta que sea 20)
+ integer(kind=i4), parameter :: n_walk  = 5   ! walkers de prueba (2 extremos anadidos)
+
+ ! valores reales de in.mcv (b,nu,alfa he4-he4)
+ real(kind=r8), parameter :: bhe4 = 3.139383d0, nuhe4 = 4.725025d0, alfahe4 = 0.009428d0
+
+ type(vec3) :: atom_h(n_atoms,n_walk)
+ type(vec3), device :: atom_d(n_atoms,n_walk)
+
+ real(kind=r8) :: wfhe4_cpu(n_walk), wfhe4_h(n_walk)
+ type(vec3) :: d1wf_cpu(n_atoms,n_walk), d1wf_h(n_atoms,n_walk)
+ real(kind=r8) :: d2wf_cpu(n_atoms,n_walk), d2wf_h(n_atoms,n_walk)
+
+ real(kind=r8), device :: wfhe4_d(n_walk)
+ type(vec3), device :: d1wf_d(n_atoms,n_walk)
+ real(kind=r8), device :: d2wf_d(n_atoms,n_walk)
+
+ type(walker) :: w1
+ integer(kind=i4) :: iw, ia, threads, blocks
+ real(kind=r8) :: err, errmax
+
+  ! rellenar variables "de simulacion" en la GPU (device, modulo)
+  nhe4 = n_atoms
+  phe4(1) = 0.50_r8*(bhe4**nuhe4)
+  phe4(2) = nuhe4
+  phe4(3) = alfahe4
+
+  ! y las mismas en la CPU (mparametros), para llamar a mwavef.f90 sin tocar
+  nhe4_real = n_atoms
+  phe4_real(1) = phe4(1)
+  phe4_real(2) = nuhe4
+  phe4_real(3) = alfahe4
+
+  ! 3 walkers de prueba, 4 atomos cada uno, posiciones sinteticas (bohr)
+  atom_h(1,1)%comp = (/  0.0d0,  0.0d0,  0.0d0 /)
+  atom_h(2,1)%comp = (/  3.5d0,  0.0d0,  0.0d0 /)
+  atom_h(3,1)%comp = (/  0.0d0,  4.0d0,  1.0d0 /)
+  atom_h(4,1)%comp = (/ -2.0d0, -3.0d0,  2.5d0 /)
+
+  atom_h(1,2)%comp = (/  1.0d0,  1.0d0,  1.0d0 /)
+  atom_h(2,2)%comp = (/ -1.0d0,  2.0d0,  0.5d0 /)
+  atom_h(3,2)%comp = (/  2.5d0, -1.5d0,  3.0d0 /)
+  atom_h(4,2)%comp = (/  0.0d0,  0.0d0, -4.0d0 /)
+
+  atom_h(1,3)%comp = (/  5.0d0,  0.0d0,  0.0d0 /)
+  atom_h(2,3)%comp = (/  0.0d0,  5.0d0,  0.0d0 /)
+  atom_h(3,3)%comp = (/  0.0d0,  0.0d0,  5.0d0 /)
+  atom_h(4,3)%comp = (/  2.0d0,  2.0d0,  2.0d0 /)
+
+  ! walker 4: contacto MUY cercano entre dos atomos (rij~0.05) --
+  ! wavefhe4/derwavefhe4 solo dependen de distancias, no de angulos, asi
+  ! que el extremo relevante aqui es rij, no cth (a diferencia de
+  ! duhe4x/duhe3x)
+  atom_h(1,4)%comp = (/  0.0d0,  0.0d0,  0.0d0 /)
+  atom_h(2,4)%comp = (/  0.05d0,  0.0d0,  0.0d0 /)
+  atom_h(3,4)%comp = (/  3.0d0,  3.0d0,  3.0d0 /)
+  atom_h(4,4)%comp = (/ -2.0d0,  1.0d0, -1.0d0 /)
+
+  ! walker 5: largo alcance (rij~1000 entre un par)
+  atom_h(1,5)%comp = (/  0.0d0,  0.0d0,  0.0d0 /)
+  atom_h(2,5)%comp = (/  1.0d0,  0.0d0,  0.0d0 /)
+  atom_h(3,5)%comp = (/  1000.0d0,  0.0d0,  0.0d0 /)
+  atom_h(4,5)%comp = (/  1.5d0,  1.5d0,  1.5d0 /)
+
+  atom_d = atom_h   ! copia CPU -> GPU
+
+  threads = 32
+  blocks = (n_walk + threads - 1) / threads
+
+  call k_wavefhe4<<<blocks,threads>>>(n_walk, atom_d, wfhe4_d)
+  call k_derwavefhe4<<<blocks,threads>>>(n_walk, atom_d, d1wf_d, d2wf_d)
+
+  wfhe4_h = wfhe4_d   ! copia GPU -> CPU
+  d1wf_h  = d1wf_d
+  d2wf_h  = d2wf_d
+
+  errmax = 0.0d0
+  do iw = 1, n_walk
+    ! referencia CPU: el walker completo, tal cual espera mwavef.f90
+    call allocatewalker(w1, n_atoms)
+    do ia = 1, n_atoms
+      w1%atom(ia) = atom_h(ia,iw)
+    enddo
+
+    call wavefhe4_cpu(w1)
+    wfhe4_cpu(iw) = w1%lw%wfhe4
+    call derwavefhe4_cpu(w1, d1wf_cpu(:,iw), d2wf_cpu(:,iw))
+
+    write(*,*)
+    write(*,'(a,i0)') '--- walker ', iw
+    write(*,'(a,f20.12,a,f20.12)') '  wfhe4 CPU=', wfhe4_cpu(iw), '   GPU=', wfhe4_h(iw)
+    write(*,'(a,es24.17,a,es24.17)') '  HP wfhe4 CPU=', wfhe4_cpu(iw), '   GPU=', wfhe4_h(iw)
+
+    err = abs(wfhe4_h(iw) - wfhe4_cpu(iw))
+    do ia = 1, n_atoms
+      write(*,'(a,i0,a,3f18.10,a,f18.10)') '  atom ',ia,' d1wf CPU=', d1wf_cpu(ia,iw)%comp, '  d2wf CPU=', d2wf_cpu(ia,iw)
+      write(*,'(a,i0,a,3f18.10,a,f18.10)') '  atom ',ia,' d1wf GPU=', d1wf_h(ia,iw)%comp,   '  d2wf GPU=', d2wf_h(ia,iw)
+      write(*,'(a,i0,a,3es24.17,a,es24.17)') '  HP atom ',ia,' d1wf CPU=', d1wf_cpu(ia,iw)%comp, '  d2wf CPU=', d2wf_cpu(ia,iw)
+      write(*,'(a,i0,a,3es24.17,a,es24.17)') '  HP atom ',ia,' d1wf GPU=', d1wf_h(ia,iw)%comp,   '  d2wf GPU=', d2wf_h(ia,iw)
+      err = max(err, maxval(abs(d1wf_h(ia,iw)%comp - d1wf_cpu(ia,iw)%comp)))
+      err = max(err, abs(d2wf_h(ia,iw) - d2wf_cpu(ia,iw)))
+    enddo
+    write(*,'(a,es10.2)') '  |err| max=', err
+    errmax = max(errmax, err)
+  enddo
+
+  write(*,*)
+  if (errmax < 1.0d-9) then
+    write(*,*) 'PASA: GPU y CPU coinciden dentro de tolerancia'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_derwavefhe4

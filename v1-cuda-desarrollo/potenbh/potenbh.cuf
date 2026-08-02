@@ -1,0 +1,146 @@
+module mpotenbh
+ ! He_dihydrogen: ya portado y probado en He_dihydrogen/He_dihydrogen.f
+ ! (modulo mHe_dihydrogen) -- se reutiliza tal cual, sin tocar ninguna
+ ! linea. No hace falta vec3/der_wavefx/der_wavefhe4/nfermax aqui: esos
+ ! los necesita wavef.cuf (otro kernel), pero potenbh no usa ningun
+ ! tipo vec3 ni llama a wavefx/wavefhe4 -- son solo arrays real*8
+ ! sueltos, igual que en el original.
+ use mHe_dihydrogen, only: He_dihydrogen
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! dhcm: en el original NO es una variable de modulo, sino un COMMON
+ ! block (/datosbh/), rellenado UNA VEZ por bh_leevheh2m al leer
+ ! heh2m.pot y fijo el resto de la simulacion (bh_leevheh2m,
+ ! sacabh/metebh son utilidades de entrada/salida de ese common, no se
+ ! ejecutan por walker -- se quedan en CPU, no hace falta portarlas).
+ ! Un COMMON no tiene una copia device automatica, asi que se
+ ! sustituye por una variable device de modulo -- mismo tratamiento
+ ! que nhe4/phe4/ngatom en kernels anteriores, solo que la fuente
+ ! original es un common en vez de un modulo real.
+ real(kind=r8), device :: dhcm
+
+contains
+
+! ---- potenbh: la interfaz cambia muy poco frente al original -- el
+! dummy se renombra de "nhe4" a "natoms" porque, pese al nombre, quien
+! llama a potenbh de verdad (vpot, con opot=4) le pasa ngatom, no el
+! nhe4 real de la simulacion: dejarlo como "nhe4" habria chocado
+! ademas con la variable device nhe4 de otros modulos si algun dia se
+! importa alguno aqui. ejemol(3) (dummy) y vtot/dcont/zav/zor/iHatom/
+! jHatom/icontHH (locales) estaban declaradas en el original pero no
+! se usan en ningun sitio del cuerpo -- se quitan aqui, no aportan nada. ----
+attributes(host, device) subroutine potenbh(natoms, xhe4, vpotbh)
+  integer(kind=i4), intent (in) :: natoms
+  real(kind=r8), intent (in) :: xhe4(3*natoms)
+  real(kind=r8), intent (out) :: vpotbh
+  integer(kind=i4), parameter :: ndih = 2, nHH = 1
+  real(kind=r8) :: r_dih(3,ndih), rHH(3,nHH), orHH(3,nHH)
+  real(kind=r8) :: vhe4(3*natoms)
+  real(kind=r8) :: energy1, energy2, energy3
+  logical :: gtest
+
+    r_dih = 0.0_r8
+    r_dih(3,1) =  dhcm
+    r_dih(3,2) = -dhcm
+    rHH = 0.0_r8
+    orHH = 0.0_r8
+    orHH(3,1) = -2.0_r8*dhcm
+
+    gtest = .false.
+    call He_dihydrogen(natoms, r_dih, rHH, orHH, xhe4, vhe4, &
+                        energy1, energy2, energy3, gtest)
+    vpotbh = energy1 + energy2 + energy3
+
+end subroutine potenbh
+
+! ---- k_potenbh: un hilo por walker, mismo patron que siempre. El
+! borrador original no tenia dimension de walker por ningun lado
+! (xhe4/vpotbh sin "n", ademas de "value" puesto en un array, que no
+! es valido -- "value" es solo para escalares) -- se reescribe entera. ----
+attributes(global) subroutine k_potenbh(n, natoms, xhe4, vpotbh)
+  integer(kind=i4), value :: n, natoms
+  real(kind=r8), device, intent (in)  :: xhe4(3*natoms,n)
+  real(kind=r8), device, intent (out) :: vpotbh(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call potenbh(natoms, xhe4(:,i), vpotbh(i))
+  endif
+end subroutine k_potenbh
+
+end module mpotenbh
+
+
+program test_potenbh
+ ! CPU de confianza: potenbh de bh_heh2m.f ORIGINAL, sin tocar (llama a
+ ! su propio He_dihydrogen interno, independiente del modulo GPU).
+ ! Solo se importa k_potenbh/dhcm -- si se importara "potenbh" del
+ ! modulo tambien, su nombre chocaria con el "external potenbh" de la
+ ! CPU de aqui abajo (mismo motivo que en test_He_dihydrogen.cuf).
+ use mpotenbh, only: k_potenbh, dhcm
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ external :: potenbh
+ ! el common se declara aqui tambien -- es la forma en que dos
+ ! unidades de programa distintas (este "program" y la subrutina
+ ! potenbh de bh_heh2m.f) comparten la misma zona de memoria de dhcm
+ real(kind=r8) :: dhcm_cpu
+ common / datosbh / dhcm_cpu
+
+ integer(kind=i4), parameter :: natoms = 4
+ integer(kind=i4), parameter :: n_walk = 3
+ real(kind=r8), parameter :: dhcm_real = 0.52943550d0   ! valor real de heh2m.pot
+
+ real(kind=r8) :: X_h(3*natoms,n_walk)
+ real(kind=r8) :: vpotbh_cpu(n_walk), vpotbh_h(n_walk)
+ real(kind=r8), device :: X_d(3*natoms,n_walk)
+ real(kind=r8), device :: vpotbh_d(n_walk)
+
+ integer(kind=i4) :: iw, threads, blocks
+ real(kind=r8) :: err, errmax
+
+  dhcm = dhcm_real       ! copia device (mpotenbh)
+  dhcm_cpu = dhcm_real   ! copia CPU (common /datosbh/, la lee bh_heh2m.f)
+
+  X_h(:,1) = (/ 3.0d0,0.0d0,0.0d0,  0.0d0,4.0d0,1.0d0, &
+               -2.0d0,-3.0d0,2.5d0, 1.5d0,1.5d0,1.5d0 /)
+  X_h(:,2) = (/ 1.0d0,1.0d0,1.0d0,  -1.0d0,2.0d0,0.5d0, &
+                2.5d0,-1.5d0,3.0d0, 0.0d0,0.0d0,-4.0d0 /)
+  X_h(:,3) = (/ 5.0d0,0.0d0,0.0d0,  0.0d0,5.0d0,0.0d0, &
+                0.0d0,0.0d0,5.0d0,  2.0d0,2.0d0,2.0d0 /)
+
+  X_d = X_h
+
+  threads = 32
+  blocks = (n_walk + threads - 1) / threads
+  call k_potenbh<<<blocks,threads>>>(n_walk, natoms, X_d, vpotbh_d)
+  vpotbh_h = vpotbh_d
+
+  errmax = 0.0d0
+  do iw = 1, n_walk
+    call potenbh(natoms, X_h(:,iw), vpotbh_cpu(iw))
+
+    write(*,*)
+    write(*,'(a,i0)') '--- walker ', iw
+    write(*,'(a,f18.10,a,f18.10)') '  vpotbh CPU=', vpotbh_cpu(iw), '   GPU=', vpotbh_h(iw)
+    write(*,'(a,es24.17,a,es24.17)') '  HP vpotbh CPU=', vpotbh_cpu(iw), '   GPU=', vpotbh_h(iw)
+
+    err = abs(vpotbh_h(iw) - vpotbh_cpu(iw))
+    write(*,'(a,es10.2)') '  |err| max=', err
+    errmax = max(errmax, err)
+  enddo
+
+  write(*,*)
+  if (errmax < 1.0d-8) then
+    write(*,*) 'PASA: GPU y CPU coinciden dentro de tolerancia'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_potenbh

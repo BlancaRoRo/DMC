@@ -1,0 +1,157 @@
+! test_rand.cuf
+!
+! 3 bloques de prueba:
+! 1) rand1/rand1p: 20 llamadas encadenadas desde una semilla real,
+!    GPU vs CPU (mrandom2.f90 ORIGINAL).
+! 2) k_split_seeds: reparto de semilla por walker (10 walkers) --
+!    reproduce a mano el mismo bucle que distribuyesemillas
+!    (mmpi.f90:129-142: rand1p aplicado icpar veces por proceso icpar)
+!    generalizado a indice de walker, sin necesitar MPI.
+! 3) gauss3: 4 sorteos gauss3 encadenados (12 valores) partiendo de la
+!    semilla de cada uno de 3 walkers ya repartida en el bloque 2,
+!    GPU vs CPU-nvfortran-host (gauss3_gpu, mismo codigo, solo cambia
+!    donde se ejecuta) -- la comparacion contra gfortran real (glibc,
+!    incluye log(rn) nativo) esta en test_rand_gfortran.f90.
+!
+! Nota metodologica (ver docs-kernels/mrandom.md): la primera version
+! de este test comparaba aqui contra el gauss3 ORIGINAL de mrandom.f90
+! (que usa sin/cos/log intrinsecos, es decir libnvcpumath en host, NO
+! glibc) -- eso daba un residuo de ~1E-16 que parecia un bug de log(),
+! pero en realidad era la diferencia esperada, ya conocida en todo el
+! arbol, entre libnvcpumath y glibc (la razon de ser de mycos/mysin).
+! gauss3_gpu (host) vs gauss3_gpu (device) vs gfortran real SI
+! coinciden exactos -- ver test_rand_gfortran.f90.
+
+module mgauss3loop
+ use mrandgpu, only: gauss3_gpu
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: i8 = selected_int_kind(15)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+contains
+attributes(global) subroutine k_gauss3_loop(nc, irn_in, gv)
+  integer(kind=i4), value :: nc
+  integer(kind=i8), device, intent(in) :: irn_in(1)
+  real(kind=r8), device, intent(out) :: gv(3,nc)
+  integer(kind=i8) :: irn
+  integer(kind=i4) :: ic
+    irn = irn_in(1)
+    do ic = 1, nc
+      call gauss3_gpu(irn, gv(:,ic))
+    enddo
+end subroutine k_gauss3_loop
+end module mgauss3loop
+
+program test_rand
+ use mrandgpu, only: k_split_seeds, rand1_gpu, rand1p_gpu, gauss3_gpu
+ use mgauss3loop, only: k_gauss3_loop
+ use mrandom2, only: rand1, rand1p
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: i8 = selected_int_kind(15)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ integer(kind=i8), parameter :: seed0 = 123456789013_i8
+ integer(kind=i4), parameter :: n_call = 20
+ integer(kind=i4), parameter :: n_walk = 10
+ integer(kind=i4), parameter :: n_gauss = 4
+
+ integer(kind=i8) :: irn_cpu, irn_cpu_p
+ real(kind=r8) :: rn_cpu(n_call), rn_cpu_p(n_call)
+
+ integer(kind=i8), device :: seeds_d(n_walk)
+ integer(kind=i8) :: seeds_h(n_walk)
+ integer(kind=i8) :: irn_ref
+ real(kind=r8) :: rn_ref
+ integer(kind=i4) :: iw, ic
+ real(kind=r8) :: err, errmax
+
+ integer(kind=i8) :: irn_g
+ real(kind=r8) :: rn_g(n_call), rn_g_p(n_call)
+
+ real(kind=r8) :: gv_host(3,n_gauss), gv_gpu(3,n_gauss)
+ integer(kind=i8) :: irn_walk_host
+ integer(kind=i8), device :: irn_walk_d(1)
+ real(kind=r8), device :: gv_d(3,n_gauss)
+
+  write(*,*) '=== 1) rand1/rand1p: ', n_call, ' llamadas encadenadas ==='
+  irn_cpu = seed0
+  irn_cpu_p = seed0
+  do ic = 1, n_call
+    call rand1(rn_cpu(ic), irn_cpu)
+    call rand1p(rn_cpu_p(ic), irn_cpu_p)
+  enddo
+
+  irn_g = seed0
+  errmax = 0.0d0
+  do ic = 1, n_call
+    call rand1_gpu(rn_g(ic), irn_g)
+    err = abs(rn_g(ic)-rn_cpu(ic))
+    errmax = max(errmax, err)
+  enddo
+  write(*,'(a,es10.2)') '  rand1  |err| max=', errmax
+
+  irn_g = seed0
+  errmax = 0.0d0
+  do ic = 1, n_call
+    call rand1p_gpu(rn_g_p(ic), irn_g)
+    err = abs(rn_g_p(ic)-rn_cpu_p(ic))
+    errmax = max(errmax, err)
+  enddo
+  write(*,'(a,es10.2)') '  rand1p |err| max=', errmax
+
+  write(*,'(a,es24.17)') '  HP rand1(1)  CPU=', rn_cpu(1)
+  write(*,'(a,es24.17)') '  HP rand1(20) CPU=', rn_cpu(20)
+  write(*,'(a,es24.17)') '  HP rand1p(1) CPU=', rn_cpu_p(1)
+  write(*,'(a,es24.17)') '  HP rand1p(20)CPU=', rn_cpu_p(20)
+
+  write(*,*)
+  write(*,*) '=== 2) k_split_seeds: reparto de semilla, ', n_walk, ' walkers ==='
+  call k_split_seeds<<<1,32>>>(n_walk, seed0, seeds_d)
+  seeds_h = seeds_d
+
+  errmax = 0.0d0
+  do iw = 1, n_walk
+    irn_ref = seed0
+    do ic = 1, iw
+      call rand1p(rn_ref, irn_ref)
+    enddo
+    write(*,'(a,i0,a,i0,a,i0)') '  walker ', iw, ': GPU=', seeds_h(iw), '  ref(CPU)=', irn_ref
+    if (seeds_h(iw) .ne. irn_ref) errmax = errmax + 1.0d0
+  enddo
+  write(*,'(a,es10.2)') '  numero de semillas distintas=', errmax
+
+  write(*,*)
+  write(*,*) '=== 3) gauss3_gpu: ', n_gauss, ' sorteos encadenados, walkers 1/2/3 ==='
+  write(*,*) '    (host vs device, mismo codigo; ver test_rand_gfortran.f90 para gfortran real)'
+  errmax = 0.0d0
+  do iw = 1, 3
+    irn_walk_host = seeds_h(iw)
+    do ic = 1, n_gauss
+      call gauss3_gpu(irn_walk_host, gv_host(:,ic))
+    enddo
+
+    irn_walk_d = seeds_h(iw)
+    call k_gauss3_loop<<<1,1>>>(n_gauss, irn_walk_d, gv_d)
+    gv_gpu = gv_d
+
+    write(*,*)
+    write(*,'(a,i0)') '--- walker ', iw
+    do ic = 1, n_gauss
+      write(*,'(a,i0,a,3es24.17)') '  sorteo ',ic,' HOST=', gv_host(:,ic)
+      write(*,'(a,i0,a,3es24.17)') '  sorteo ',ic,' GPU =', gv_gpu(:,ic)
+      err = maxval(abs(gv_host(:,ic)-gv_gpu(:,ic)))
+      errmax = max(errmax, err)
+    enddo
+  enddo
+  write(*,'(a,es10.2)') '  |err| max=', errmax
+
+  write(*,*)
+  if (errmax < 1.0d-8) then
+    write(*,*) 'PASA: GPU y CPU coinciden dentro de tolerancia'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_rand

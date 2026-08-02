@@ -1,0 +1,65 @@
+! test_gauss3_isolado.cuf
+!
+! Repite el bloque 3 de test_rand.cuf (walker 1) PERO comparando
+! gauss3_gpu en modo host contra gauss3_gpu en modo device -- ambos
+! usan mycos/mysin/log nativo, la MISMA funcion, solo cambia donde se
+! ejecuta. Si estos dos coinciden exactos, el ~1E-16 que vimos antes
+! NO venia de mycos/mysin ni de log() (host vs device) -- venia de
+! comparar contra gauss3 ORIGINAL (mrandom.f90, sin/cos/log intrinsecos
+! via libnvcpumath), que es una funcion DISTINTA por diseno, no la
+! misma funcion en dos sitios.
+
+module mgauss3loop
+ use mrandgpu, only: gauss3_gpu
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: i8 = selected_int_kind(15)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+contains
+attributes(global) subroutine k_gauss3_loop(irn_in, gv)
+  integer(kind=i8), device, intent(in) :: irn_in(1)
+  real(kind=r8), device, intent(out) :: gv(3,4)
+  integer(kind=i8) :: irn
+  integer(kind=i4) :: ic
+    irn = irn_in(1)
+    do ic = 1, 4
+      call gauss3_gpu(irn, gv(:,ic))
+    enddo
+end subroutine k_gauss3_loop
+end module mgauss3loop
+
+program test_gauss3_isolado
+ use mgauss3loop, only: k_gauss3_loop
+ use mrandgpu, only: gauss3_gpu
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: i8 = selected_int_kind(15)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ integer(kind=i8) :: irn_host
+ real(kind=r8) :: gv_host(3,4)
+ integer(kind=i8), device :: irn_d(1)
+ real(kind=r8), device :: gv_d(3,4)
+ real(kind=r8) :: gv_gpu(3,4)
+ integer(kind=i4) :: ic
+ real(kind=r8) :: err
+
+  irn_host = 161367636491668_i8
+  do ic = 1, 4
+    call gauss3_gpu(irn_host, gv_host(:,ic))
+  enddo
+
+  irn_d = 161367636491668_i8
+  call k_gauss3_loop<<<1,1>>>(irn_d, gv_d)
+  gv_gpu = gv_d
+
+  do ic = 1, 4
+    write(*,'(a,i0)') '--- sorteo ', ic
+    write(*,'(a,3es24.17)') '  HOST=', gv_host(:,ic)
+    write(*,'(a,3es24.17)') '  GPU =', gv_gpu(:,ic)
+    err = maxval(abs(gv_host(:,ic)-gv_gpu(:,ic)))
+    write(*,'(a,es10.2)') '  |err|=', err
+  enddo
+
+end program test_gauss3_isolado

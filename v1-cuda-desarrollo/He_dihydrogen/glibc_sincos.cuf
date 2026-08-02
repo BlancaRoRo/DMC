@@ -1,0 +1,367 @@
+! glibc_sincos.cuf
+!
+! Port a CUDA Fortran de __sin/__cos de glibc 2.39
+! (sysdeps/ieee754/dbl-64/s_sin.c + sincostab.c + usncs.h -- "IBM
+! Accurate Mathematical Library", ~0.55 ULP), incluyendo branred.c
+! (reduccion de rango tipo Payne-Hanek con aritmetica de precision
+! extendida, para |x|>=105414350).
+!
+! Fuente original: LGPL-2.1-or-later, (C) 2001-2024 Free Software
+! Foundation, Inc. -- ver https://sourceware.org/git/?p=glibc.git;
+! a=blob;f=sysdeps/ieee754/dbl-64/s_sin.c;hb=glibc-2.39
+
+module glibc_sincos_mod
+ use glibc_exp_mod, only: bits_of, real_of, top12_of
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: i8 = selected_int_kind(18)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! ---- constantes de usncs.h ----
+ ! s1..s5: coeficientes de Taylor para |x|<0.126 (TAYLOR_SIN)
+ real(kind=r8), parameter :: sc_s1 = transfer(int(z'bfc5555555555555',8), 1.0_r8)
+ real(kind=r8), parameter :: sc_s2 = transfer(int(z'3f81111111110ece',8), 1.0_r8)
+ real(kind=r8), parameter :: sc_s3 = transfer(int(z'bf2a01a019db08b8',8), 1.0_r8)
+ real(kind=r8), parameter :: sc_s4 = transfer(int(z'3ec71de27b9a7ed9',8), 1.0_r8)
+ real(kind=r8), parameter :: sc_s5 = transfer(int(z'be5addffc2fcdf59',8), 1.0_r8)
+ ! big: "numero magico" 1.5*2^45, para el redondeo de do_sin/do_cos
+ real(kind=r8), parameter :: sc_big = transfer(int(z'42c8000000000000',8), 1.0_r8)
+ ! hp0/hp1: pi/2 partido en hi+lo (precision extendida)
+ real(kind=r8), parameter :: sc_hp0 = transfer(int(z'3ff921fb54442d18',8), 1.0_r8)
+ real(kind=r8), parameter :: sc_hp1 = transfer(int(z'3c91a62633145c07',8), 1.0_r8)
+ ! mp1/mp2: pi/2 partido de otra forma (para reduce_sincos)
+ real(kind=r8), parameter :: sc_mp1 = transfer(int(z'3ff921fb58000000',8), 1.0_r8)
+ real(kind=r8), parameter :: sc_mp2 = transfer(int(z'be4dde973c000000',8), 1.0_r8)
+ ! pp3/pp4: correccion adicional de precision extendida
+ real(kind=r8), parameter :: sc_pp3 = transfer(int(z'bc8cb3b398000000',8), 1.0_r8)
+ real(kind=r8), parameter :: sc_pp4 = transfer(int(z'bacd747f23e32ed7',8), 1.0_r8)
+ ! hpinv = 2/pi ; toint = 1.5*2^52 (magico, redondeo a entero)
+ real(kind=r8), parameter :: sc_hpinv = transfer(int(z'3fe45f306dc9c883',8), 1.0_r8)
+ real(kind=r8), parameter :: sc_toint = transfer(int(z'4338000000000000',8), 1.0_r8)
+
+ ! ---- constantes propias de s_sin.c (do_sin/do_cos, NO son las
+ ! mismas que s1..s5 de arriba -- otra aproximacion, para la parte
+ ! "reducida" del argumento) ----
+ real(kind=r8), parameter :: sc_sn3 = transfer(int(z'bfc5555555555515',8), 1.0_r8)
+ real(kind=r8), parameter :: sc_sn5 = transfer(int(z'3f811110e829872f',8), 1.0_r8)
+ real(kind=r8), parameter :: sc_cs2 = transfer(int(z'3fe0000000000000',8), 1.0_r8)
+ real(kind=r8), parameter :: sc_cs4 = transfer(int(z'bfa5555555555535',8), 1.0_r8)
+ real(kind=r8), parameter :: sc_cs6 = transfer(int(z'3f56c16bedd9e239',8), 1.0_r8)
+
+ ! ---- constantes de branred.h (reduccion de rango tipo Payne-Hanek,
+ ! para |x|>=105414350) -- OJO: branred.h define su PROPIA mp2, con
+ ! bits distintos de la mp2 de usncs.h (mismo nombre en el original,
+ ! ficheros .c distintos, sin choque alli; aqui hace falta un nombre
+ ! propio: br_mp2). hp0/hp1/mp1 SI son bit a bit identicas a las de
+ ! usncs.h (comprobado), esas se reutilizan (sc_hp0/sc_hp1/sc_mp1). ----
+ real(kind=r8), parameter :: br_mp2   = transfer(int(z'be4dde9740000000',8), 1.0_r8)
+ real(kind=r8), parameter :: br_tm600 = transfer(int(z'1a70000000000000',8), 1.0_r8)
+ real(kind=r8), parameter :: br_t576  = transfer(int(z'63f0000000000000',8), 1.0_r8)
+ real(kind=r8), parameter :: br_tm24  = transfer(int(z'3e70000000000000',8), 1.0_r8)
+ real(kind=r8), parameter :: br_big   = transfer(int(z'4338000000000000',8), 1.0_r8)
+ real(kind=r8), parameter :: br_big1  = transfer(int(z'4358000000000000',8), 1.0_r8)
+ ! split = CN = 2^27+1 (dla.h), usado dos veces en branred (para
+ ! partir x en x1+x2, y al final para partir s)
+ real(kind=r8), parameter :: br_split = 134217729.0_r8
+
+ include 'sincostab_fortran.txt'
+ include 'toverp_fortran.txt'
+
+contains
+
+attributes(host, device) function high32_of(x) result(h)
+  real(kind=r8), intent (in) :: x
+  integer(kind=i8) :: h
+    h = iand(ishft(bits_of(x), -32), int(z'ffffffff',i8))
+end function high32_of
+
+attributes(host, device) function low32_of(x) result(l)
+  real(kind=r8), intent (in) :: x
+  integer(kind=i8) :: l
+    l = iand(bits_of(x), int(z'ffffffff',i8))
+end function low32_of
+
+! ---- do_cos/do_sin: sin/cos de (x+dx) para |x| ya reducido a un
+! rango pequeno (por el llamador), combinando una expansion de Taylor
+! local con la tabla sincos_tab (formula de suma de angulos). Puerto
+! fiel de do_cos/do_sin en s_sin.c. ----
+attributes(host, device) function do_cos(x_in, dx_in) result(res)
+  real(kind=r8), intent (in) :: x_in, dx_in
+  real(kind=r8) :: res
+  real(kind=r8) :: x, dx, ux
+  real(kind=r8) :: xx, s, sn, ssn, c, cs, ccs, cor
+  integer(kind=i8) :: k
+
+    dx = dx_in
+    if (x_in < 0.0_r8) dx = -dx
+    ux = sc_big + abs(x_in)
+    x = abs(x_in) - (ux - sc_big) + dx
+
+    xx = x*x
+    s = x + x*xx*(sc_sn3 + xx*sc_sn5)
+    c = xx*(sc_cs2 + xx*(sc_cs4 + xx*sc_cs6))
+
+    k = low32_of(ux) * 4_i8
+    sn  = sincos_tab(k)
+    ssn = sincos_tab(k+1)
+    cs  = sincos_tab(k+2)
+    ccs = sincos_tab(k+3)
+
+    cor = (ccs - s*ssn - cs*c) - sn*s
+    res = cs + cor
+end function do_cos
+
+attributes(host, device) function do_sin(x_in, dx_in) result(res)
+  real(kind=r8), intent (in) :: x_in, dx_in
+  real(kind=r8) :: res
+  real(kind=r8) :: xold, x, dx, ux
+  real(kind=r8) :: xx, s, sn, ssn, c, cs, ccs, cor, t, poly, poly2
+  integer(kind=i8) :: k
+
+    xold = x_in
+    if (abs(x_in) < 0.126_r8) then
+      ! Max ULP 0.501: TAYLOR_SIN con los coeficientes s1..s5
+      xx = x_in*x_in
+      poly2 = (((sc_s5*xx + sc_s4)*xx + sc_s3)*xx + sc_s2)*xx
+      poly = poly2 + sc_s1
+      t = (poly*x_in - 0.5_r8*dx_in)*xx + dx_in
+      res = x_in + t
+      return
+    endif
+
+    dx = dx_in
+    x = x_in
+    if (x <= 0.0_r8) dx = -dx
+    ux = sc_big + abs(x)
+    x = abs(x) - (ux - sc_big)
+
+    xx = x*x
+    s = x + (dx + x*xx*(sc_sn3 + xx*sc_sn5))
+    c = x*dx + xx*(sc_cs2 + xx*(sc_cs4 + xx*sc_cs6))
+
+    k = low32_of(ux) * 4_i8
+    sn  = sincos_tab(k)
+    ssn = sincos_tab(k+1)
+    cs  = sincos_tab(k+2)
+    ccs = sincos_tab(k+3)
+
+    cor = (ssn + s*ccs - sn*c) + cs*s
+    res = sign(sn + cor, xold)
+end function do_sin
+
+! ---- reduce_sincos: reduce x a un multiplo de pi/2 mas un resto
+! pequeno (a+da), valido mientras x quepa en un "int" de reduccion
+! (|x|<105414350aprox) -- puerto fiel de reduce_sincos en s_sin.c.
+! Devuelve el cuadrante (0..3). ----
+attributes(host, device) function reduce_sincos(x, a, da) result(n)
+  real(kind=r8), intent (in) :: x
+  real(kind=r8), intent (out) :: a, da
+  integer(kind=i4) :: n
+  real(kind=r8) :: t, xn, y, vx, b, db, t1, t2
+
+    t = x*sc_hpinv + sc_toint
+    xn = t - sc_toint
+    vx = t
+    y = (x - xn*sc_mp1) - xn*sc_mp2
+    n = int(iand(low32_of(vx), 3_i8), i4)
+
+    t1 = xn*sc_pp3
+    t2 = y - t1
+    db = (y - t2) - t1
+    t1 = xn*sc_pp4
+    b = t2 - t1
+    db = db + (t2 - b) - t1
+
+    a = b
+    da = db
+end function reduce_sincos
+
+! ---- branred: reduccion de rango tipo Payne-Hanek para |x| muy
+! grande (>=105414350aprox), usando la tabla toverp (2/pi en base
+! 2^24) y aritmetica de doble longitud (Dekker). Puerto fiel de
+! branred.c/__branred. branred_half hace el trabajo que el original
+! repite dos veces seguidas (una para x1, otra para x2, la parte alta
+! y baja de x tras partirla) -- factorizado aqui en una subrutina en
+! vez de duplicar el bloque, sin cambiar ningun calculo. ----
+attributes(host, device) subroutine branred_half(xh, b_out, bb_out, sum_out)
+  real(kind=r8), intent (in) :: xh
+  real(kind=r8), intent (out) :: b_out, bb_out, sum_out
+  integer(kind=i4) :: k, i
+  real(kind=r8) :: gor, r(0:5), s, t, sum, b, bb
+
+    k = top12_of(xh)
+    k = (k - 450) / 24
+    if (k < 0) k = 0
+
+    gor = real_of(bits_of(br_t576) - ishft(int(k,i8)*24_i8, 52))
+
+    do i = 0, 5
+      r(i) = xh * toverp(k+i) * gor
+      gor = gor * br_tm24
+    enddo
+
+    sum = 0.0_r8
+    do i = 0, 2
+      s = (r(i) + br_big) - br_big
+      sum = sum + s
+      r(i) = r(i) - s
+    enddo
+
+    t = 0.0_r8
+    do i = 0, 5
+      t = t + r(5-i)
+    enddo
+
+    bb = (((((r(0)-t)+r(1))+r(2))+r(3))+r(4))+r(5)
+    s = (t + br_big) - br_big
+    sum = sum + s
+    t = t - s
+    b = t + bb
+    bb = (t - b) + bb
+    s = (sum + br_big1) - br_big1
+    sum = sum - s
+
+    b_out = b
+    bb_out = bb
+    sum_out = sum
+end subroutine branred_half
+
+attributes(host, device) function mybranred(x, a, da) result(n)
+  real(kind=r8), intent (in) :: x
+  real(kind=r8), intent (out) :: a, da
+  integer(kind=i4) :: n
+  real(kind=r8) :: xx, t, x1, x2
+  real(kind=r8) :: b1, bb1, sum1, b2, bb2, sum2
+  real(kind=r8) :: sum, b, bb, s, t1, t2
+
+    xx = x * br_tm600
+    t = xx * br_split
+    x1 = t - (t - xx)
+    x2 = xx - x1
+
+    call branred_half(x1, b1, bb1, sum1)
+    call branred_half(x2, b2, bb2, sum2)
+
+    sum = sum1 + sum2
+    b = b1 + b2
+    if (abs(b1) > abs(b2)) then
+      bb = (b1 - b) + b2
+    else
+      bb = (b2 - b) + b1
+    endif
+
+    if (b > 0.5_r8) then
+      b = b - 1.0_r8
+      sum = sum + 1.0_r8
+    else if (b < -0.5_r8) then
+      b = b + 1.0_r8
+      sum = sum - 1.0_r8
+    endif
+
+    s = b + (bb + bb1 + bb2)
+    t = ((b - s) + bb) + (bb1 + bb2)
+    b = s * br_split
+    t1 = b - (b - s)
+    t2 = s - t1
+    b = s * sc_hp0
+    bb = (((t1*sc_mp1 - b) + t1*br_mp2) + t2*sc_mp1) + (t2*br_mp2 + s*sc_hp1 + t*sc_hp0)
+    s = b + bb
+    t = (b - s) + bb
+    a = s
+    da = t
+
+    n = iand(int(sum, i4), 3_i4)
+end function mybranred
+
+attributes(host, device) function do_sincos(a, da, n) result(retval)
+  real(kind=r8), intent (in) :: a, da
+  integer(kind=i4), intent (in) :: n
+  real(kind=r8) :: retval
+
+    if (iand(n,1) /= 0) then
+      retval = do_cos(a, da)
+    else
+      retval = do_sin(a, da)
+    endif
+    if (iand(n,2) /= 0) retval = -retval
+end function do_sincos
+
+! ---- mysin/mycos: puntos de entrada, puerto fiel de __sin/__cos.
+! Igual que en __exp, math_check_force_underflow (solo afecta a
+! errno/excepciones, no al valor numerico) se omite -- no hay
+! equivalente en este port ni hace falta para el resultado. ----
+attributes(host, device) function mysin(x) result(retval)
+  real(kind=r8), intent (in) :: x
+  real(kind=r8) :: retval
+  real(kind=r8) :: t, a, da
+  integer(kind=i8) :: k
+  integer(kind=i4) :: n
+
+    k = iand(high32_of(x), int(z'7fffffff',i8))
+
+    if (k < int(z'3e500000',i8)) then
+      retval = x
+    else if (k < int(z'3feb6000',i8)) then
+      retval = do_sin(x, 0.0_r8)
+    else if (k < int(z'400368fd',i8)) then
+      t = sc_hp0 - abs(x)
+      retval = sign(do_cos(t, sc_hp1), x)
+    else if (k < int(z'419921FB',i8)) then
+      n = reduce_sincos(x, a, da)
+      retval = do_sincos(a, da, n)
+    else if (k < int(z'7ff00000',i8)) then
+      n = mybranred(x, a, da)
+      retval = do_sincos(a, da, n)
+    else
+      retval = x/x
+    endif
+end function mysin
+
+attributes(host, device) function mycos(x) result(retval)
+  real(kind=r8), intent (in) :: x
+  real(kind=r8) :: retval
+  real(kind=r8) :: y, a, da
+  integer(kind=i8) :: k
+  integer(kind=i4) :: n
+
+    k = iand(high32_of(x), int(z'7fffffff',i8))
+
+    if (k < int(z'3e400000',i8)) then
+      retval = 1.0_r8
+    else if (k < int(z'3feb6000',i8)) then
+      retval = do_cos(x, 0.0_r8)
+    else if (k < int(z'400368fd',i8)) then
+      y = sc_hp0 - abs(x)
+      a = y + sc_hp1
+      da = (y - a) + sc_hp1
+      retval = do_sin(a, da)
+    else if (k < int(z'419921FB',i8)) then
+      n = reduce_sincos(x, a, da)
+      retval = do_sincos(a, da, n+1)
+    else if (k < int(z'7ff00000',i8)) then
+      n = mybranred(x, a, da)
+      retval = do_sincos(a, da, n+1)
+    else
+      retval = x/x
+    endif
+end function mycos
+
+attributes(global) subroutine k_mysin(n, x, y)
+  integer(kind=i4), value :: n
+  real(kind=r8), device, intent (in)  :: x(n)
+  real(kind=r8), device, intent (out) :: y(n)
+  integer(kind=i4) :: i
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) y(i) = mysin(x(i))
+end subroutine k_mysin
+
+attributes(global) subroutine k_mycos(n, x, y)
+  integer(kind=i4), value :: n
+  real(kind=r8), device, intent (in)  :: x(n)
+  real(kind=r8), device, intent (out) :: y(n)
+  integer(kind=i4) :: i
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) y(i) = mycos(x(i))
+end subroutine k_mycos
+
+end module glibc_sincos_mod

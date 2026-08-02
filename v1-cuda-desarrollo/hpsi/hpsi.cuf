@@ -1,0 +1,423 @@
+! hpsi.cuf
+!
+! Puerto CUDA Fortran de hpsi (mwavef.f90:20-40). Despachador puro
+! entre valibre (libre=.T., "sin interaccion") y derananum+vpot
+! (libre=.F., caso real con interaccion) -- las tres ya portadas y
+! probadas por separado (mvalibre, mderananum, mvpot). La unica
+! operacion propia de hpsi es "ene=kin+pot": suma de 2 terminos, sin
+! reasociacion posible (hacen falta 3 o mas sumandos para que el
+! orden de suma pueda dar un resultado distinto -- ver
+! docs-kernels/hpsi.md para la comprobacion).
+!
+! signoup/signodw (que valibre SI devuelve) se quedan locales aqui,
+! sin exponerse en la interfaz de hpsi -- mismo criterio ya aplicado
+! en wavefhe3 (wavef.cuf): con slaterdet_trivial (nhe3up/nhe3dw<=1,
+! signo siempre +1) no aportan nada, y derananum ya no los expone
+! tampoco (ver docs-kernels/wavef.md §4).
+
+module mhpsi
+ use mtipos, only: vec3
+ use mvalibre, only: valibre
+ use mderananum, only: derananum
+ use mvpot, only: vpot
+ use der_wavefx, only: natom
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! libre: variable real de mparametros.f90 (publica, sin "parameter"),
+ ! fijada una vez al leer in.mcv -- mismo tratamiento device que
+ ! opot/impureza en kernels anteriores.
+ logical, device :: libre
+
+contains
+
+attributes(host, device) subroutine hpsi(atom, sprop, hb2m, b, &
+                                          wf, wfhe4, wfhe3, wfm, wfx, &
+                                          kin, eimp, erot, pot, ene, &
+                                          dwf, dphi)
+  type(vec3), intent (inout) :: atom(natom)
+  type(vec3), intent (in) :: sprop(3)
+  real(kind=r8), intent (in) :: hb2m(natom)
+  real(kind=r8), intent (in) :: b
+  real(kind=r8), intent (out) :: wf, wfhe4, wfhe3, wfm, wfx
+  real(kind=r8), intent (out) :: kin, eimp, erot, pot, ene
+  type(vec3), intent (out) :: dwf(natom)
+  real(kind=r8), intent (out) :: dphi(2)
+  real(kind=r8) :: dwf_libre(3,natom)
+  integer(kind=i4) :: iatom, signoup_l, signodw_l
+
+    if (libre) then
+      call valibre(natom, wf, wfhe4, wfhe3, wfm, wfx, kin, pot, ene, &
+                   signoup_l, signodw_l, dwf_libre, dphi)
+      do iatom = 1, natom
+        dwf(iatom)%comp = dwf_libre(:,iatom)
+      enddo
+      eimp = 0.0_r8
+      erot = 0.0_r8
+    else
+      call derananum(atom, sprop, hb2m, b, wf, wfhe4, wfhe3, wfm, wfx, &
+                      kin, eimp, erot, dwf, dphi)
+      call vpot(atom, sprop, pot)
+      ene = kin + pot
+    endif
+
+end subroutine hpsi
+
+attributes(global) subroutine k_hpsi(n, atom, sprop, hb2m, b, &
+                                      wf, wfhe4, wfhe3, wfm, wfx, &
+                                      kin, eimp, erot, pot, ene, dwf, dphi)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (inout) :: atom(natom,n)
+  type(vec3), device, intent (in) :: sprop(3,n)
+  real(kind=r8), device, intent (in) :: hb2m(natom,n)
+  real(kind=r8), device, intent (in) :: b(n)
+  real(kind=r8), device, intent (out) :: wf(n), wfhe4(n), wfhe3(n), wfm(n), wfx(n)
+  real(kind=r8), device, intent (out) :: kin(n), eimp(n), erot(n), pot(n), ene(n)
+  type(vec3), device, intent (out) :: dwf(natom,n)
+  real(kind=r8), device, intent (out) :: dphi(2,n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call hpsi(atom(:,i), sprop(:,i), hb2m(:,i), b(i), &
+              wf(i), wfhe4(i), wfhe3(i), wfm(i), wfx(i), &
+              kin(i), eimp(i), erot(i), pot(i), ene(i), &
+              dwf(:,i), dphi(:,i))
+  endif
+end subroutine k_hpsi
+
+end module mhpsi
+
+
+program test_hpsi
+ ! CPU de confianza: hpsi de mwavef.f90 ORIGINAL, sin tocar (recibe
+ ! el type(walker) completo).
+ use mhpsi, only: k_hpsi, libre
+ use mderananum
+ use mvpot, only: opot
+ use mpotenbh, only: dhcm
+ use mccuerpo, only: ngatom_cc => ngatom, natom_cc => natom
+ use mwavef, only: hpsi_cpu => hpsi
+ use mtipos, only: vec3, walker, allocatewalker
+ use mparametros, only: nhe4_real => nhe4, nhe3_real => nhe3, ngatom_real => ngatom, &
+                         natom_real => natom, impureza_real => impureza, impurmol_real => impurmol, &
+                         lxhe4_real => lxhe4, pxhe4_real => pxhe4, lxhe3_real => lxhe3, pxhe3_real => pxhe3, &
+                         phe4_real => phe4, phe3_real => phe3, pmix_real => pmix, &
+                         nhe3up_real => nhe3up, nhe3dw_real => nhe3dw, &
+                         mhe4_real => mhe4, mhe3_real => mhe3, mx_real => mx, &
+                         impurfija_real => impurfija, rotamol_real => rotamol, &
+                         opot_real => opot, libre_real => libre
+ use mwavef_gpu, only: pmix_dev => pmix, phe3, nhe3up, nhe3dw, mhe4, mhe3, mx
+ use d_uhex4, only: lxhe4, pxhe4, impurmol
+ use der_wavefx, only: nhe4, nhe3, ngatom, natom, impureza
+ use der_wavefhe4, only: nhe4_he4 => nhe4, phe4
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ ! dhcm_cpu: copia CPU de dhcm (COMMON /datosbh/, la lee bh_heh2m.f
+ ! internamente en potenbh/He_dihydrogen ORIGINAL) -- mismo patron ya
+ ! usado en potenbh.cuf/vpot.cuf.
+ real(kind=r8) :: dhcm_cpu
+ common / datosbh / dhcm_cpu
+
+ integer(kind=i4), parameter :: n_he4  = 4
+ integer(kind=i4), parameter :: n_atom = n_he4 + 1
+ integer(kind=i4), parameter :: n_walk = 5   ! 3 normales + 2 extremos (mismos que derananum.md §8)
+
+ real(kind=r8), parameter :: bxhe4(0:4)    = (/ 1.680309d0, 0.000000d0, 3.033954d0, 0.000000d0, 0.732198d0 /)
+ real(kind=r8), parameter :: nuxhe4(0:4)   = (/ 9.763290d0, 1.000000d0, 3.155952d0, 1.000000d0, 11.036848d0 /)
+ real(kind=r8), parameter :: alfaxhe4(0:4) = (/ 0.643208d0, 0.000000d0, 0.004908d0, 0.000000d0, 0.078598d0 /)
+ real(kind=r8), parameter :: p4xhe4(0:4)   = (/ 0.129298d0, 0.000000d0, 0.084248d0, 0.000000d0, 0.096948d0 /)
+ real(kind=r8), parameter :: p5xhe4(0:4)   = (/ 13.568705d0, 0.000000d0, 0.000706d0, 0.000000d0, 0.020823d0 /)
+ real(kind=r8), parameter :: bhe4 = 3.139383d0, nuhe4 = 4.725025d0, alfahe4 = 0.009428d0
+ real(kind=r8), parameter :: hb2he4_real = 0.5219359033034199_r8
+ real(kind=r8), parameter :: hb2x_real   = 1.036440145869973_r8
+ real(kind=r8), parameter :: brot_real   = 3.6975845184944736_r8
+ real(kind=r8), parameter :: dhcm_real   = 0.52943550d0
+
+ type(vec3) :: atom_h(n_atom,n_walk), sprop_h(3,n_walk)
+ type(vec3), device :: atom_d(n_atom,n_walk), sprop_d(3,n_walk)
+ real(kind=r8) :: hb2m_h(n_atom,n_walk), b_h(n_walk)
+ real(kind=r8), device :: hb2m_d(n_atom,n_walk), b_d(n_walk)
+
+ real(kind=r8) :: wf_cpu(n_walk), wfhe4_cpu(n_walk), wfhe3_cpu(n_walk), wfm_cpu(n_walk), wfx_cpu(n_walk)
+ real(kind=r8) :: kin_cpu(n_walk), eimp_cpu(n_walk), erot_cpu(n_walk), pot_cpu(n_walk), ene_cpu(n_walk)
+ type(vec3) :: dwf_cpu(n_atom,n_walk)
+ real(kind=r8) :: dphi_cpu(2,n_walk)
+
+ real(kind=r8) :: wf_h(n_walk), wfhe4_h(n_walk), wfhe3_h(n_walk), wfm_h(n_walk), wfx_h(n_walk)
+ real(kind=r8) :: kin_h(n_walk), eimp_h(n_walk), erot_h(n_walk), pot_h(n_walk), ene_h(n_walk)
+ type(vec3) :: dwf_h(n_atom,n_walk)
+ real(kind=r8) :: dphi_h(2,n_walk)
+
+ real(kind=r8), device :: wf_d(n_walk), wfhe4_d(n_walk), wfhe3_d(n_walk), wfm_d(n_walk), wfx_d(n_walk)
+ real(kind=r8), device :: kin_d(n_walk), eimp_d(n_walk), erot_d(n_walk), pot_d(n_walk), ene_d(n_walk)
+ type(vec3), device :: dwf_d(n_atom,n_walk)
+ real(kind=r8), device :: dphi_d(2,n_walk)
+
+ type(walker) :: w1
+ integer(kind=i4) :: iw, ia, threads, blocks
+ real(kind=r8) :: err, errmax
+
+  ! ---- copias device (GPU), modulos ya portados -- union de lo que
+  ! ya usaban derananum.cuf (nhe4/nhe3/.../mx) y vpot.cuf (opot/dhcm/
+  ! ngatom-natom de mccuerpo, variables SEPARADAS de las de der_wavefx) ----
+  libre = .false.
+  nhe4 = n_he4
+  nhe3 = 0
+  ngatom = n_he4
+  natom = n_atom
+  impureza = .true.
+  impurmol = .true.
+  impurfija = .false.
+  rotamol = .true.
+  lxhe4 = 4
+  do ia = 0, 4
+    pxhe4(1,ia) = 0.50_r8*(bxhe4(ia)**nuxhe4(ia))
+    pxhe4(2,ia) = nuxhe4(ia)
+    pxhe4(3,ia) = alfaxhe4(ia)
+    pxhe4(4,ia) = p4xhe4(ia)
+    pxhe4(5,ia) = p5xhe4(ia)
+  enddo
+  nhe4_he4 = n_he4
+  phe4(1) = 0.50_r8*(bhe4**nuhe4)
+  phe4(2) = nuhe4
+  phe4(3) = alfahe4
+  phe3 = 0.0_r8
+  pmix_dev(1) = 0.0_r8
+  pmix_dev(2) = 1.0_r8
+  pmix_dev(3) = 0.0_r8
+  nhe3up = 0
+  nhe3dw = 0
+  mhe4 = 4.00260_r8
+  mhe3 = 3.01604_r8
+  mx   = 2.01565006_r8
+  ngatom_cc = n_he4
+  natom_cc  = n_atom
+  opot = 4
+  dhcm = dhcm_real
+
+  ! ---- copias reales (CPU), mparametros.f90, para el hpsi ORIGINAL ----
+  libre_real = .false.
+  nhe4_real = n_he4
+  nhe3_real = 0
+  ngatom_real = n_he4
+  natom_real = n_atom
+  impureza_real = .true.
+  impurmol_real = .true.
+  impurfija_real = .false.
+  rotamol_real = .true.
+  lxhe4_real = 4
+  pxhe4_real(:,0:4) = pxhe4(:,0:4)
+  lxhe3_real = 0
+  pxhe3_real = 0.0_r8
+  phe4_real = phe4
+  phe3_real = phe3
+  pmix_real = pmix_dev
+  nhe3up_real = 0
+  nhe3dw_real = 0
+  mhe4_real = mhe4
+  mhe3_real = mhe3
+  mx_real   = mx
+  opot_real = 4
+  dhcm_cpu = dhcm_real
+
+  atom_h(1,1)%comp = (/  0.0d0,  0.0d0,  0.0d0 /)
+  atom_h(2,1)%comp = (/  3.5d0,  0.0d0,  0.0d0 /)
+  atom_h(3,1)%comp = (/  0.0d0,  4.0d0,  1.0d0 /)
+  atom_h(4,1)%comp = (/ -2.0d0, -3.0d0,  2.5d0 /)
+  atom_h(5,1)%comp = (/  1.0d0,  1.0d0,  1.0d0 /)
+
+  atom_h(1,2)%comp = (/  1.0d0,  1.0d0,  1.0d0 /)
+  atom_h(2,2)%comp = (/ -1.0d0,  2.0d0,  0.5d0 /)
+  atom_h(3,2)%comp = (/  2.5d0, -1.5d0,  3.0d0 /)
+  atom_h(4,2)%comp = (/  0.0d0,  0.0d0, -4.0d0 /)
+  atom_h(5,2)%comp = (/  0.5d0, -0.5d0,  0.5d0 /)
+
+  atom_h(1,3)%comp = (/  5.0d0,  0.0d0,  0.0d0 /)
+  atom_h(2,3)%comp = (/  0.0d0,  5.0d0,  0.0d0 /)
+  atom_h(3,3)%comp = (/  0.0d0,  0.0d0,  5.0d0 /)
+  atom_h(4,3)%comp = (/  2.0d0,  2.0d0,  2.0d0 /)
+  atom_h(5,3)%comp = (/  1.5d0,  1.5d0,  1.5d0 /)
+
+  ! walker 4 (extremo): impureza a contacto muy cercano de un atomo
+  ! de He4 (rij~0.05) -- mismo caso que der_wavefx.md §10/derananum.md §8
+  atom_h(1,4)%comp = (/  1.05d0,  1.0d0,  1.0d0 /)
+  atom_h(2,4)%comp = (/ -1.0d0,  2.0d0,  0.5d0 /)
+  atom_h(3,4)%comp = (/  2.5d0, -1.5d0,  3.0d0 /)
+  atom_h(4,4)%comp = (/  0.0d0,  0.0d0, -4.0d0 /)
+  atom_h(5,4)%comp = (/  1.0d0,  1.0d0,  1.0d0 /)
+
+  ! walker 5 (extremo): impureza a largo alcance de los 4 atomos de
+  ! He4 (rij~1000 en los 4 casos)
+  atom_h(1,5)%comp = (/ 1000.0d0,    0.0d0,    0.0d0 /)
+  atom_h(2,5)%comp = (/    0.0d0, 1000.0d0,    0.0d0 /)
+  atom_h(3,5)%comp = (/    0.0d0,    0.0d0, 1000.0d0 /)
+  atom_h(4,5)%comp = (/-1000.0d0,    0.0d0,    0.0d0 /)
+  atom_h(5,5)%comp = (/    0.0d0,    0.0d0,    0.0d0 /)
+
+  sprop_h(1,1)%comp = (/ 2.0d0, 0.0d0, 0.0d0 /)
+  sprop_h(2,1)%comp = (/ 0.0d0, 1.5d0, 0.0d0 /)
+  sprop_h(3,1)%comp = (/ 0.3d0, 0.4d0, 1.2d0 /)
+
+  sprop_h(1,2)%comp = (/ 1.0d0, 0.2d0, 0.0d0 /)
+  sprop_h(2,2)%comp = (/ 0.0d0, 1.0d0, 0.3d0 /)
+  sprop_h(3,2)%comp = (/ 0.5d0, 0.0d0, 1.0d0 /)
+
+  sprop_h(1,3)%comp = (/ 0.7d0, 0.7d0, 0.0d0 /)
+  sprop_h(2,3)%comp = (/ -0.7d0, 0.7d0, 0.0d0 /)
+  sprop_h(3,3)%comp = (/ 0.0d0, 0.0d0, 2.0d0 /)
+
+  sprop_h(1,4)%comp = (/ 1.0d0, 0.2d0, 0.0d0 /)
+  sprop_h(2,4)%comp = (/ 0.0d0, 1.0d0, 0.3d0 /)
+  sprop_h(3,4)%comp = (/ 0.5d0, 0.0d0, 1.0d0 /)
+
+  sprop_h(1,5)%comp = (/ 0.7d0, 0.7d0, 0.0d0 /)
+  sprop_h(2,5)%comp = (/ -0.7d0, 0.7d0, 0.0d0 /)
+  sprop_h(3,5)%comp = (/ 0.0d0, 0.0d0, 2.0d0 /)
+
+  do iw = 1, n_walk
+    do ia = 1, n_he4
+      hb2m_h(ia,iw) = hb2he4_real
+    enddo
+    hb2m_h(n_atom,iw) = hb2x_real
+    b_h(iw) = brot_real
+  enddo
+
+  atom_d  = atom_h
+  sprop_d = sprop_h
+  hb2m_d  = hb2m_h
+  b_d     = b_h
+
+  threads = 32
+  blocks = (n_walk + threads - 1) / threads
+  call k_hpsi<<<blocks,threads>>>(n_walk, atom_d, sprop_d, hb2m_d, b_d, &
+                                   wf_d, wfhe4_d, wfhe3_d, wfm_d, wfx_d, &
+                                   kin_d, eimp_d, erot_d, pot_d, ene_d, dwf_d, dphi_d)
+  wf_h=wf_d; wfhe4_h=wfhe4_d; wfhe3_h=wfhe3_d; wfm_h=wfm_d; wfx_h=wfx_d
+  kin_h=kin_d; eimp_h=eimp_d; erot_h=erot_d; pot_h=pot_d; ene_h=ene_d
+  dwf_h=dwf_d; dphi_h=dphi_d
+
+  write(*,*) '=== libre=.F. (caso real, con interaccion): 5 walkers ==='
+  errmax = 0.0d0
+  do iw = 1, n_walk
+    call allocatewalker(w1, n_atom)
+    do ia = 1, n_atom
+      w1%atom(ia) = atom_h(ia,iw)
+      w1%hb2m(ia) = hb2m_h(ia,iw)
+    enddo
+    w1%sprop(1) = sprop_h(1,iw)
+    w1%sprop(2) = sprop_h(2,iw)
+    w1%sprop(3) = sprop_h(3,iw)
+    w1%b = b_h(iw)
+
+    call hpsi_cpu(w1)
+    wf_cpu(iw)=real(w1%lw%wf,r8); wfhe4_cpu(iw)=real(w1%lw%wfhe4,r8)
+    wfhe3_cpu(iw)=real(w1%lw%wfhe3,r8); wfm_cpu(iw)=real(w1%lw%wfm,r8)
+    wfx_cpu(iw)=real(w1%lw%wfx,r8)
+    kin_cpu(iw)=w1%lw%kin; eimp_cpu(iw)=w1%lw%eimp; erot_cpu(iw)=w1%lw%erot
+    pot_cpu(iw)=w1%lw%pot; ene_cpu(iw)=w1%lw%ene
+    do ia = 1, n_atom
+      dwf_cpu(ia,iw) = w1%dwf(ia)
+    enddo
+    dphi_cpu(:,iw) = w1%dphi
+
+    write(*,*)
+    write(*,'(a,i0)') '--- walker ', iw
+    write(*,'(a,es24.17,a,es24.17)') '  HP kin CPU=', kin_cpu(iw), '   GPU=', kin_h(iw)
+    write(*,'(a,es24.17,a,es24.17)') '  HP pot CPU=', pot_cpu(iw), '   GPU=', pot_h(iw)
+    write(*,'(a,es24.17,a,es24.17)') '  HP ene CPU=', ene_cpu(iw), '   GPU=', ene_h(iw)
+
+    err = abs(wf_h(iw)-wf_cpu(iw))
+    err = max(err, abs(wfhe4_h(iw)-wfhe4_cpu(iw)))
+    err = max(err, abs(wfhe3_h(iw)-wfhe3_cpu(iw)))
+    err = max(err, abs(wfm_h(iw)-wfm_cpu(iw)))
+    err = max(err, abs(wfx_h(iw)-wfx_cpu(iw)))
+    err = max(err, abs(kin_h(iw)-kin_cpu(iw)))
+    err = max(err, abs(eimp_h(iw)-eimp_cpu(iw)))
+    err = max(err, abs(erot_h(iw)-erot_cpu(iw)))
+    err = max(err, abs(pot_h(iw)-pot_cpu(iw)))
+    err = max(err, abs(ene_h(iw)-ene_cpu(iw)))
+    do ia = 1, n_atom
+      err = max(err, maxval(abs(dwf_h(ia,iw)%comp-dwf_cpu(ia,iw)%comp)))
+    enddo
+    err = max(err, maxval(abs(dphi_h(:,iw)-dphi_cpu(:,iw))))
+
+    write(*,'(a,es10.2)') '  |err| max=', err
+    errmax = max(errmax, err)
+  enddo
+
+  ! ---- libre=.T. (sin interaccion): un solo caso, valibre ya
+  ! validado por separado, solo se comprueba que hpsi despacha bien ----
+  block
+    type(vec3) :: atomc_h(n_atom,1)
+    type(vec3), device :: atomc_d(n_atom,1)
+    type(vec3) :: spropc_h(3,1)
+    type(vec3), device :: spropc_d(3,1)
+    real(kind=r8) :: hb2mc_h(n_atom,1), bc_h(1)
+    real(kind=r8), device :: hb2mc_d(n_atom,1), bc_d(1)
+    real(kind=r8) :: wfc_cpu(1), kinc_cpu(1), potc_cpu(1), enec_cpu(1)
+    real(kind=r8) :: wfc_h(1), kinc_h(1), potc_h(1), enec_h(1)
+    real(kind=r8), device :: wfhe4c_d(1), wfhe3c_d(1), wfmc_d(1), wfxc_d(1)
+    real(kind=r8), device :: wfc_d(1), kinc_d(1), eimpc_d(1), erotc_d(1), potc_d(1), enec_d(1)
+    type(vec3), device :: dwfc_d(n_atom,1)
+    real(kind=r8), device :: dphic_d(2,1)
+    type(walker) :: wc
+    integer(kind=i4) :: ia2
+    real(kind=r8) :: errc
+
+     libre = .true.
+     libre_real = .true.
+
+     atomc_h(:,1) = atom_h(:,1)
+     spropc_h(:,1) = sprop_h(:,1)
+     hb2mc_h(:,1) = hb2m_h(:,1)
+     bc_h(1) = b_h(1)
+
+     atomc_d = atomc_h
+     spropc_d = spropc_h
+     hb2mc_d = hb2mc_h
+     bc_d = bc_h
+
+     call k_hpsi<<<1,32>>>(1, atomc_d, spropc_d, hb2mc_d, bc_d, &
+                            wfc_d, wfhe4c_d, wfhe3c_d, wfmc_d, wfxc_d, &
+                            kinc_d, eimpc_d, erotc_d, potc_d, enec_d, dwfc_d, dphic_d)
+     wfc_h=wfc_d; kinc_h=kinc_d; potc_h=potc_d; enec_h=enec_d
+
+     call allocatewalker(wc, n_atom)
+     do ia2 = 1, n_atom
+       wc%atom(ia2) = atomc_h(ia2,1)
+       wc%hb2m(ia2) = hb2mc_h(ia2,1)
+     enddo
+     wc%sprop(1) = spropc_h(1,1)
+     wc%sprop(2) = spropc_h(2,1)
+     wc%sprop(3) = spropc_h(3,1)
+     wc%b = bc_h(1)
+
+     call hpsi_cpu(wc)
+     wfc_cpu(1)=real(wc%lw%wf,r8)
+     kinc_cpu(1)=wc%lw%kin; potc_cpu(1)=wc%lw%pot; enec_cpu(1)=wc%lw%ene
+
+     write(*,*)
+     write(*,*) '=== libre=.T. (sin interaccion) ==='
+     write(*,'(a,f18.10,a,f18.10)') '  wf  CPU=', wfc_cpu(1), '   GPU=', wfc_h(1)
+     write(*,'(a,es24.17,a,es24.17)') '  HP kin CPU=', kinc_cpu(1), '   GPU=', kinc_h(1)
+     write(*,'(a,es24.17,a,es24.17)') '  HP pot CPU=', potc_cpu(1), '   GPU=', potc_h(1)
+     write(*,'(a,es24.17,a,es24.17)') '  HP ene CPU=', enec_cpu(1), '   GPU=', enec_h(1)
+     errc = max(abs(wfc_h(1)-wfc_cpu(1)), abs(kinc_h(1)-kinc_cpu(1)), &
+                abs(potc_h(1)-potc_cpu(1)), abs(enec_h(1)-enec_cpu(1)))
+     write(*,'(a,es10.2)') '  |err| max=', errc
+     errmax = max(errmax, errc)
+  end block
+
+  write(*,*)
+  if (errmax < 1.0d-8) then
+    write(*,*) 'PASA: GPU y CPU coinciden dentro de tolerancia'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_hpsi

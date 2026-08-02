@@ -1,0 +1,65 @@
+nvfortran -O2 -Mnofma -c mparametros.f90
+nvfortran -O2 -Mnofma -c mrandom2.f90
+nvfortran -O2 -Mnofma -c mrandom.f90
+nvfortran -O2 -Mnofma -c mconfiguraciones.f90
+nvfortran -O2 -Mnofma -c mtipos.f90
+nvfortran -O2 -Mnofma -c mlegendre.f90
+nvfortran -O2 -Mnofma -c mangwavef.f90
+nvfortran -O2 -Mnofma -c mrotaciones.f90
+nvfortran -O2 -Mnofma -c msistref.f90
+nvfortran -O2 -Mnofma -c mvaziz.f90
+nvfortran -Mextend -O2 -c bh_heh2m.f
+nvfortran -O2 -Mnofma -c pw_heocs.f
+nvfortran -O2 -Mnofma -c modlegendre.f
+nvfortran -O2 -Mnofma -c mhh_heocs.f90
+nvfortran -O2 -Mnofma -c kpcoef.f -llapack -lblas
+nvfortran -O2 -Mnofma -c mkp_heco.f90
+nvfortran -O2 -Mnofma -c mvmolecula.f90
+nvfortran -O2 -Mnofma -c mlineal.f90
+nvfortran -O2 -Mnofma -c mwavef.f90
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 108)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 109)
+  0 inform,   2 warnings,   0 severes, 0 fatal for wavefhe4
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 343)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 344)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 361)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 362)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 376)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 377)
+  0 inform,   6 warnings,   0 severes, 0 fatal for iwavefx
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 492)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 493)
+  0 inform,   2 warnings,   0 severes, 0 fatal for ewavefx
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 543)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 544)
+  0 inform,   2 warnings,   0 severes, 0 fatal for wavefhe3
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 947)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 948)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 951)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 952)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 955)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 956)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 967)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 968)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 976)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 977)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 1025)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 1026)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 1030)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 1031)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 1055)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 1056)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 1060)
+NVFORTRAN-W-0093-Type conversion of expression performed (mwavef.f90: 1061)
+  0 inform,  18 warnings,   0 severes, 0 fatal for dibuja
+nvfortran -O2 -Mnofma -c mdensidades.f90
+nvfortran -O2 -Mnofma -c mmcvpromedia.f90
+nvfortran -O2 -Mnofma -c msteps.f90
+nvfortran -O2 -Mnofma -c mimagina.f90
+nvfortran -O2 -Mnofma -c mdmcpromedia.f90
+nvfortran -O2 -Mnofma -c mserie.f90
+nvfortran -O2 -Mnofma -c mmontecarlo.f90
+nvfortran -O2 -Mnofma -c mentradatos.f90
+nvfortran -O2 -Mnofma -c mminimiza.f90
+nvfortran -O2 -Mnofma -c qmccluster.f90
+nvfortran -O2 -Mnofma -o qmccluster qmccluster.o mmontecarlo.o mminimiza.o mentradatos.o mconfiguraciones.o mparametros.o mrandom.o mrandom2.o mtipos.o mdensidades.o msteps.o mwavef.o mangwavef.o mimagina.o mrotaciones.o msistref.o mvaziz.o mvmolecula.o mmcvpromedia.o mdmcpromedia.o bh_heh2m.o pw_heocs.o mhh_heocs.o mkp_heco.o kpcoef.o mlineal.o mlegendre.o modlegendre.o  mserie.o -llapack -lblas

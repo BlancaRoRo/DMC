@@ -1,0 +1,216 @@
+module angle_scalar_vec
+! dacos -> myacos: dacos tiene implementaciones independientes en host
+! (rapida __fd_acos_1 / precisa __pd_acos_1 segun -Kieee) y en device
+! (libdevice), que no coinciden para cualquier angulo -- confirmado con
+! un contraejemplo real (fi=-0.5773502691896258, de He_dihydrogen,
+! walker 3 atomo 4: GPU=2.18627603546528437, gfortran=...528393). Los 5
+! pares originales de este test no lo mostraban por casualidad (ver
+! docs-kernels/angle_scalar_vec.md); myacos (glibc_math.md) esta
+! verificado bit a bit contra gfortran en 26 casos distintos, incluido
+! este mismo angulo -- cierre garantizado, no solo "no se ha notado".
+use glibc_acos_mod, only: myacos
+
+implicit none
+integer, private, parameter :: i4 = selected_int_kind(9)
+
+contains
+attributes(host, device) subroutine angle(vec1, vec2, ang)
+    double precision, intent(in)  :: vec1(3), vec2(3)
+    double precision, intent(out) :: ang
+    integer :: id
+    double precision :: x1,x2,sprod,norm1,norm2
+
+    sprod=0.d0
+    norm1=0.d0
+    norm2=0.d0
+    do id=1,3
+        x1=vec1(id)
+        x2=vec2(id)
+        sprod=sprod+x1*x2
+        norm1=norm1+x1*x1
+        norm2=norm2+x2*x2
+    end do
+    norm1=dsqrt(norm1)
+    norm2=dsqrt(norm2)
+    ang=myacos(sprod/(norm1*norm2))
+end subroutine angle
+
+attributes(host, device) subroutine scalar_product(vec1, vec2, sprod)
+    double precision, intent(in)  :: vec1(3), vec2(3)
+    double precision, intent(out) :: sprod
+    integer :: id
+    sprod=0.d0
+    do id=1,3
+        sprod=sprod+vec1(id)*vec2(id)
+    end do
+end subroutine scalar_product
+
+attributes(host, device) subroutine vec_norm(vec, xnorm)
+    double precision, intent(in)  :: vec(3)
+    double precision, intent(out) :: xnorm
+    integer :: id
+    xnorm=0.d0
+    do id=1,3
+        xnorm=xnorm+vec(id)*vec(id)
+    end do
+    xnorm=dsqrt(xnorm)
+end subroutine vec_norm
+
+! un hilo = un par de vectores = un angulo
+attributes(global) subroutine k_angle(n, vec1, vec2, ang_out)
+ integer(kind=i4), value :: n
+ double precision, device, intent(in)  :: vec1(3,n), vec2(3,n)
+ double precision, device, intent(out) :: ang_out(n)
+ integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call angle(vec1(:,i), vec2(:,i), ang_out(i))
+  endif
+end subroutine k_angle
+
+! un hilo = un par de vectores = un producto escalar
+attributes(global) subroutine k_scalar_product(n, vec1, vec2, sprod_out)
+ integer(kind=i4), value :: n
+ double precision, device, intent(in)  :: vec1(3,n), vec2(3,n)
+ double precision, device, intent(out) :: sprod_out(n)
+ integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call scalar_product(vec1(:,i), vec2(:,i), sprod_out(i))
+  endif
+end subroutine k_scalar_product
+
+! un hilo = un vector = una norma
+attributes(global) subroutine k_vec_norm(n, vec, xnorm_out)
+ integer(kind=i4), value :: n
+ double precision, device, intent(in)  :: vec(3,n)
+ double precision, device, intent(out) :: xnorm_out(n)
+ integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call vec_norm(vec(:,i), xnorm_out(i))
+  endif
+end subroutine k_vec_norm
+
+end module angle_scalar_vec
+
+
+program test_angle_scalar_vec
+ ! CPU "de confianza": angle/scalar_product/vec_norm de bh_heh2m.f, sin
+ ! tocar, compiladas junto a este fichero. No es un modulo (F77 suelto),
+ ! asi que se declaran external, igual que en V_hehe-Vp_hehe.cuf.
+ use angle_scalar_vec, only: k_angle, k_scalar_product, k_vec_norm
+ use cudafor
+ implicit none
+ external :: angle, scalar_product, vec_norm
+
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer(kind=i4), parameter :: n = 22
+
+ ! pares de vectores de prueba: paralelos (angulo=0), antiparalelos
+ ! (angulo=pi), perpendiculares (angulo=pi/2), dos genericos, y el par
+ ! 6 que reproduce EXACTAMENTE el angulo de He_dihydrogen (walker 3,
+ ! atomo 4) donde dacos SI diverge entre GPU y gfortran -- para
+ ! demostrar que myacos lo cierra de verdad, no solo que "no se nota".
+ ! Pares 7-20: cubren las 8 zonas del algoritmo de myacos (glibc_acos.cuf,
+ ! umbrales por |fi|: <2.78e-17, 0.125, 0.5, 0.75, 0.921875, 0.953125,
+ ! 0.96875, 1), con vec2 siempre de norma 1 (fi=vec2(1) exacto por
+ ! construccion: vec2=(fi,sqrt(1-fi**2),0)), incluyendo casos muy cerca
+ ! de +-1 (donde acos'(x)->infinito, el punto mas delicado del algoritmo).
+ ! Pares 21-22: magnitudes extremas (1e150/1e-150) para estresar tambien
+ ! vec_norm/scalar_product bajo escalas muy distintas entre vec1 y vec2.
+ double precision :: vec1_h(3,n), vec2_h(3,n)
+ double precision :: ang_cpu(n), sprod_cpu(n), norm_cpu(n)
+ double precision :: ang_h(n), sprod_h(n), norm_h(n)
+
+ double precision, device :: vec1_d(3,n), vec2_d(3,n)
+ double precision, device :: ang_d(n), sprod_d(n), norm_d(n)
+
+ integer(kind=i4) :: i, threads, blocks
+ double precision :: err_ang, err_sp, err_nm, errmax
+
+  vec1_h(:,1) = (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,1) = (/  1.0d0, 0.0d0, 0.0d0 /)
+  vec1_h(:,2) = (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,2) = (/ -1.0d0, 0.0d0, 0.0d0 /)
+  vec1_h(:,3) = (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,3) = (/  0.0d0, 1.0d0, 0.0d0 /)
+  vec1_h(:,4) = (/ 1.0d0, 2.0d0, 3.0d0 /); vec2_h(:,4) = (/  4.0d0, 5.0d0, 6.0d0 /)
+  vec1_h(:,5) = (/ 2.5d0,-1.3d0, 0.7d0 /); vec2_h(:,5) = (/ -0.4d0, 3.2d0, 1.1d0 /)
+  vec1_h(:,6) = (/ 2.0d0, 2.0d0, 2.0d0 /); vec2_h(:,6) = (/  0.0d0, 0.0d0,-1.05887100d0 /)
+
+  ! zona 0 (|fi|~1e-20, sin llegar a underflow real)
+  vec1_h(:,7) = (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,7) = (/ 1.0d-20, 1.0d0, 0.0d0 /)
+  ! zona 1 (0.05, <0.125)
+  vec1_h(:,8) = (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,8) = (/ 0.05d0, 0.99874921777190940d0, 0.0d0 /)
+  ! zona 2 (0.125-0.5), positivo y negativo
+  vec1_h(:,9) = (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,9) = (/ 0.3d0, 0.95393920141694566d0, 0.0d0 /)
+  vec1_h(:,10)= (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,10)= (/ -0.3d0, 0.95393920141694566d0, 0.0d0 /)
+  ! zona 3 (0.5-0.75), positivo y negativo
+  vec1_h(:,11)= (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,11)= (/ 0.6d0, 0.8d0, 0.0d0 /)
+  vec1_h(:,12)= (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,12)= (/ -0.65d0, 0.75993420767853309d0, 0.0d0 /)
+  ! zona 4 (0.75-0.921875), positivo y negativo
+  vec1_h(:,13)= (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,13)= (/ 0.8d0, 0.59999999999999998d0, 0.0d0 /)
+  vec1_h(:,14)= (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,14)= (/ -0.85d0, 0.52678268764263704d0, 0.0d0 /)
+  ! zona 5 (0.921875-0.953125)
+  vec1_h(:,15)= (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,15)= (/ 0.94d0, 0.34117444218463972d0, 0.0d0 /)
+  ! zona 6 (0.953125-0.96875)
+  vec1_h(:,16)= (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,16)= (/ 0.96d0, 0.28d0, 0.0d0 /)
+  ! zona 7, cerca de 1 y de -1 (el punto mas delicado: acos'(x)->infinito)
+  vec1_h(:,17)= (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,17)= (/ 0.99d0, 0.14106735979665894d0, 0.0d0 /)
+  vec1_h(:,18)= (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,18)= (/ 0.999999d0, 0.0014142132088478148d0, 0.0d0 /)
+  vec1_h(:,19)= (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,19)= (/ -0.99d0, 0.14106735979665894d0, 0.0d0 /)
+  vec1_h(:,20)= (/ 1.0d0, 0.0d0, 0.0d0 /); vec2_h(:,20)= (/ -0.999999d0, 0.0014142132088478148d0, 0.0d0 /)
+
+  ! magnitudes extremas: misma direccion relativa que el par 11
+  ! (fi=0.6), pero con normas de 1e150 y 1e-150 -- estresa tambien
+  ! vec_norm/scalar_product bajo escalas muy distintas
+  vec1_h(:,21)= (/ 1.0d150, 0.0d0, 0.0d0 /); vec2_h(:,21)= (/ 0.6d150, 0.8d150, 0.0d0 /)
+  vec1_h(:,22)= (/ 1.0d-150, 0.0d0, 0.0d0 /); vec2_h(:,22)= (/ 0.6d-150, 0.8d-150, 0.0d0 /)
+
+  vec1_d = vec1_h   ! copia CPU -> GPU
+  vec2_d = vec2_h
+
+  threads = 32
+  blocks = (n + threads - 1) / threads
+
+  call k_angle<<<blocks, threads>>>(n, vec1_d, vec2_d, ang_d)
+  call k_scalar_product<<<blocks, threads>>>(n, vec1_d, vec2_d, sprod_d)
+  call k_vec_norm<<<blocks, threads>>>(n, vec1_d, norm_d)
+
+  ang_h   = ang_d    ! copia GPU -> CPU
+  sprod_h = sprod_d
+  norm_h  = norm_d
+
+  errmax = 0.0d0
+  do i = 1, n
+    call angle(vec1_h(:,i), vec2_h(:,i), ang_cpu(i))
+    call scalar_product(vec1_h(:,i), vec2_h(:,i), sprod_cpu(i))
+    call vec_norm(vec1_h(:,i), norm_cpu(i))
+
+    write(*,*)
+    write(*,'(a,i0)') '--- par ', i
+    write(*,'(a,3f8.3,a,3f8.3)') '  vec1=', vec1_h(:,i), '   vec2=', vec2_h(:,i)
+    write(*,'(a,f18.12,a,f18.12)') '  angle   CPU=', ang_cpu(i),  '   GPU=', ang_h(i)
+    write(*,'(a,f18.12,a,f18.12)') '  scalar  CPU=', sprod_cpu(i),'   GPU=', sprod_h(i)
+    write(*,'(a,f18.12,a,f18.12)') '  norm    CPU=', norm_cpu(i), '   GPU=', norm_h(i)
+    write(*,'(a,es24.17,a,es24.17)') '  HP angle   CPU=', ang_cpu(i),  '   GPU=', ang_h(i)
+    write(*,'(a,es24.17,a,es24.17)') '  HP scalar  CPU=', sprod_cpu(i),'   GPU=', sprod_h(i)
+    write(*,'(a,es24.17,a,es24.17)') '  HP norm    CPU=', norm_cpu(i), '   GPU=', norm_h(i)
+
+    err_ang = abs(ang_h(i)   - ang_cpu(i))
+    err_sp  = abs(sprod_h(i) - sprod_cpu(i))
+    err_nm  = abs(norm_h(i)  - norm_cpu(i))
+    write(*,'(a,es10.2,a,es10.2,a,es10.2)') '  |err| angle=', err_ang, '  scalar=', err_sp, '  norm=', err_nm
+
+    errmax = max(errmax, err_ang, err_sp, err_nm)
+  enddo
+
+  write(*,*)
+  if (errmax < 1.0d-10) then
+    write(*,*) 'PASA: GPU y CPU coinciden dentro de tolerancia'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_angle_scalar_vec

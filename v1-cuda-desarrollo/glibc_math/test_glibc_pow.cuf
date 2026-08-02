@@ -1,0 +1,99 @@
+! test_glibc_pow.cuf
+!
+! Prueba mypow (glibc_pow.cuf) contra x**y intrinseca (CPU y GPU,
+! nvfortran) para los exponentes NU reales de este proyecto
+! (9.763290, 4.725025, 3.155952, 11.036848, 1.0 -- ver in.mcv, bloques
+! "nu he4 impureza"/"nu he4 he4") y un rango de rij que va desde
+! contacto muy cercano hasta largo alcance.
+!
+! Compilar y ejecutar: ver docs-kernels/glibc_math.md
+
+program test_glibc_pow
+ use glibc_pow_mod
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ integer(kind=i4), parameter :: n = 30
+ real(kind=r8) :: x_h(n), y_h(n)
+ real(kind=r8) :: pow_intrinsic(n)
+ real(kind=r8) :: pow_my_cpu(n)
+ real(kind=r8) :: pow_h(n)
+ real(kind=r8), device :: x_d(n), y_d(n), pow_d(n)
+ integer(kind=i4) :: i, threads, blocks
+ real(kind=r8) :: errmax, err
+
+  ! exponentes reales de in.mcv (nu he4-impureza: 9.763290, 1.0,
+  ! 3.155952, 1.0, 11.036848; nu he4-he4: 4.725025), cruzados con rij
+  ! desde contacto muy cercano (~0.3, mas cerca que el "0.87 bohr" de
+  ! der_wavefx.md) hasta largo alcance (~50)
+  x_h( 1)=0.3d0;    y_h( 1)=9.763290d0
+  x_h( 2)=0.5d0;    y_h( 2)=9.763290d0
+  x_h( 3)=0.86602540378443864d0; y_h( 3)=9.763290d0   ! el rij real de der_wavefx.md
+  x_h( 4)=1.0d0;    y_h( 4)=9.763290d0
+  x_h( 5)=2.0d0;    y_h( 5)=9.763290d0
+  x_h( 6)=5.0d0;    y_h( 6)=9.763290d0
+  x_h( 7)=20.0d0;   y_h( 7)=9.763290d0
+  x_h( 8)=50.0d0;   y_h( 8)=9.763290d0
+
+  x_h( 9)=0.3d0;    y_h( 9)=4.725025d0
+  x_h(10)=0.86602540378443864d0; y_h(10)=4.725025d0
+  x_h(11)=2.0d0;    y_h(11)=4.725025d0
+  x_h(12)=20.0d0;   y_h(12)=4.725025d0
+
+  x_h(13)=0.3d0;    y_h(13)=3.155952d0
+  x_h(14)=0.86602540378443864d0; y_h(14)=3.155952d0
+  x_h(15)=2.0d0;    y_h(15)=3.155952d0
+  x_h(16)=20.0d0;   y_h(16)=3.155952d0
+
+  x_h(17)=0.3d0;    y_h(17)=11.036848d0
+  x_h(18)=0.86602540378443864d0; y_h(18)=11.036848d0
+  x_h(19)=2.0d0;    y_h(19)=11.036848d0
+  x_h(20)=20.0d0;   y_h(20)=11.036848d0
+
+  x_h(21)=0.86602540378443864d0; y_h(21)=1.0d0
+  x_h(22)=2.0d0;    y_h(22)=1.0d0
+
+  ! extremos: base muy pequena/muy grande, exponente muy grande/pequeno
+  x_h(23)=1.0d-8;   y_h(23)=9.763290d0
+  x_h(24)=1.0d8;    y_h(24)=9.763290d0
+  x_h(25)=1.0d-3;   y_h(25)=11.036848d0
+  x_h(26)=1.0d3;    y_h(26)=11.036848d0
+  x_h(27)=0.86602540378443864d0; y_h(27)=100.0d0
+  x_h(28)=0.86602540378443864d0; y_h(28)=0.001d0
+  x_h(29)=1.0d0;    y_h(29)=1.0d0
+  x_h(30)=7.3d0;    y_h(30)=0.5d0    ! y no entero "generico"
+
+  x_d = x_h
+  y_d = y_h
+  threads = 32
+  blocks = (n + threads - 1) / threads
+  call k_mypow<<<blocks,threads>>>(n, x_d, y_d, pow_d)
+  pow_h = pow_d
+
+  errmax = 0.0d0
+  do i = 1, n
+    pow_intrinsic(i) = x_h(i)**y_h(i)
+    pow_my_cpu(i) = mypow(x_h(i), y_h(i))
+
+    write(*,*)
+    write(*,'(a,i0,a,es16.8,a,es16.8)') '--- #', i, '  x=', x_h(i), '  y=', y_h(i)
+    write(*,'(a,es24.17)') '  x**y intrinseca (CPU) =', pow_intrinsic(i)
+    write(*,'(a,es24.17)') '  mypow CPU             =', pow_my_cpu(i)
+    write(*,'(a,es24.17)') '  mypow GPU             =', pow_h(i)
+
+    err = abs(pow_my_cpu(i) - pow_intrinsic(i))
+    err = max(err, abs(pow_h(i) - pow_intrinsic(i)))
+    write(*,'(a,es10.2)') '  |err| max frente a la intrinseca=', err
+    errmax = max(errmax, err)
+  enddo
+
+  write(*,*)
+  if (errmax < 1.0d-300) then
+    write(*,*) 'PASA: mypow (CPU y GPU) coinciden EXACTOS con x**y intrinseca'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_glibc_pow

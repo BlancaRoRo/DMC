@@ -1,0 +1,132 @@
+module mulp_aislado
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+contains
+
+! ---- control: una unica expresion con el patron a*b+c, exactamente
+! el tipo de expresion que se aislo en Vp_hehe (V_hehe_Vp_hehe.md §9).
+! Sirve para confirmar que, en esta maquina, -Mnofma SIGUE arreglando
+! este caso limpiamente (control positivo) antes de mirar las
+! funciones transcendentales por separado. ----
+attributes(host, device) function fma_expr(a, b, c) result(y)
+ real(kind=r8), intent (in) :: a, b, c
+ real(kind=r8) :: y
+   y = a*b + c
+end function fma_expr
+
+attributes(global) subroutine k_fma(n, a, b, c, y)
+ integer(kind=i4), value :: n
+ real(kind=r8), device, intent (in)  :: a(n), b(n), c(n)
+ real(kind=r8), device, intent (out) :: y(n)
+ integer(kind=i4) :: i
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) y(i) = fma_expr(a(i), b(i), c(i))
+end subroutine k_fma
+
+! ---- las tres funciones transcendentales, cada una sola, sin
+! ninguna otra operacion alrededor -- para comprobar si la diferencia
+! ya esta en la funcion en si (libdevice vs libm), antes de que
+! ninguna multiplicacion/suma posterior la mezcle con nada mas. ----
+attributes(global) subroutine k_transc(n, x, e, co, si)
+ integer(kind=i4), value :: n
+ real(kind=r8), device, intent (in)  :: x(n)
+ real(kind=r8), device, intent (out) :: e(n), co(n), si(n)
+ integer(kind=i4) :: i
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    e(i)  = dexp(x(i))
+    co(i) = dcos(x(i))
+    si(i) = dsin(x(i))
+  endif
+end subroutine k_transc
+
+end module mulp_aislado
+
+
+program test_ulp_aislado
+ use mulp_aislado
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ integer(kind=i4), parameter :: n = 8
+ real(kind=r8) :: a_h(n), b_h(n), c_h(n), x_h(n)
+ real(kind=r8) :: y_cpu(n), y_h(n)
+ real(kind=r8) :: e_cpu(n), co_cpu(n), si_cpu(n)
+ real(kind=r8) :: e_h(n), co_h(n), si_h(n)
+ real(kind=r8), device :: a_d(n), b_d(n), c_d(n), x_d(n)
+ real(kind=r8), device :: y_d(n), e_d(n), co_d(n), si_d(n)
+ integer(kind=i4) :: i, threads, blocks
+ real(kind=r8) :: erry, erre, errco, errsi
+
+  ! valores "genericos" (magnitudes parecidas a las que aparecen de
+  ! verdad en V_hehe/He_dihydrogen: distancias ~1-10, angulos 0..pi)
+  a_h = (/ 1.234567891011_r8, 7.13500000001_r8, 0.98765432101_r8, &
+           15.632178901234_r8, -3.33333333333_r8, 2.71828182845_r8, &
+           0.10000000001_r8, 9.99999999999_r8 /)
+  b_h = (/ 2.345678910111_r8, -0.928400000002_r8, 4.5678901234_r8, &
+           0.500000000001_r8, 6.66666666667_r8, -1.41421356237_r8, &
+           8.88888888889_r8, 0.00001000001_r8 /)
+  c_h = (/ 3.456789101112_r8, 15.6321000003_r8, -2.3456789012_r8, &
+           7.777777777_r8, 0.33333333333_r8, 3.14159265359_r8, &
+           -0.5000000001_r8, 1.00000000001_r8 /)
+  x_h = (/ 0.1_r8, 0.5_r8, 1.0_r8, 1.5707963267948966_r8, &
+           3.14159265358979_r8, 2.71828182845905_r8, -0.987654321_r8, 5.0_r8 /)
+
+  a_d = a_h;  b_d = b_h;  c_d = c_h;  x_d = x_h
+
+  threads = 32
+  blocks = (n + threads - 1) / threads
+  call k_fma<<<blocks,threads>>>(n, a_d, b_d, c_d, y_d)
+  call k_transc<<<blocks,threads>>>(n, x_d, e_d, co_d, si_d)
+  y_h = y_d;  e_h = e_d;  co_h = co_d;  si_h = si_d
+
+  do i = 1, n
+    y_cpu(i)  = fma_expr(a_h(i), b_h(i), c_h(i))
+    e_cpu(i)  = dexp(x_h(i))
+    co_cpu(i) = dcos(x_h(i))
+    si_cpu(i) = dsin(x_h(i))
+  enddo
+
+  write(*,*) '=== FMA aislada: y = a*b+c ==='
+  erry = 0.0d0
+  do i = 1, n
+    write(*,'(a,i0,a,f22.16,a,f22.16,a,es9.2)') '  #',i,'  CPU=',y_cpu(i),'  GPU=',y_h(i), &
+      '  |err|=', abs(y_h(i)-y_cpu(i))
+    erry = max(erry, abs(y_h(i)-y_cpu(i)))
+  enddo
+
+  write(*,*)
+  write(*,*) '=== dexp(x) aislada ==='
+  erre = 0.0d0
+  do i = 1, n
+    write(*,'(a,i0,a,f22.16,a,f22.16,a,es9.2)') '  #',i,'  CPU=',e_cpu(i),'  GPU=',e_h(i), &
+      '  |err|=', abs(e_h(i)-e_cpu(i))
+    erre = max(erre, abs(e_h(i)-e_cpu(i)))
+  enddo
+
+  write(*,*)
+  write(*,*) '=== dcos(x) aislada ==='
+  errco = 0.0d0
+  do i = 1, n
+    write(*,'(a,i0,a,f22.16,a,f22.16,a,es9.2)') '  #',i,'  CPU=',co_cpu(i),'  GPU=',co_h(i), &
+      '  |err|=', abs(co_h(i)-co_cpu(i))
+    errco = max(errco, abs(co_h(i)-co_cpu(i)))
+  enddo
+
+  write(*,*)
+  write(*,*) '=== dsin(x) aislada ==='
+  errsi = 0.0d0
+  do i = 1, n
+    write(*,'(a,i0,a,f22.16,a,f22.16,a,es9.2)') '  #',i,'  CPU=',si_cpu(i),'  GPU=',si_h(i), &
+      '  |err|=', abs(si_h(i)-si_cpu(i))
+    errsi = max(errsi, abs(si_h(i)-si_cpu(i)))
+  enddo
+
+  write(*,*)
+  write(*,'(a,es9.2,a,es9.2,a,es9.2,a,es9.2)') ' |err|max  fma=',erry,'  exp=',erre,'  cos=',errco,'  sin=',errsi
+
+end program test_ulp_aislado

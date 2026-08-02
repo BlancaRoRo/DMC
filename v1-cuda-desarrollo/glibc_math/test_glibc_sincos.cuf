@@ -1,0 +1,71 @@
+! test_glibc_sincos.cuf
+!
+! Prueba mysin/mycos (glibc_sincos.cuf) contra dsin/dcos intrinsecas
+! (CPU y GPU, nvfortran) para valores que recorren TODAS las ramas del
+! algoritmo (Taylor puro, do_sin/do_cos directo, reduce_sincos).
+!
+! Compilar y ejecutar: ver docs-kernels/glibc_math.md
+
+program test_glibc_sincos
+ use glibc_sincos_mod
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ integer(kind=i4), parameter :: n = 23
+ real(kind=r8) :: x_h(n)
+ real(kind=r8) :: sin_intrinsic(n), cos_intrinsic(n)
+ real(kind=r8) :: sin_my_cpu(n), cos_my_cpu(n)
+ real(kind=r8) :: sin_h(n), cos_h(n)
+ real(kind=r8), device :: x_d(n), sin_d(n), cos_d(n)
+ integer(kind=i4) :: i, threads, blocks
+ real(kind=r8) :: errmax, err
+
+  x_h = (/ 0.0_r8, 0.001_r8, 0.1_r8, 0.126_r8, 0.5_r8, 0.855469_r8, &
+           1.0_r8, 1.5707963267948966_r8, 2.0_r8, 2.426265_r8, &
+           3.14159265358979_r8, 5.0_r8, 10.0_r8, 100.0_r8, 1000.0_r8, &
+           -1.5_r8, -3.14159265358979_r8, &
+           ! |x| >= 105414350: activan branred (Payne-Hanek)
+           1.05d8, 1.06d8, 1.0d9, 1.0d15, 1.0d100, -1.0d20 /)
+
+  x_d = x_h
+  threads = 32
+  blocks = (n + threads - 1) / threads
+  call k_mysin<<<blocks,threads>>>(n, x_d, sin_d)
+  call k_mycos<<<blocks,threads>>>(n, x_d, cos_d)
+  sin_h = sin_d
+  cos_h = cos_d
+
+  errmax = 0.0d0
+  do i = 1, n
+    sin_intrinsic(i) = dsin(x_h(i))
+    cos_intrinsic(i) = dcos(x_h(i))
+    sin_my_cpu(i) = mysin(x_h(i))
+    cos_my_cpu(i) = mycos(x_h(i))
+
+    write(*,*)
+    write(*,'(a,i0,a,es24.17)') '--- #', i, '  x=', x_h(i)
+    write(*,'(a,es24.17)') '  dsin intrinseca (CPU) =', sin_intrinsic(i)
+    write(*,'(a,es24.17)') '  mysin CPU             =', sin_my_cpu(i)
+    write(*,'(a,es24.17)') '  mysin GPU             =', sin_h(i)
+    write(*,'(a,es24.17)') '  dcos intrinseca (CPU) =', cos_intrinsic(i)
+    write(*,'(a,es24.17)') '  mycos CPU             =', cos_my_cpu(i)
+    write(*,'(a,es24.17)') '  mycos GPU             =', cos_h(i)
+
+    err = abs(sin_my_cpu(i) - sin_intrinsic(i))
+    err = max(err, abs(sin_h(i) - sin_intrinsic(i)))
+    err = max(err, abs(cos_my_cpu(i) - cos_intrinsic(i)))
+    err = max(err, abs(cos_h(i) - cos_intrinsic(i)))
+    write(*,'(a,es10.2)') '  |err| max frente a las intrinsecas=', err
+    errmax = max(errmax, err)
+  enddo
+
+  write(*,*)
+  if (errmax < 1.0d-300) then
+    write(*,*) 'PASA: mysin/mycos (CPU y GPU) coinciden EXACTOS con dsin/dcos intrinsecas'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_glibc_sincos

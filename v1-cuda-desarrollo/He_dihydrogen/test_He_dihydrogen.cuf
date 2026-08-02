@@ -1,0 +1,108 @@
+program test_He_dihydrogen
+ ! CPU de confianza: He_dihydrogen del bh_heh2m.f ORIGINAL, sin tocar
+ ! (usa sus propias V_hehe/Vp_hehe/angle/scalar_product/vec_norm
+ ! internas, independientes de los modulos GPU).
+ ! solo se importa el kernel -- si se importara el modulo entero, el
+ ! nombre "He_dihydrogen" de su interface (para la version GPU) chocaria
+ ! con el "external He_dihydrogen" de la CPU de aqui abajo.
+ use k_He_dihydrogen_mod, only: k_He_dihydrogen
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ external :: He_dihydrogen
+
+ integer(kind=i4), parameter :: natoms = 4
+ integer(kind=i4), parameter :: n_walk = 3
+ real(kind=r8), parameter :: dhcm = 0.52943550d0
+
+ real(kind=r8) :: r_dih(3,2), rHH(3,1), orHH(3,1)
+ real(kind=r8) :: X_h(3*natoms,n_walk)
+ real(kind=r8) :: V_cpu(3*natoms,n_walk), V_h(3*natoms,n_walk)
+ real(kind=r8) :: e1_cpu(n_walk), e2_cpu(n_walk), e3_cpu(n_walk)
+ real(kind=r8) :: e1_h(n_walk), e2_h(n_walk), e3_h(n_walk)
+
+ real(kind=r8), device :: r_dih_d(3,2), rHH_d(3,1), orHH_d(3,1)
+ real(kind=r8), device :: X_d(3*natoms,n_walk), V_d(3*natoms,n_walk)
+ real(kind=r8), device :: e1_d(n_walk), e2_d(n_walk), e3_d(n_walk)
+
+ integer(kind=i4) :: iw, threads, blocks, igt
+ real(kind=r8) :: err, errmax
+ logical :: gtest
+
+  ! r_dih/rHH/orHH: los mismos para todos los walkers (solo dependen de
+  ! dhcm), calculados exactamente como en potenbh (bh_heh2m.f:17-22)
+  r_dih = 0.0d0
+  r_dih(3,1) =  dhcm
+  r_dih(3,2) = -dhcm
+  rHH = 0.0d0
+  orHH = 0.0d0
+  orHH(3,1) = -2.0d0*dhcm
+
+  ! 3 walkers de prueba, 4 "atomos de He" cada uno (posiciones en el
+  ! sistema de referencia del cuerpo, como las deja ccuerpo)
+  X_h(:,1) = (/ 3.0d0,0.0d0,0.0d0,  0.0d0,4.0d0,1.0d0, &
+               -2.0d0,-3.0d0,2.5d0, 1.5d0,1.5d0,1.5d0 /)
+  X_h(:,2) = (/ 1.0d0,1.0d0,1.0d0,  -1.0d0,2.0d0,0.5d0, &
+                2.5d0,-1.5d0,3.0d0, 0.0d0,0.0d0,-4.0d0 /)
+  X_h(:,3) = (/ 5.0d0,0.0d0,0.0d0,  0.0d0,5.0d0,0.0d0, &
+                0.0d0,0.0d0,5.0d0,  2.0d0,2.0d0,2.0d0 /)
+
+  r_dih_d = r_dih
+  rHH_d   = rHH
+  orHH_d  = orHH
+  X_d     = X_h
+
+  threads = 32
+  blocks = (n_walk + threads - 1) / threads
+
+  errmax = 0.0d0
+  ! se prueban las dos ramas de gtest, no solo la que usa potenbh (.false.)
+  do igt = 0, 1
+    gtest = (igt == 1)
+
+    call k_He_dihydrogen<<<blocks,threads>>>(n_walk, natoms, r_dih_d, rHH_d, orHH_d, &
+                                              X_d, V_d, e1_d, e2_d, e3_d, gtest)
+    e1_h = e1_d
+    e2_h = e2_d
+    e3_h = e3_d
+    V_h  = V_d
+
+    write(*,*)
+    write(*,'(a,l1)') '=== GTEST = ', gtest
+
+    do iw = 1, n_walk
+      call He_dihydrogen(natoms, r_dih, rHH, orHH, X_h(:,iw), &
+                              V_cpu(:,iw), e1_cpu(iw), e2_cpu(iw), e3_cpu(iw), gtest)
+
+      write(*,*)
+      write(*,'(a,i0)') '--- walker ', iw
+      write(*,'(a,f18.10,a,f18.10)') '  ENERGY1 CPU=', e1_cpu(iw), '   GPU=', e1_h(iw)
+      write(*,'(a,f18.10,a,f18.10)') '  ENERGY2 CPU=', e2_cpu(iw), '   GPU=', e2_h(iw)
+      write(*,'(a,f18.10,a,f18.10)') '  ENERGY3 CPU=', e3_cpu(iw), '   GPU=', e3_h(iw)
+      write(*,'(a,es24.17,a,es24.17)') '  HP ENERGY1 CPU=', e1_cpu(iw), '   GPU=', e1_h(iw)
+      write(*,'(a,es24.17,a,es24.17)') '  HP ENERGY2 CPU=', e2_cpu(iw), '   GPU=', e2_h(iw)
+      write(*,'(a,es24.17,a,es24.17)') '  HP ENERGY3 CPU=', e3_cpu(iw), '   GPU=', e3_h(iw)
+
+      err = abs(e1_h(iw)-e1_cpu(iw))
+      err = max(err, abs(e2_h(iw)-e2_cpu(iw)))
+      err = max(err, abs(e3_h(iw)-e3_cpu(iw)))
+      if (gtest) then
+        write(*,'(a,4f14.8)') '  V(1:4) CPU=', V_cpu(1:4,iw)
+        write(*,'(a,4f14.8)') '  V(1:4) GPU=', V_h(1:4,iw)
+        err = max(err, maxval(abs(V_h(:,iw)-V_cpu(:,iw))))
+      endif
+      write(*,'(a,es10.2)') '  |err| max=', err
+      errmax = max(errmax, err)
+    enddo
+  enddo
+
+  write(*,*)
+  if (errmax < 1.0d-8) then
+    write(*,*) 'PASA: GPU y CPU coinciden dentro de tolerancia'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_He_dihydrogen

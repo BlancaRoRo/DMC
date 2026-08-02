@@ -1,0 +1,235 @@
+! glibc_pow.cuf
+!
+! Puerto a CUDA Fortran de __pow de glibc 2.39
+! (sysdeps/ieee754/dbl-64/e_pow.c + e_pow_log_data.c, algoritmo ARM
+! Optimized Routines: log_inline (tabla de 128 entradas, log_data) +
+! exp_inline (reutiliza la MISMA tabla y las MISMAS constantes que
+! myexp, glibc_exp_mod.cuf -- exp_inline es literalmente el motor
+! interno de exp() con precision extendida, glibc lo comparte entre
+! __exp y __pow).
+!
+! Motivo: rij**nu (con nu real, no entero) aparece en duhe4x/uhe4x/
+! duhe3x/uhe3x (der_wavefx.cuf, d_uhex4.cuf) y en wavefhe4/derwavefhe4
+! -- confirmado que dacos/pow tienen implementaciones independientes en
+! host (rapida __fd_pow_1 / precisa __pd_pow_1 segun -Kieee) y en
+! device (libdevice), sin garantia de coincidir con gfortran para
+! cualquier (rij,nu) -- ver docs-kernels/He_dihydrogen.md Parte 5.
+!
+! Dominio de uso real: rij siempre > 0 (es una distancia fisica), nu
+! siempre finito y normal (parametro de in.mcv). Se porta el camino
+! log_inline+exp_inline fielmente (incluida la rama sin FMA, la unica
+! activa en x86_64 generico -- mismo criterio ya comprobado para
+! myexp/mysin/mycos/myacos), y se simplifica la logica de casos
+! especiales de __pow a lo que puede ocurrir de verdad en este dominio
+! (x>0 finito, y finito): x==1, y==0, |y| extremo (over/underflow), y
+! el camino general. La rama de x<0 (con su logica de entero par/impar
+! para el signo) NO se porta -- rij nunca es negativo, igual que
+! aziz_nuevo/vatomol en vpot.cuf.
+!
+! Fuente original: LGPL-2.1-or-later, (C) 2018-2024 Free Software
+! Foundation, Inc. -- ver https://sourceware.org/git/?p=glibc.git;
+! a=blob;f=sysdeps/ieee754/dbl-64/e_pow.c;hb=glibc-2.39
+
+module glibc_pow_mod
+ use glibc_exp_mod, only: bits_of, real_of, top12_of, &
+      exp_invln2N, exp_negln2hiN, exp_negln2loN, exp_shift, &
+      exp_c2, exp_c3, exp_c4, exp_c5, exp_tab, exp_specialcase, &
+      exp_top12_tiny, exp_top12_512, exp_top12_1024, exp_top12_inf, &
+      exp_bits_posinf, exp_bits_neginf
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: i8 = selected_int_kind(18)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! ---- constantes de e_pow_log_data.c, N=128 ----
+ real(kind=r8), parameter :: pow_ln2hi = transfer(int(z'3fe62e42fefa3800',8), 1.0_r8)
+ real(kind=r8), parameter :: pow_ln2lo = transfer(int(z'3d2ef35793c76730',8), 1.0_r8)
+ real(kind=r8), parameter :: pow_a0 = transfer(int(z'bfe0000000000000',8), 1.0_r8)
+ real(kind=r8), parameter :: pow_a1 = transfer(int(z'bfe5555555555560',8), 1.0_r8)
+ real(kind=r8), parameter :: pow_a2 = transfer(int(z'3fe0000000000006',8), 1.0_r8)
+ real(kind=r8), parameter :: pow_a3 = transfer(int(z'3fe999999959554e',8), 1.0_r8)
+ real(kind=r8), parameter :: pow_a4 = transfer(int(z'bfe555555529a47a',8), 1.0_r8)
+ real(kind=r8), parameter :: pow_a5 = transfer(int(z'bff2495b9b4845e9',8), 1.0_r8)
+ real(kind=r8), parameter :: pow_a6 = transfer(int(z'3ff0002b8b263fc3',8), 1.0_r8)
+ ! OFF = 0x3fe6955500000000 (centro del rango de z para log_inline)
+ integer(kind=i8), parameter :: pow_off = int(z'3fe6955500000000',8)
+
+ include 'pow_log_tab_fortran.txt'
+
+contains
+
+! ---- desplazamiento aritmetico (con signo) a la derecha de 52 bits.
+! nvfortran no reconoce el intrinseco estandar SHIFTA (F2008) -- si lo
+! reconoce gfortran, comprobado -- asi que se implementa a mano via
+! division entera con correccion de signo: para cualquier entero
+! (positivo o negativo) y cualquier divisor d=2^n>0, el desplazamiento
+! aritmetico x>>n es matematicamente idendico a floor(x/d); Fortran
+! trunca hacia cero en vez de hacia -infinito, asi que solo hace falta
+! restar 1 cuando x es negativo y la division no es exacta.
+attributes(host, device) function ashr52(tmp) result(k)
+  integer(kind=i8), intent (in) :: tmp
+  integer(kind=i8) :: k
+  integer(kind=i8), parameter :: d52 = 4503599627370496_i8   ! 2^52
+    k = tmp / d52
+    if (tmp < 0_i8 .and. mod(tmp, d52) /= 0_i8) k = k - 1_i8
+end function ashr52
+
+! ---- log_inline: hi=log(x)+O(2^-97), tailout=parte baja de precision
+! extendida. ix = bits_of(x). Rama sin FMA (la activa en x86_64
+! generico, mismo criterio que en glibc_exp_mod.cuf). ----
+attributes(host, device) function log_inline(ix, tailout) result(y)
+  integer(kind=i8), intent (in) :: ix
+  real(kind=r8), intent (out) :: tailout
+  real(kind=r8) :: y
+  integer(kind=i8) :: iz, tmp, k
+  integer(kind=i4) :: idx
+  real(kind=r8) :: z, r, invc, logc, logctail, kd, hi, t1, t2, lo, lo1, lo2, p
+  real(kind=r8) :: zhi, zlo, rhi, rlo, ar, ar2, ar3, lo3, lo4, arhi, arhi2
+
+    tmp = ix - pow_off
+    idx = int(iand(ishft(tmp, -(52-7)), 127_i8), i4)
+    ! k = (int64_t)tmp >> 52 -- desplazamiento ARITMETICO (con signo);
+    ! ISHFT en Fortran es logico (ver docs-kernels/glibc_math.md) y
+    ! nvfortran no reconoce SHIFTA -- se usa ashr52 (ver arriba).
+    k = ashr52(tmp)
+    iz = ix - iand(tmp, ishft(4095_i8, 52))
+    z = real_of(iz)
+    kd = real(k, r8)
+
+    invc     = pow_log_tab(3*idx)
+    logc     = pow_log_tab(3*idx+1)
+    logctail = pow_log_tab(3*idx+2)
+
+    zhi = real_of(iand(iz + ishft(1_i8,31), ishft(-1_i8,32)))
+    zlo = z - zhi
+    rhi = zhi*invc - 1.0_r8
+    rlo = zlo*invc
+    r = rhi + rlo
+
+    t1 = kd*pow_ln2hi + logc
+    t2 = t1 + r
+    lo1 = kd*pow_ln2lo + logctail
+    lo2 = t1 - t2 + r
+
+    ar = pow_a0 * r
+    ar2 = r * ar
+    ar3 = r * ar2
+    arhi = pow_a0 * rhi
+    arhi2 = rhi * arhi
+    hi = t2 + arhi2
+    lo3 = rlo * (ar + arhi)
+    lo4 = t2 - hi + arhi2
+
+    p = ar3*(pow_a1 + r*pow_a2 + ar2*(pow_a3 + r*pow_a4 + ar2*(pow_a5 + r*pow_a6)))
+    lo = lo1 + lo2 + lo3 + lo4 + p
+    y = hi + lo
+    tailout = hi - y + lo
+
+end function log_inline
+
+! ---- pow_exp_inline: variante de exp() con precision extendida
+! (x+xtail) y signo opcional (sign_bias), tal como la necesita pow().
+! Reutiliza exp_tab/exp_c2-5/exp_negln2hiN/exp_negln2loN/exp_invln2N/
+! exp_shift/exp_specialcase de glibc_exp_mod.cuf sin duplicarlas --
+! son las MISMAS constantes que usa myexp. sign_bias en nuestro
+! dominio (rij>0 siempre) es siempre 0, pero se porta el parametro
+! completo por fidelidad. ----
+attributes(host, device) function pow_exp_inline(x, xtail, sign_bias) result(y)
+  real(kind=r8), intent (in) :: x, xtail
+  integer(kind=i8), intent (in) :: sign_bias
+  real(kind=r8) :: y
+  integer(kind=i4) :: abstop
+  integer(kind=i8) :: ki, idx, topbits, sbits
+  real(kind=r8) :: kd, z, r, r2, scale, tail, tmp, one
+
+    abstop = iand(top12_of(x), int(z'7ff',i4))
+
+    if (abstop - exp_top12_tiny >= exp_top12_512 - exp_top12_tiny) then
+      if (abstop - exp_top12_tiny >= exp_top12_inf) then
+        ! |x| muy pequeno: exp(x+xtail) ~= 1 (WANT_ROUNDING=1: 1+x)
+        one = 1.0_r8 + x
+        y = merge(-one, one, sign_bias /= 0_i8)
+        return
+      endif
+      if (abstop >= exp_top12_1024) then
+        if (bits_of(x) < 0_i8) then
+          ! x muy negativo: underflow -> 0 (con signo de sign_bias)
+          y = merge(-0.0_r8, 0.0_r8, sign_bias /= 0_i8)
+        else
+          ! x muy positivo: overflow -> +-Inf
+          y = real_of(exp_bits_posinf)
+          if (sign_bias /= 0_i8) y = -y
+        endif
+        return
+      endif
+      abstop = 0
+    endif
+
+    z = exp_invln2N * x
+    kd = z + exp_shift
+    ki = bits_of(kd)
+    kd = kd - exp_shift
+    r = x + kd*exp_negln2hiN + kd*exp_negln2loN
+    r = r + xtail
+
+    idx = 2_i8 * iand(ki, 127_i8)
+    topbits = ishft(ki + sign_bias, 52 - 7)
+    tail = real_of(exp_tab(idx))
+    sbits = exp_tab(idx+1) + topbits
+
+    r2 = r*r
+    tmp = tail + r + r2*(exp_c2 + r*exp_c3) + r2*r2*(exp_c4 + r*exp_c5)
+
+    if (abstop == 0) then
+      y = exp_specialcase(tmp, sbits, ki)
+      return
+    endif
+
+    scale = real_of(sbits)
+    y = scale + scale*tmp
+
+end function pow_exp_inline
+
+! ---- mypow: puerto de __pow, restringido al dominio real de uso
+! (x=rij>0 siempre, finito; y=nu finito, normal). No se porta la rama
+! de x<0 (checkint/sign_bias para signo de raices impares) -- rij
+! nunca es negativo, mismo criterio que aziz_nuevo/vatomol en
+! vpot.cuf (codigo genuinamente inalcanzable en este dominio). ----
+attributes(host, device) function mypow(x, y) result(r)
+  real(kind=r8), intent (in) :: x, y
+  real(kind=r8) :: r
+  real(kind=r8) :: hi, lo, ehi, elo
+  real(kind=r8) :: yhi, ylo, lhi, llo
+  integer(kind=i8) :: iy
+
+    if (y == 0.0_r8 .or. x == 1.0_r8) then
+      r = 1.0_r8
+      return
+    endif
+
+    hi = log_inline(bits_of(x), lo)
+
+    ! ehi+elo = y*log(x), en precision extendida (rama sin FMA)
+    iy = bits_of(y)
+    yhi = real_of(iand(iy, ishft(-1_i8, 27)))
+    ylo = y - yhi
+    lhi = real_of(iand(bits_of(hi), ishft(-1_i8, 27)))
+    llo = hi - lhi + lo
+    ehi = yhi*lhi
+    elo = ylo*lhi + y*llo
+
+    r = pow_exp_inline(ehi, elo, 0_i8)
+
+end function mypow
+
+attributes(global) subroutine k_mypow(n, x, y, r)
+  integer(kind=i4), value :: n
+  real(kind=r8), device, intent (in)  :: x(n), y(n)
+  real(kind=r8), device, intent (out) :: r(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) r(i) = mypow(x(i), y(i))
+end subroutine k_mypow
+
+end module glibc_pow_mod

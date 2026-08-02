@@ -1,0 +1,13 @@
+# Artefactos de compilacion (nvfortran/gfortran): se regeneran con los
+# comandos ya documentados en cada docs-kernels/*.md -- no se versionan.
+*.mod
+*.o
+*.log
+
+# Binarios de prueba (test_<kernel>[...], sin extension) y el
+# ejecutable principal original (qmccluster) -- se mantienen los
+# fuentes correspondientes (.cuf/.f90).
+test_*
+!test_*.cuf
+!test_*.f90
+qmccluster

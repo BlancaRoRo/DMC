@@ -1,0 +1,286 @@
+module der_wavefx
+ use mtipos, only: vec3
+ ! duhe4x/uhe4x ya portados y probados en d_uhex4.cuf -- se reutilizan
+ ! junto con sus variables device (lxhe4, pxhe4, impurmol), en vez de
+ ! declarar copias separadas del mismo dato.
+ use d_uhex4, only: duhe4x, uhe4x, lxhe4, pxhe4, impurmol
+ use mlegendre_gpu, only: calpleg => calplegd, calderpleg => calderplegd, lmax_dev
+ ! rij**pxhe3(2,il)/rij**pxhe3(4,il): mismo motivo que en d_uhex4.cuf --
+ ! exponente REAL (nu/p4), pow() con implementaciones independientes en
+ ! host/device. Ver docs-kernels/glibc_math.md Parte 4.
+ use glibc_pow_mod, only: mypow
+ ! exp(ujas) en wavefx: mismo riesgo fast/precise (__fd_exp_1 vs
+ ! __pd_exp_1) confirmado para acos/pow/exp en el resto del arbol --
+ ! ver docs-kernels/wavef.md Parte 2 §10 y der_wavefx.md §9.
+ use glibc_exp_mod, only: myexp
+
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! nhe4, nhe3, ngatom, natom, impureza: variables reales de mparametros.f90
+ ! (publicas, sin "parameter"), mismo tratamiento que en duhe4x/wavefhe4.
+ integer(kind=i4), device :: nhe4, nhe3, ngatom, natom
+ logical, device :: impureza
+
+ ! lxhe3/pxhe3: analogas a lxhe4/pxhe4 pero para el termino He3-impureza.
+ ! En este proyecto nhe3=0, asi que duhe3x/uhe3x nunca se llegan a
+ ! ejecutar en tiempo de ejecucion (los bucles que los llaman quedan
+ ! vacios) -- pero el codigo tiene que existir y compilar igual, porque
+ ! la llamada esta ahi.
+ integer(kind=i4), device :: lxhe3
+ real(kind=r8), device :: pxhe3(5,0:lmax_dev)
+
+contains
+
+! ---- duhe3x/uhe3x: mismo patron exacto que duhe4x/uhe4x, con lxhe3/pxhe3 ----
+attributes(host, device) subroutine duhe3x(rivec, smol, d1ux, d2ux, d1zux, d2zux)
+  type(vec3), intent (in) :: rivec, smol(3)
+  type(vec3), intent (out) :: d1ux
+  real(kind=r8), intent (out) :: d2ux
+  real(kind=r8), intent (out) :: d1zux(2), d2zux
+  type(vec3) :: grz, grpl, grul
+  real(kind=r8) :: rij,cth,zpr,grz2,lapz
+  real(kind=r8) :: gpz(2),lpz,gpz2
+  real(kind=r8) :: ulx,ulxp,ulxs,lapl
+  real(kind=r8) :: rijp2,rijp4
+  real(kind=r8) :: pl(0:lmax_dev),d1pl(0:lmax_dev),d2pl(0:lmax_dev)
+  integer(kind=i4) :: il
+
+   rij=sqrt(dot_product(rivec%comp,rivec%comp))
+   if(impurmol) then
+     cth=dot_product(rivec%comp,smol(3)%comp)/rij
+     zpr=cth/rij
+     grz%comp=(smol(3)%comp-zpr*rivec%comp)/rij
+     grz2=dot_product(grz%comp,grz%comp)
+     lapz=-2.0_r8*zpr/rij
+     gpz(1)=-dot_product(rivec%comp,smol(2)%comp)/rij
+     gpz(2)= dot_product(rivec%comp,smol(1)%comp)/rij
+     gpz2=dot_product(gpz,gpz)
+     lpz=-cth-cth
+   else
+     cth=0.0_r8
+     grz%comp=0.0_r8
+     grz2=0.0_r8
+     lapz=0.0_r8
+     gpz=0.0_r8
+     lpz=0.0_r8
+   endif
+
+   call calderpleg(lxhe3,cth,pl(0:lxhe3),d1pl(0:lxhe3),d2pl(0:lxhe3))
+   do il=1,lxhe3
+     pl(il)=1.0_r8-pl(il)
+     d1pl(il)=-d1pl(il)
+     d2pl(il)=-d2pl(il)
+   enddo
+
+   d1ux%comp=0.0_r8
+   d2ux=0.0_r8
+   d1zux=0.0_r8
+   d2zux=0.0_r8
+   do il=0,lxhe3
+     rijp2=mypow(rij,pxhe3(2,il))
+     rijp4=mypow(rij,pxhe3(4,il))
+     ulx=  -pxhe3(1,il)/rijp2                                   &
+ &         -pxhe3(3,il)*rijp4-pxhe3(5,il)*log(rij)
+     ulxp=( pxhe3(1,il)*pxhe3(2,il)/rijp2                       &
+ &         -pxhe3(3,il)*pxhe3(4,il)*rijp4-pxhe3(5,il))/rij
+     ulxs=(-pxhe3(1,il)*pxhe3(2,il)*(pxhe3(2,il)+1.0_r8)/rijp2  &
+ &         -pxhe3(3,il)*pxhe3(4,il)*(pxhe3(4,il)-1.0_r8)*rijp4  &
+ &         +pxhe3(5,il))/rij**2
+     ulxs=ulxs+2.0_r8*ulxp/rij
+     grul%comp=ulxp/rij*rivec%comp
+     grpl%comp=d1pl(il)*grz%comp
+     lapl=lapz*d1pl(il)+grz2*d2pl(il)
+     d1ux%comp=d1ux%comp+pl(il)*grul%comp
+     d1ux%comp=d1ux%comp+ulx*grpl%comp
+     d2ux=d2ux+pl(il)*ulxs
+     d2ux=d2ux+ulx*lapl
+     d2ux=d2ux+2.0_r8*dot_product(grul%comp,grpl%comp)
+     d1zux(:)=d1zux(:)+ulx*d1pl(il)*gpz(:)
+     d2zux=d2zux+ulx*(d1pl(il)*lpz+d2pl(il)*gpz2)
+   enddo
+
+end subroutine duhe3x
+
+attributes(host, device) function uhe3x(rij, cth)
+  real(kind=r8) :: uhe3x
+  real(kind=r8), intent (in) :: rij,cth
+  real(kind=r8) :: pl(0:lmax_dev)
+  real(kind=r8) :: ul
+  integer(kind=i4) :: il
+
+   call calpleg(lxhe3,cth,pl(0:lxhe3))
+   do il=1,lxhe3
+     pl(il)=1.0_r8-pl(il)
+   enddo
+
+   uhe3x=0.0_r8
+   do il=0,lxhe3
+     ul=-pxhe3(1,il)/mypow(rij,pxhe3(2,il))-pxhe3(3,il)*mypow(rij,pxhe3(4,il))  &
+ &      -pxhe3(5,il)*log(rij)
+     uhe3x=uhe3x+ul*pl(il)
+   enddo
+
+end function uhe3x
+
+! ---- wavefx: la interfaz cambia de w1 a atom(natom)+sprop3 ----
+! Solo se lee w1%atom(:) y w1%sprop(3) (nunca sprop(1)/sprop(2)), y solo
+! se escribe w1%lw%wfx -- se extraen justo esas piezas.
+attributes(host, device) subroutine wavefx(atom, sprop3, wfx)
+  type (vec3), intent (in)  :: atom(natom)
+  type (vec3), intent (in)  :: sprop3
+  real (kind=r8), intent (out) :: wfx
+  type (vec3) :: rtemp
+  real (kind=r8) :: ujas
+  real (kind=r8) :: rij,cth
+  real (kind=r8) :: dnor
+  integer (kind=i4) :: jatom
+
+   if(impureza) then
+     cth=0.0_r8
+     ujas=0.0_r8
+     if(impurmol) dnor=sqrt(dot_product(sprop3%comp,sprop3%comp))
+     do jatom=1,nhe4
+       rtemp%comp=atom(jatom)%comp-atom(natom)%comp
+       rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+       if(impurmol) cth=dot_product(rtemp%comp,sprop3%comp)/(dnor*rij)
+       ujas=ujas+uhe4x(rij,cth)
+     enddo
+     do jatom=nhe4+1,ngatom
+       rtemp%comp=atom(jatom)%comp-atom(natom)%comp
+       rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+       if(impurmol) cth=dot_product(rtemp%comp,sprop3%comp)/(dnor*rij)
+       ujas=ujas+uhe3x(rij,cth)
+     enddo
+     wfx=myexp(ujas)
+   else
+     wfx=1.0_r8
+   endif
+
+ end subroutine wavefx
+
+! ---- derwavefx: cambia de w1 a atom(natom)+sprop(3) ----
+attributes(host, device) subroutine derwavefx(atom, sprop, d1wf, d2wf, d1zwf, d2zwf)
+  type(vec3), intent (in)  :: atom(natom)
+  type(vec3), intent (in)  :: sprop(3)
+  type(vec3), intent (out)   :: d1wf(natom)
+  real(kind=r8), intent (out) :: d2wf(natom)
+  real(kind=r8), intent (out) :: d1zwf(2),d2zwf
+  type(vec3) :: d1ux
+  real(kind=r8) :: d2ux
+  real(kind=r8) :: d1zux(2),d2zux
+  type(vec3) :: rtemp,smol(3)
+  real(kind=r8) :: dnor
+  integer(kind=i4) :: iatom,jatom,jhe3
+  integer(kind=i4) :: ic
+
+   do iatom=1,natom
+     d1wf(iatom)%comp(:)=0.0_r8
+     d2wf(iatom)=0.0_r8
+   enddo
+   d1zwf=0.0_r8
+   d2zwf=0.0_r8
+   if(.not.impureza) return
+
+   if(impurmol) then
+     do ic=1,3
+       dnor=sqrt(dot_product(sprop(ic)%comp,sprop(ic)%comp))
+       smol(ic)%comp(:)=sprop(ic)%comp(:)/dnor
+     enddo
+   endif
+
+   do jatom=1,nhe4
+     rtemp%comp=atom(jatom)%comp-atom(natom)%comp
+     call duhe4x(rtemp,smol,d1ux,d2ux,d1zux,d2zux)
+     d1wf(jatom)%comp(:)=d1ux%comp(:)
+     d1wf(natom)%comp(:)=d1wf(natom)%comp(:)-d1ux%comp(:)
+     d2wf(jatom)=d2ux
+     d2wf(natom)=d2wf(natom)+d2ux
+     d1zwf(:)=d1zwf(:)+d1zux(:)
+     d2zwf=d2zwf+d2zux
+   enddo
+
+   do jhe3=1,nhe3
+     jatom=nhe4+jhe3
+     rtemp%comp=atom(jatom)%comp-atom(natom)%comp
+     call duhe3x(rtemp,smol,d1ux,d2ux,d1zux,d2zux)
+     d1wf(jatom)%comp(:)=d1ux%comp(:)
+     d1wf(natom)%comp(:)=d1wf(natom)%comp(:)-d1ux%comp(:)
+     d2wf(jatom)=d2ux
+     d2wf(natom)=d2wf(natom)+d2ux
+     d1zwf(:)=d1zwf(:)+d1zux(:)
+     d2zwf=d2zwf+d2zux
+   enddo
+
+   do iatom=1,natom
+     d2wf(iatom)=d2wf(iatom)+dot_product(d1wf(iatom)%comp,d1wf(iatom)%comp)
+   enddo
+   d2zwf=d2zwf+dot_product(d1zwf,d1zwf)
+
+ end subroutine derwavefx
+
+! un hilo = un walker = un wfx
+attributes(global) subroutine k_wavefx(n, atom, sprop, wfx_out)
+  integer(kind=i4), value :: n
+  ! se recibe sprop(3,n) completo (no una seccion sprop(3,:) recortada
+  ! en el host) -- pasar una seccion con salto como argumento de un
+  ! lanzamiento de kernel dio un segmentation fault; indexar el
+  ! componente 3 dentro del kernel es un acceso normal, sin problema.
+  type(vec3), device, intent (in)  :: atom(natom,n), sprop(3,n)
+  real(kind=r8), device, intent (out) :: wfx_out(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call wavefx(atom(:,i), sprop(3,i), wfx_out(i))
+  endif
+end subroutine k_wavefx
+
+! un hilo = un walker = un (d1wf,d2wf,d1zwf,d2zwf) de natom componentes
+attributes(global) subroutine k_derwavefx(n, atom, sprop, d1wf, d2wf, d1zwf, d2zwf)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in)  :: atom(natom,n), sprop(3,n)
+  type(vec3), device, intent (out) :: d1wf(natom,n)
+  real(kind=r8), device, intent (out) :: d2wf(natom,n)
+  real(kind=r8), device, intent (out) :: d1zwf(2,n), d2zwf(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call derwavefx(atom(:,i), sprop(:,i), d1wf(:,i), d2wf(:,i), d1zwf(:,i), d2zwf(i))
+  endif
+end subroutine k_derwavefx
+
+! Kernels para probar duhe3x/uhe3x DIRECTAMENTE (no a traves de
+! wavefx/derwavefx, que con nhe3=0 nunca llegan a llamarlos). Mismo
+! patron que k_duhe4x/k_uhe4x en d_uhex4.cuf.
+attributes(global) subroutine k_duhe3x(n, rivec, smol, d1ux, d2ux, d1zux, d2zux)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in)  :: rivec(n), smol(3)
+  type(vec3), device, intent (out) :: d1ux(n)
+  real(kind=r8), device, intent (out) :: d2ux(n)
+  real(kind=r8), device, intent (out) :: d1zux(2,n), d2zux(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call duhe3x(rivec(i), smol, d1ux(i), d2ux(i), d1zux(:,i), d2zux(i))
+  endif
+end subroutine k_duhe3x
+
+attributes(global) subroutine k_uhe3x(n, rij, cth, uhe3x_out)
+  integer(kind=i4), value :: n
+  real(kind=r8), device, intent (in)  :: rij(n), cth(n)
+  real(kind=r8), device, intent (out) :: uhe3x_out(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    uhe3x_out(i) = uhe3x(rij(i), cth(i))
+  endif
+end subroutine k_uhe3x
+
+end module der_wavefx
+
+

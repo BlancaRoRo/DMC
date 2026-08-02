@@ -1,0 +1,153 @@
+! test_wavefm.cuf
+!
+! Prueba aislada de wavefm (wavef.cuf)/derwavefm (derananum.cuf), con
+! nhe3=2 (para que el bucle He4-He3 iteren de verdad -- con nhe3=0 dan
+! siempre wfm=1.0/d1wf=0) y varios casos, incluidos extremos: contacto
+! muy cercano y largo alcance entre un par He4-He3 (la distancia que
+! entra en pmix(2)/pmix(2)+1 via mypow).
+!
+! Compilar y ejecutar: ver docs-kernels/derananum.md
+
+module mtest_wavefm_k
+ use mtipos, only: vec3
+ use mwavef_gpu, only: wavefm
+ use mderananum, only: derwavefm
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+contains
+ attributes(global) subroutine k_wavefm(n_atom, n_case, atom, wfm)
+  integer(kind=i4), value :: n_atom, n_case
+  type(vec3), device, intent (in) :: atom(n_atom,n_case)
+  real(kind=r8), device, intent (out) :: wfm(n_case)
+  integer(kind=i4) :: ic
+   ic = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (ic <= n_case) call wavefm(atom(:,ic), wfm(ic))
+ end subroutine k_wavefm
+
+ attributes(global) subroutine k_derwavefm(n_atom, n_case, atom, d1wf, d2wf)
+  integer(kind=i4), value :: n_atom, n_case
+  type(vec3), device, intent (in) :: atom(n_atom,n_case)
+  type(vec3), device, intent (out) :: d1wf(n_atom,n_case)
+  real(kind=r8), device, intent (out) :: d2wf(n_atom,n_case)
+  integer(kind=i4) :: ic
+   ic = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (ic <= n_case) call derwavefm(atom(:,ic), d1wf(:,ic), d2wf(:,ic))
+ end subroutine k_derwavefm
+end module mtest_wavefm_k
+
+program test_wavefm
+ use mtest_wavefm_k, only: k_wavefm, k_derwavefm
+ use mwavef, only: wavefm_cpu => wavefm, derwavefm_cpu => derwavefm
+ use mtipos, only: vec3, walker, allocatewalker
+ use der_wavefx, only: nhe4, nhe3, ngatom, natom, impureza
+ use mwavef_gpu, only: pmix_dev => pmix
+ use mparametros, only: nhe4_real => nhe4, nhe3_real => nhe3, ngatom_real => ngatom, &
+                         natom_real => natom, impureza_real => impureza, pmix_real => pmix
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ integer(kind=i4), parameter :: n_he4 = 4, n_he3 = 2
+ integer(kind=i4), parameter :: n_atom = n_he4 + n_he3   ! sin impureza, natom=ngatom
+ integer(kind=i4), parameter :: n_case = 3
+
+ real(kind=r8), parameter :: bmix = 2.5d0, numix = 4.0d0, alfamix = 0.3d0
+
+ type(vec3) :: atom_h(n_atom,n_case)
+ type(vec3), device :: atom_d(n_atom,n_case)
+ real(kind=r8) :: wfm_cpu(n_case), wfm_h(n_case)
+ real(kind=r8), device :: wfm_d(n_case)
+ type(vec3) :: d1wf_cpu(n_atom,n_case), d1wf_h(n_atom,n_case)
+ real(kind=r8) :: d2wf_cpu(n_atom,n_case), d2wf_h(n_atom,n_case)
+ type(vec3), device :: d1wf_d(n_atom,n_case)
+ real(kind=r8), device :: d2wf_d(n_atom,n_case)
+
+ type(walker) :: w1
+ integer(kind=i4) :: ia, ic, threads, blocks
+ real(kind=r8) :: err, errmax
+
+  nhe4 = n_he4
+  nhe3 = n_he3
+  ngatom = n_atom
+  natom = n_atom
+  impureza = .false.
+  pmix_dev(1) = 0.50_r8*(bmix**numix)
+  pmix_dev(2) = numix
+  pmix_dev(3) = alfamix
+
+  nhe4_real = n_he4
+  nhe3_real = n_he3
+  ngatom_real = n_atom
+  natom_real = n_atom
+  impureza_real = .false.
+  pmix_real = pmix_dev
+
+  ! caso 1: geometria "normal"
+  atom_h(1,1)%comp = (/  0.0d0,  0.0d0,  0.0d0 /)
+  atom_h(2,1)%comp = (/  3.5d0,  0.0d0,  0.0d0 /)
+  atom_h(3,1)%comp = (/  0.0d0,  4.0d0,  1.0d0 /)
+  atom_h(4,1)%comp = (/ -2.0d0, -3.0d0,  2.5d0 /)
+  atom_h(5,1)%comp = (/  1.5d0,  1.5d0,  1.5d0 /)
+  atom_h(6,1)%comp = (/ -1.0d0,  2.2d0, -0.8d0 /)
+
+  ! caso 2 (extremo): un par He4-He3 en contacto MUY cercano
+  ! (atomo 1, He4, y atomo 5, He3, a rij~0.05)
+  atom_h(1,2)%comp = (/  0.0d0,  0.0d0,  0.0d0 /)
+  atom_h(2,2)%comp = (/  3.5d0,  0.0d0,  0.0d0 /)
+  atom_h(3,2)%comp = (/  0.0d0,  4.0d0,  1.0d0 /)
+  atom_h(4,2)%comp = (/ -2.0d0, -3.0d0,  2.5d0 /)
+  atom_h(5,2)%comp = (/  0.05d0,  0.0d0,  0.0d0 /)
+  atom_h(6,2)%comp = (/ -1.0d0,  2.2d0, -0.8d0 /)
+
+  ! caso 3 (extremo): un par He4-He3 a largo alcance (rij~1000)
+  atom_h(1,3)%comp = (/  0.0d0,  0.0d0,  0.0d0 /)
+  atom_h(2,3)%comp = (/  3.5d0,  0.0d0,  0.0d0 /)
+  atom_h(3,3)%comp = (/  0.0d0,  4.0d0,  1.0d0 /)
+  atom_h(4,3)%comp = (/ -2.0d0, -3.0d0,  2.5d0 /)
+  atom_h(5,3)%comp = (/  1000.0d0,  0.0d0,  0.0d0 /)
+  atom_h(6,3)%comp = (/ -1.0d0,  2.2d0, -0.8d0 /)
+
+  atom_d = atom_h
+
+  threads = 32
+  blocks = (n_case + threads - 1) / threads
+  call k_wavefm<<<blocks,threads>>>(n_atom, n_case, atom_d, wfm_d)
+  call k_derwavefm<<<blocks,threads>>>(n_atom, n_case, atom_d, d1wf_d, d2wf_d)
+  wfm_h = wfm_d
+  d1wf_h = d1wf_d
+  d2wf_h = d2wf_d
+
+  errmax = 0.0d0
+  do ic = 1, n_case
+    call allocatewalker(w1, n_atom)
+    do ia = 1, n_atom
+      w1%atom(ia) = atom_h(ia,ic)
+    enddo
+    call wavefm_cpu(w1)
+    wfm_cpu(ic) = real(w1%lw%wfm, r8)
+    call derwavefm_cpu(w1, d1wf_cpu(:,ic), d2wf_cpu(:,ic))
+
+    write(*,*)
+    write(*,'(a,i0)') '--- caso ', ic
+    write(*,'(a,es24.17,a,es24.17)') '  HP wfm  CPU=', wfm_cpu(ic), '   GPU=', wfm_h(ic)
+    err = abs(wfm_h(ic) - wfm_cpu(ic))
+    do ia = 1, n_atom
+      write(*,'(a,i0,a,3es24.17,a,es24.17)') '  HP atom ',ia,' d1wf CPU=', d1wf_cpu(ia,ic)%comp, '  d2wf CPU=', d2wf_cpu(ia,ic)
+      write(*,'(a,i0,a,3es24.17,a,es24.17)') '  HP atom ',ia,' d1wf GPU=', d1wf_h(ia,ic)%comp,   '  d2wf GPU=', d2wf_h(ia,ic)
+      err = max(err, maxval(abs(d1wf_h(ia,ic)%comp - d1wf_cpu(ia,ic)%comp)))
+      err = max(err, abs(d2wf_h(ia,ic) - d2wf_cpu(ia,ic)))
+    enddo
+    write(*,'(a,es10.2)') '  |err| max=', err
+    errmax = max(errmax, err)
+  enddo
+
+  write(*,*)
+  if (errmax < 1.0d-8) then
+    write(*,*) 'PASA: GPU y CPU coinciden dentro de tolerancia'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_wavefm

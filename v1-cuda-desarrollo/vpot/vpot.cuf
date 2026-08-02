@@ -1,0 +1,202 @@
+module mvpot
+ ! ccuerpo/potenbh: ya portados y probados por separado (mccuerpo,
+ ! mpotenbh) -- se reutilizan tal cual, sin tocar ninguna linea.
+ use mtipos, only: vec3
+ use mccuerpo, only: ccuerpo, ngatom, natom
+ use mpotenbh, only: potenbh
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! natms: PARAMETER real de param_atoms_bh.h (=30), cota maxima de
+ ! atomos de He -- el mismo limite que ya usa He_dihydrogen.f para sus
+ ! propios arrays locales R2/G. Se reutiliza aqui para "rhe" (ver
+ ! subrutina vpot mas abajo), en vez de dimensionarlo con "ngatom"
+ ! (variable device, tamano solo conocido en tiempo de ejecucion --
+ ! mismo problema ya resuelto varias veces en este proyecto).
+ include 'param_atoms_bh_freeform.h'
+
+ ! opot: variable real de mparametros.f90 (publica, sin "parameter"),
+ ! fijada una vez al leer in.mcv (=4 en esta simulacion, ver in.mcv y
+ ! la discusion de por que aziz_nuevo/vatomol/azizgen no se portan,
+ ! documentada abajo) -- mismo tratamiento device que ngatom/natom/
+ ! nhe4 en kernels anteriores.
+ !
+ ! cmtok NO se importa: es un PARAMETER real (mparametros.f90, no
+ ! haria falta copia device ni aunque se usara), pero en el original
+ ! solo aparece en la llamada a vatomol -- la rama que no se porta
+ ! (ver comentario de la subrutina vpot). No hace falta para nada aqui.
+ integer(kind=i4), device :: opot
+
+contains
+
+! ---- vpot: w1 se descompone en atom(natom)/sprop(3), igual que en
+! ccuerpo/wavef, y devuelve "pot" como escalar en vez de escribir en
+! w1%lw%pot. w1%lw (type vloc) no tiene ningun componente allocatable
+! -- a diferencia de "walker", SI se podria pasar entero a device tal
+! cual -- pero como vpot solo escribe un unico campo (pot), se
+! mantiene el mismo criterio que en wavef/wavefx: un escalar de
+! salida y ya, interfaz minima.
+!
+! Solo se porta la rama "opot==4" (ccuerpo+potenbh, ya verificados por
+! separado). La rama "opot/=4" del original (aziz_nuevo para el He-He
+! puro, y vatomol/azizgen segun impurmol para otras impurezas
+! He-OCS/He-CO) NO se porta: con opot=4 fijo en el in.mcv real de esta
+! simulacion, esa rama es codigo muerto de verdad -- el "return" al
+! final del if en el original nunca deja que se alcance. A diferencia
+! de wavefm/wavefhe3 en wavef.cuf (que SI se llaman siempre, solo con
+! resultado trivial para nhe3=0), aqui ni siquiera se ejecuta la
+! llamada, asi que no aplica el criterio de "portar aunque sea
+! barato" -- es exactamente el mismo caso ya discutido para vpot antes
+! de empezar a portar wavef. Se mantiene el "if(opot==4)" (comparacion
+! uniforme para todos los walkers, coste cero de divergencia, igual
+! que GTEST en He_dihydrogen) por fidelidad y por si algun dia cambia
+! opot, pero no hay ninguna rama alternativa que ejecutar si no se
+! cumple. ----
+attributes(host, device) subroutine vpot(atom, sprop, pot)
+  type(vec3), intent (in) :: atom(natom), sprop(3)
+  real(kind=r8), intent (out) :: pot
+  real(kind=r8) :: rhe(3*natms)
+  real(kind=r8) :: vpotbh
+
+    if (opot == 4) then
+      call ccuerpo(atom, sprop, rhe(1:3*ngatom))
+      call potenbh(ngatom, rhe(1:3*ngatom), vpotbh)
+      pot = vpotbh
+    endif
+
+end subroutine vpot
+
+attributes(global) subroutine k_vpot(n, atom, sprop, pot)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in)  :: atom(natom,n), sprop(3,n)
+  real(kind=r8), device, intent (out) :: pot(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call vpot(atom(:,i), sprop(:,i), pot(i))
+  endif
+end subroutine k_vpot
+
+end module mvpot
+
+
+program test_vpot
+ ! CPU de confianza: vpot de mwavef.f90 ORIGINAL, sin tocar (recibe el
+ ! type(walker) completo; llama a su propio ccuerpo/potenbh internos,
+ ! independientes de los modulos GPU). A diferencia de He_dihydrogen/
+ ! potenbh (subrutinas SUELTAS en bh_heh2m.f, sin modulo -> external),
+ ! vpot SI vive dentro de un modulo real (module mwavef) en el
+ ! original, asi que se importa con "use", no con "external".
+ use mvpot, only: k_vpot, opot
+ use mccuerpo, only: ngatom, natom
+ use mpotenbh, only: dhcm
+ use mwavef, only: vpot
+ use mtipos, only: vec3, walker, allocatewalker
+ use mparametros, only: ngatom_real => ngatom, natom_real => natom, &
+                         opot_real => opot, impureza_real => impureza
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ real(kind=r8) :: dhcm_cpu
+ common / datosbh / dhcm_cpu
+
+ integer(kind=i4), parameter :: n_gatom = 4
+ integer(kind=i4), parameter :: n_atom  = n_gatom + 1
+ integer(kind=i4), parameter :: n_walk  = 3
+ real(kind=r8), parameter :: dhcm_real = 0.52943550d0   ! valor real de heh2m.pot
+
+ type(vec3) :: atom_h(n_atom,n_walk), sprop_h(3,n_walk)
+ type(vec3), device :: atom_d(n_atom,n_walk), sprop_d(3,n_walk)
+ real(kind=r8) :: pot_cpu(n_walk), pot_h(n_walk)
+ real(kind=r8), device :: pot_d(n_walk)
+
+ type(walker) :: w1
+ integer(kind=i4) :: iw, ia, threads, blocks
+ real(kind=r8) :: err, errmax
+
+  ! copias device (mccuerpo/mpotenbh/mvpot)
+  ngatom = n_gatom
+  natom  = n_atom
+  dhcm   = dhcm_real
+  opot   = 4
+
+  ! copias reales (mparametros/common), para el vpot ORIGINAL
+  ngatom_real = n_gatom
+  natom_real  = n_atom
+  opot_real   = 4
+  impureza_real = .true.
+  dhcm_cpu = dhcm_real
+
+  atom_h(1,1)%comp = (/  0.0d0,  0.0d0,  0.0d0 /)
+  atom_h(2,1)%comp = (/  3.5d0,  0.0d0,  0.0d0 /)
+  atom_h(3,1)%comp = (/  0.0d0,  4.0d0,  1.0d0 /)
+  atom_h(4,1)%comp = (/ -2.0d0, -3.0d0,  2.5d0 /)
+  atom_h(5,1)%comp = (/  1.0d0,  1.0d0,  1.0d0 /)
+
+  atom_h(1,2)%comp = (/  1.0d0,  1.0d0,  1.0d0 /)
+  atom_h(2,2)%comp = (/ -1.0d0,  2.0d0,  0.5d0 /)
+  atom_h(3,2)%comp = (/  2.5d0, -1.5d0,  3.0d0 /)
+  atom_h(4,2)%comp = (/  0.0d0,  0.0d0, -4.0d0 /)
+  atom_h(5,2)%comp = (/  0.5d0, -0.5d0,  0.5d0 /)
+
+  atom_h(1,3)%comp = (/  5.0d0,  0.0d0,  0.0d0 /)
+  atom_h(2,3)%comp = (/  0.0d0,  5.0d0,  0.0d0 /)
+  atom_h(3,3)%comp = (/  0.0d0,  0.0d0,  5.0d0 /)
+  atom_h(4,3)%comp = (/  2.0d0,  2.0d0,  2.0d0 /)
+  atom_h(5,3)%comp = (/  1.5d0,  1.5d0,  1.5d0 /)
+
+  sprop_h(1,1)%comp = (/ 2.0d0, 0.0d0, 0.0d0 /)
+  sprop_h(2,1)%comp = (/ 0.0d0, 1.5d0, 0.0d0 /)
+  sprop_h(3,1)%comp = (/ 0.3d0, 0.4d0, 1.2d0 /)
+
+  sprop_h(1,2)%comp = (/ 1.0d0, 0.2d0, 0.0d0 /)
+  sprop_h(2,2)%comp = (/ 0.0d0, 1.0d0, 0.3d0 /)
+  sprop_h(3,2)%comp = (/ 0.5d0, 0.0d0, 1.0d0 /)
+
+  sprop_h(1,3)%comp = (/ 0.7d0, 0.7d0, 0.0d0 /)
+  sprop_h(2,3)%comp = (/ -0.7d0, 0.7d0, 0.0d0 /)
+  sprop_h(3,3)%comp = (/ 0.0d0, 0.0d0, 2.0d0 /)
+
+  atom_d  = atom_h
+  sprop_d = sprop_h
+
+  threads = 32
+  blocks = (n_walk + threads - 1) / threads
+  call k_vpot<<<blocks,threads>>>(n_walk, atom_d, sprop_d, pot_d)
+  pot_h = pot_d
+
+  errmax = 0.0d0
+  do iw = 1, n_walk
+    call allocatewalker(w1, n_atom)
+    do ia = 1, n_atom
+      w1%atom(ia) = atom_h(ia,iw)
+    enddo
+    w1%sprop(1) = sprop_h(1,iw)
+    w1%sprop(2) = sprop_h(2,iw)
+    w1%sprop(3) = sprop_h(3,iw)
+
+    call vpot(w1)
+    pot_cpu(iw) = w1%lw%pot
+
+    write(*,*)
+    write(*,'(a,i0)') '--- walker ', iw
+    write(*,'(a,f18.10,a,f18.10)') '  pot CPU=', pot_cpu(iw), '   GPU=', pot_h(iw)
+    write(*,'(a,es24.17,a,es24.17)') '  HP pot CPU=', pot_cpu(iw), '   GPU=', pot_h(iw)
+
+    err = abs(pot_h(iw) - pot_cpu(iw))
+    write(*,'(a,es10.2)') '  |err| max=', err
+    errmax = max(errmax, err)
+  enddo
+
+  write(*,*)
+  if (errmax < 1.0d-8) then
+    write(*,*) 'PASA: GPU y CPU coinciden dentro de tolerancia'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_vpot

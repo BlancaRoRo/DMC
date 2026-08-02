@@ -1,0 +1,99 @@
+! legendre_gpu.cuf
+!
+! Version GPU de calpleg/calderpleg (mlegendre.f90), mas un kernel y un
+! programa de prueba que compara contra la version CPU original.
+!
+! Compilar y ejecutar SIN tocar Makefile.gpu, como programa suelto:
+!
+!   nvfortran -cuda mlegendre.f90 legendre_gpu.cuf -o test_legendre
+!   ./test_legendre
+!
+! (mlegendre.f90 es el fichero CPU original, sin modificar, que ya
+!  tienes en esta carpeta: sirve de referencia de confianza)
+
+module mlegendre_gpu
+
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! Misma cota que mparametros.f90 (lmax=20). Solo se usa para reservar
+ ! el buffer local DENTRO del kernel -- la subrutina calplegd de abajo
+ ! no necesita conocer este numero, sigue trabajando con pl(0:l) igual
+ ! que la version CPU.
+ integer(kind=i4), parameter, public :: lmax_dev = 20
+
+contains
+
+ ! ---- version device/host de calpleg: MISMO cuerpo que mlegendre.f90 ----
+ attributes(host,device) subroutine calplegd(l, x, pl)
+  integer(kind=i4), intent(in) :: l
+  real(kind=r8), intent(in) :: x
+  real(kind=r8), intent(out) :: pl(0:l)
+  integer(kind=i4) :: il
+
+   pl(0) = 1.0_r8
+   if (l >= 1) pl(1) = x
+   do il = 1, l-1
+     pl(il+1) = ((2.0_r8*il+1.0_r8)*x*pl(il) - il*pl(il-1)) / (il+1.0_r8)
+   enddo
+
+ end subroutine calplegd
+
+ ! ---- version device/host de calderpleg: MISMO cuerpo que mlegendre.f90 ----
+ attributes(host,device) subroutine calderplegd(l, x, pl, d1pl, d2pl)
+  integer(kind=i4), intent(in) :: l
+  real(kind=r8), intent(in) :: x
+  real(kind=r8), intent(out) :: pl(0:l), d1pl(0:l), d2pl(0:l)
+  integer(kind=i4) :: il
+
+   pl(0) = 1.0_r8
+   if (l >= 1) pl(1) = x
+   d1pl(0) = 0.0_r8
+   if (l >= 1) d1pl(1) = 1.0_r8
+   d2pl(0) = 0.0_r8
+   if (l >= 1) d2pl(1) = 0.0_r8
+   do il = 1, l-1
+     pl(il+1)   = ((2.0_r8*il+1.0_r8)*x*pl(il) - il*pl(il-1)) / (il+1.0_r8)
+     d1pl(il+1) = (2.0_r8*il+1.0_r8)*pl(il) + d1pl(il-1)
+     d2pl(il+1) = (2.0_r8*il+1.0_r8)*d1pl(il) + d2pl(il-1)
+   enddo
+
+ end subroutine calderplegd
+
+ ! ---- kernel: un hilo = un valor de x = un pl(0:l) completo ----
+ attributes(global) subroutine k_calpleg(n, l, x, pl_out)
+  integer(kind=i4), value :: n, l
+  real(kind=r8), device, intent(in)  :: x(n)
+  real(kind=r8), device, intent(out) :: pl_out(0:lmax_dev, n)
+  real(kind=r8) :: pl_local(0:lmax_dev)
+  integer(kind=i4) :: i
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= n) then
+     call calplegd(l, x(i), pl_local(0:l))
+     pl_out(0:l, i) = pl_local(0:l)
+   endif
+
+ end subroutine k_calpleg
+
+ attributes(global) subroutine k_calderpleg(n, l, x, pl_out, d1pl_out, d2pl_out)
+  integer(kind=i4), value :: n, l
+  real(kind=r8), device, intent(in)  :: x(n)
+  real(kind=r8), device, intent(out) :: pl_out(0:lmax_dev, n)
+  real(kind=r8), device, intent(out) :: d1pl_out(0:lmax_dev, n)
+  real(kind=r8), device, intent(out) :: d2pl_out(0:lmax_dev, n)
+  real(kind=r8) :: pl_local(0:lmax_dev), d1_local(0:lmax_dev), d2_local(0:lmax_dev)
+  integer(kind=i4) :: i
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= n) then
+     call calderplegd(l, x(i), pl_local(0:l), d1_local(0:l), d2_local(0:l))
+     pl_out(0:l, i)   = pl_local(0:l)
+     d1pl_out(0:l, i) = d1_local(0:l)
+     d2pl_out(0:l, i) = d2_local(0:l)
+   endif
+
+ end subroutine k_calderpleg
+
+end module mlegendre_gpu
