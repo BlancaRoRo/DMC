@@ -143,7 +143,7 @@ attributes(host, device) subroutine wavefx(atom, sprop3, wfx)
   real (kind=r8) :: ujas
   real (kind=r8) :: rij,cth
   real (kind=r8) :: dnor
-  integer (kind=i4) :: jatom
+  integer (kind=i4) :: jatom, jhe3
 
    if(impureza) then
      cth=0.0_r8
@@ -155,7 +155,10 @@ attributes(host, device) subroutine wavefx(atom, sprop3, wfx)
        if(impurmol) cth=dot_product(rtemp%comp,sprop3%comp)/(dnor*rij)
        ujas=ujas+uhe4x(rij,cth)
      enddo
-     do jatom=nhe4+1,ngatom
+     ! v3-cuda-optimizacion/derananum-split-concurrente: reescrito en
+     ! terminos de nhe3 (parameter=0), mismo motivo que wavef_mod.cuf.
+     do jhe3=1,nhe3
+       jatom=nhe4+jhe3
        rtemp%comp=atom(jatom)%comp-atom(natom)%comp
        rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
        if(impurmol) cth=dot_product(rtemp%comp,sprop3%comp)/(dnor*rij)

@@ -12,7 +12,7 @@ mdensidades.f90 mmcvpromedia.f90 mvaziz.f90 mtiempos.f90 mlineal.f90 mwavef.f90 
 mdmcpromedia.f90 mimagina.f90 mconfiguraciones.f90 mentradatos.f90 \
 glibc_exp_mod.cuf glibc_pow.cuf mcuda_globals.cuf mlegendre_gpu.cuf \
 d_uhex4_mod.cuf der_wavefx_mod.cuf der_wavefhe4_mod.cuf wavef_mod.cuf \
-derananum_mod.cuf glibc_sincos.cuf rota_mod.cuf valibre_mod.cuf mccuerpo_mod.cuf \
+derananum_mod.cuf derananum_split_mod.cuf glibc_sincos.cuf rota_mod.cuf valibre_mod.cuf mccuerpo_mod.cuf \
 mVheheVphehe_mod.cuf glibc_acos.cuf angle_scalar_vec_mod.cuf He_dihydrogen.f \
 mpotenbh_mod.cuf vpot_mod.cuf hpsi_mod.cuf rand_gpu.cuf dmc2.cuf dmc2_pipeline.cuf \
 msync_gpu.cuf msteps.f90 mserie.f90 mmontecarlo.f90 mminimiza.f90 bh_heh2m.f \

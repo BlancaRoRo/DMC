@@ -44,8 +44,9 @@ module mdmc2_pipeline
  use mtipos, only: vec3
  use mrota, only: rota
  use mrandgpu, only: gauss3_gpu, rand1_gpu
- use der_wavefx, only: natom
+ use der_wavefx, only: natom, nhe3
  use mderananum, only: rotamol, derananum
+ use mderananum_split, only: k_derananum_he4_t, k_derananum_resto_t, k_derananum_join_t
  use mvpot, only: vpot
  use mdmc2, only: ratio, ncmtras, dtau, etrial
  use mcuda_globals, only: nhe4, ngatom, impureza
@@ -106,10 +107,27 @@ module mdmc2_pipeline
  integer(kind=i4), device, allocatable :: nsons_p(:)
  logical, device, allocatable :: activo_p(:)
 
+ ! ---- v3-cuda-optimizacion/derananum-split-concurrente: PRUEBA --
+ ! resultados intermedios de la parte "He4" y la parte "resto" de
+ ! derananum, para poder lanzarlas en kernels/streams separados y
+ ! combinarlas despues en k_derananum_join_t. Ver derananum_split_mod.cuf. ----
+ real(kind=r8), device, allocatable :: wfhe4_s(:)
+ type(vec3), device, allocatable :: d1wfhe4_s(:,:)
+ real(kind=r8), device, allocatable :: d2wfhe4_s(:,:)
+ real(kind=r8), device, allocatable :: wfhe3_s(:), wfm_s(:), wfx_s(:)
+ type(vec3), device, allocatable :: d1wfm_s(:,:)
+ real(kind=r8), device, allocatable :: d2wfm_s(:,:)
+ type(vec3), device, allocatable :: d1wfx_s(:,:)
+ real(kind=r8), device, allocatable :: d2wfx_s(:,:)
+ real(kind=r8), device, allocatable :: d1zwfx_s(:,:), d2zwfx_s(:)
+ type(vec3), device, allocatable :: d1wfhe3_s(:,:)
+ real(kind=r8), device, allocatable :: d2wfhe3_s(:,:)
+
  integer(kind=i4), save :: nmax_g = 0
  logical, save :: grafo_listo = .false.
- integer(kind=cuda_stream_kind), save :: stream_a, stream_b
+ integer(kind=cuda_stream_kind), save :: stream_a, stream_b, stream_c
  type(cudaEvent), save :: ev_fork1, ev_join1, ev_fork2, ev_join2
+ type(cudaEvent), save :: ev_resto1, ev_resto2
  type(cudaGraph), save :: pipeline_graph
  type(cudaGraphExec), save :: pipeline_graph_exec
 
@@ -151,6 +169,19 @@ attributes(host) subroutine inicializa_pipeline(nmax)
    allocate(nsons_p(nmax))
    allocate(activo_p(nmax))
 
+   allocate(wfhe4_s(nmax), d1wfhe4_s(nmax,nhe4), d2wfhe4_s(nmax,nhe4))
+   allocate(wfhe3_s(nmax), wfm_s(nmax), wfx_s(nmax))
+   allocate(d1wfm_s(nmax,ngatom), d2wfm_s(nmax,ngatom))
+   allocate(d1wfx_s(nmax,natom), d2wfx_s(nmax,natom))
+   allocate(d1zwfx_s(nmax,2), d2zwfx_s(nmax))
+   ! nhe3=0 (parameter): un "device, allocatable" con extension 0 en
+   ! una dimension hace que el runtime CUDA Fortran falle en el
+   ! allocate (a diferencia de un array LOCAL zero-size dentro de un
+   ! kernel, que si funciona -- ver derwavefhe3/derananum_mod.cuf).
+   ! max(nhe3,1) evita el allocate de tamano 0 sin cambiar nada mas: los
+   ! bucles "do ihe3=1,nhe3" siguen sin ejecutar ninguna iteracion.
+   allocate(d1wfhe3_s(nmax,max(nhe3,1)), d2wfhe3_s(nmax,max(nhe3,1)))
+
    ! ---- Fase H: histogramas de device, tamano fijo (no dependen de
    ! nmax) -- se asignan aqui, una vez, igual que el resto ----
    allocate(h44_p(nhr_h), h33_p(nhr_h), h43_p(nhr_h))
@@ -161,10 +192,13 @@ attributes(host) subroutine inicializa_pipeline(nmax)
 
    istat = cudaStreamCreateWithFlags(stream_a, cudaStreamNonBlocking)
    istat = cudaStreamCreateWithFlags(stream_b, cudaStreamNonBlocking)
+   istat = cudaStreamCreateWithFlags(stream_c, cudaStreamNonBlocking)
    istat = cudaEventCreateWithFlags(ev_fork1, cudaEventDisableTiming)
    istat = cudaEventCreateWithFlags(ev_join1, cudaEventDisableTiming)
    istat = cudaEventCreateWithFlags(ev_fork2, cudaEventDisableTiming)
    istat = cudaEventCreateWithFlags(ev_join2, cudaEventDisableTiming)
+   istat = cudaEventCreateWithFlags(ev_resto1, cudaEventDisableTiming)
+   istat = cudaEventCreateWithFlags(ev_resto2, cudaEventDisableTiming)
 
    threads = 32
    blocks = (nmax + threads - 1) / threads
@@ -174,12 +208,23 @@ attributes(host) subroutine inicializa_pipeline(nmax)
    call k_fase_a<<<blocks,threads,0,stream_a>>>(nmax, atom_p, sprop_p, hb2m_p, b_p, &
                   dwf_p, dphi_p, wf_p, ene_p, eold_p, wfold_p, irn_p, nsons_p)
 
-   ! horquilla 1 (fase B = 1a hpsi): k_derananum_t + k_vpot_t en paralelo
+   ! horquilla 1 (fase B = 1a hpsi): He4 (stream_a) + resto (stream_c) +
+   ! vpot_t (stream_b) en paralelo, cierre de derananum en stream_a.
    istat = cudaEventRecord(ev_fork1, stream_a)
    istat = cudaStreamWaitEvent(stream_b, ev_fork1, 0)
-   call k_derananum_t<<<blocks,threads,0,stream_a>>>(nmax, atom_p, sprop_p, hb2m_p, b_p, &
-                  wf_p, kin_p, eimp_p, erot_p, dwf_p, dphi_p)
+   istat = cudaStreamWaitEvent(stream_c, ev_fork1, 0)
+   call k_derananum_he4_t<<<blocks,threads,0,stream_a>>>(nmax, nw_actual, atom_p, wfhe4_s, d1wfhe4_s, d2wfhe4_s)
+   call k_derananum_resto_t<<<blocks,threads,0,stream_c>>>(nmax, nw_actual, atom_p, sprop_p, &
+                  wfhe3_s, wfm_s, wfx_s, d1wfm_s, d2wfm_s, &
+                  d1wfx_s, d2wfx_s, d1zwfx_s, d2zwfx_s, d1wfhe3_s, d2wfhe3_s)
    call k_vpot_t<<<blocks,threads,0,stream_b>>>(nmax, atom_p, sprop_p, pot_p)
+   istat = cudaEventRecord(ev_resto1, stream_c)
+   istat = cudaStreamWaitEvent(stream_a, ev_resto1, 0)
+   call k_derananum_join_t<<<blocks,threads,0,stream_a>>>(nmax, nw_actual, hb2m_p, b_p, &
+                  wfhe4_s, d1wfhe4_s, d2wfhe4_s, &
+                  wfhe3_s, wfm_s, wfx_s, d1wfm_s, d2wfm_s, &
+                  d1wfx_s, d2wfx_s, d1zwfx_s, d2zwfx_s, d1wfhe3_s, d2wfhe3_s, &
+                  wf_p, kin_p, eimp_p, erot_p, dwf_p, dphi_p)
    istat = cudaEventRecord(ev_join1, stream_b)
    istat = cudaStreamWaitEvent(stream_a, ev_join1, 0)
 
@@ -188,12 +233,22 @@ attributes(host) subroutine inicializa_pipeline(nmax)
    call k_fase_d<<<blocks,threads,0,stream_a>>>(nmax, atom_p, sprop_p, hb2m_p, b_p, &
                   dwf_p, dphi_p, activo_p)
 
-   ! horquilla 2 (fase E = 2a hpsi): k_derananum_t + k_vpot_t en paralelo otra vez
+   ! horquilla 2 (fase E = 2a hpsi): igual que la horquilla 1
    istat = cudaEventRecord(ev_fork2, stream_a)
    istat = cudaStreamWaitEvent(stream_b, ev_fork2, 0)
-   call k_derananum_t<<<blocks,threads,0,stream_a>>>(nmax, atom_p, sprop_p, hb2m_p, b_p, &
-                  wf_p, kin_p, eimp_p, erot_p, dwf_p, dphi_p)
+   istat = cudaStreamWaitEvent(stream_c, ev_fork2, 0)
+   call k_derananum_he4_t<<<blocks,threads,0,stream_a>>>(nmax, nw_actual, atom_p, wfhe4_s, d1wfhe4_s, d2wfhe4_s)
+   call k_derananum_resto_t<<<blocks,threads,0,stream_c>>>(nmax, nw_actual, atom_p, sprop_p, &
+                  wfhe3_s, wfm_s, wfx_s, d1wfm_s, d2wfm_s, &
+                  d1wfx_s, d2wfx_s, d1zwfx_s, d2zwfx_s, d1wfhe3_s, d2wfhe3_s)
    call k_vpot_t<<<blocks,threads,0,stream_b>>>(nmax, atom_p, sprop_p, pot_p)
+   istat = cudaEventRecord(ev_resto2, stream_c)
+   istat = cudaStreamWaitEvent(stream_a, ev_resto2, 0)
+   call k_derananum_join_t<<<blocks,threads,0,stream_a>>>(nmax, nw_actual, hb2m_p, b_p, &
+                  wfhe4_s, d1wfhe4_s, d2wfhe4_s, &
+                  wfhe3_s, wfm_s, wfx_s, d1wfm_s, d2wfm_s, &
+                  d1wfx_s, d2wfx_s, d1zwfx_s, d2zwfx_s, d1wfhe3_s, d2wfhe3_s, &
+                  wf_p, kin_p, eimp_p, erot_p, dwf_p, dphi_p)
    istat = cudaEventRecord(ev_join2, stream_b)
    istat = cudaStreamWaitEvent(stream_a, ev_join2, 0)
 
@@ -209,7 +264,9 @@ attributes(host) subroutine inicializa_pipeline(nmax)
                   hbhe4_p, hbhe3_p, hbhe_p, hybhe4_p, hybhe3_p, hybhe_p)
 
    istat = cudaStreamEndCapture(stream_a, pipeline_graph)
+   if (istat .ne. 0) write(*,'(a,i0,a,a)') 'ERROR cudaStreamEndCapture istat=', istat, ' : ', trim(cudaGetErrorString(istat))
    istat = cudaGraphInstantiate(pipeline_graph_exec, pipeline_graph, 0_8)
+   if (istat .ne. 0) write(*,'(a,i0,a,a)') 'ERROR cudaGraphInstantiate istat=', istat, ' : ', trim(cudaGetErrorString(istat))
 
    grafo_listo = .true.
 end subroutine inicializa_pipeline

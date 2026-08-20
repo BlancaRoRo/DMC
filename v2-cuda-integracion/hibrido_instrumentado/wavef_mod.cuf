@@ -48,15 +48,20 @@ attributes(host, device) subroutine wavefm(atom, wfm)
   type(vec3) :: rtemp
   real(kind=r8) :: ujas, rij
   real(kind=r8) :: rij_hi, rij_lo
-  integer(kind=i4) :: iatom, jatom
+  integer(kind=i4) :: iatom, jatom, jhe3
 
-! v3-cuda-optimizacion/optimizacion-mypow: mypow_log/mypow_desde_log
-! por consistencia con el resto del arbol (un solo uso de rij por
-! iteracion aqui, no hay recalculo que evitar) -- este bucle nunca
-! ejecuta ninguna iteracion en esta simulacion (nhe3=0 -> ngatom=nhe4).
+! v3-cuda-optimizacion/derananum-split-concurrente: bucle interno
+! reescrito en terminos de nhe3 (parameter=0) en vez de "nhe4+1,ngatom"
+! -- mismo numero de vueltas (ngatom-nhe4 = nhe3, siempre), pero ahora
+! el compilador SI puede demostrar que son 0 iteraciones (nhe3 es un
+! literal grabado en el binario; ngatom/nhe4 son variables device
+! sueltas sin relacion visible entre si para el compilador). nhe4 sigue
+! siendo libre de variar -- solo se usa como desplazamiento dentro del
+! bucle, no como limite. Ver derananum-split-concurrente.md.
     ujas = 0.0_r8
     do iatom = 1, nhe4
-      do jatom = nhe4+1, ngatom
+      do jhe3 = 1, nhe3
+        jatom = nhe4 + jhe3
         rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
         rij = sqrt(dot_product(rtemp%comp, rtemp%comp))
         call mypow_log(rij, rij_hi, rij_lo)
@@ -74,13 +79,14 @@ end subroutine wavefm
 attributes(host, device) subroutine getcm(atom, rcm)
   type(vec3), intent (in) :: atom(natom)
   real(kind=r8), intent (out) :: rcm(3)
-  integer(kind=i4) :: iatom
+  integer(kind=i4) :: iatom, ihe3
 
     rcm = 0.0_r8
     do iatom = 1, nhe4
       rcm = rcm + mhe4*atom(iatom)%comp
     enddo
-    do iatom = nhe4+1, ngatom
+    do ihe3 = 1, nhe3
+      iatom = nhe4 + ihe3
       rcm = rcm + mhe3*atom(iatom)%comp
     enddo
     if (impureza) then
@@ -137,16 +143,19 @@ attributes(host, device) subroutine wavefhe3(atom, wfhe3)
 
     call getcm(atom, rcm)
 
-    do iatom = nhe4+1, ngatom
-      ihe3 = iatom - nhe4
+    ! v3-cuda-optimizacion/derananum-split-concurrente: los 2 bucles de
+    ! abajo reescritos en terminos de nhe3 (parameter=0), mismo motivo
+    ! que wavefm/getcm mas arriba -- ver esa nota.
+    do ihe3 = 1, nhe3
+      iatom = nhe4 + ihe3
       rb(:,ihe3) = atom(iatom)%comp - rcm(:)
     enddo
 
     ujas = 0.0_r8
-    do iatom = nhe4+1, ngatom-1
-      ihe3 = iatom - nhe4
-      do jatom = iatom+1, ngatom
-        jhe3 = jatom - nhe4
+    do ihe3 = 1, nhe3-1
+      iatom = nhe4 + ihe3
+      do jhe3 = ihe3+1, nhe3
+        jatom = nhe4 + jhe3
         rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
         rij = sqrt(dot_product(rtemp%comp, rtemp%comp))
         call mypow_log(rij, rij_hi, rij_lo)
