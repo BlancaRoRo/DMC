@@ -11,3 +11,8 @@ test_*
 !test_*.cuf
 !test_*.f90
 qmccluster
+
+# Utilidad de postprocesado (promedia.f90) copiada junto a cada kernel
+# portado -- se mantiene el fuente, no el binario.
+promedia
+!promedia.f90

@@ -215,3 +215,55 @@ Lo probado hasta ahora en §6-7 solo cubría geometrías "normales" para la subr
 | `nhe3=2` caso 3 (extremo, largo alcance He3-He3) | exacto |
 
 **16/16 exacto** (8 casos × `kin`, más `wf`/`wfhe4`/`wfhe3`/`wfm`/`wfx`/`eimp`/`erot`/`dwf`/`dphi` en cada uno, todos comprobados también exactos) — ninguno de los 4 casos extremos nuevos introduce un residuo, ni siquiera el walker 4 con magnitudes de `~10^33` (`kin` cerca de una singularidad `1/r²` cuando `r→0`, donde cualquier ULP de diferencia se amplificaría enormemente si lo hubiera). Con flags, el único residuo presente en toda la batería sigue siendo el ya documentado en walker 1 (`~3.5E-15`, el suelo host/device habitual, sin relación con estos casos nuevos).
+
+## Parte 9 — Fallo a gran escala (miles de walkers concurrentes): heap de `device` agotado
+
+Todo lo anterior (§1-8) verifica **corrección numérica** de `derananum` a pequeña escala (1-5 walkers sueltos). Esta parte es distinta: un fallo de **recursos**, no de física, encontrado mucho después, al integrar `derananum` en el pipeline de 7 fases de `v2-cuda-integracion/` (`dmc2_pipeline.cuf`, kernel `k_derananum_t`) y probarlo con miles de walkers simultáneos (`test-walker/`, ver `v2-cuda-integracion/test-walker/test-walker.md`).
+
+### Síntoma
+
+A partir de **~3.000-3.500 walkers** (por debajo funciona bien; 3.000 pasa, 3.500 y 4.000 fallan, reproducible), el pipeline crashea con un mensaje que en principio no tiene nada que ver con `derananum`:
+
+```
+FATAL ERROR: FORTRAN AUTO ALLOCATION FAILED   (repetido varias veces)
+0: cudaMemcpy2D (...) FAILED: 719(unspecified launch failure)
+```
+
+### Causa raíz
+
+`derananum` (línea 136 de `derananum_mod.cuf`, `v2-cuda-integracion/test-tiempos/hibrido_instrumentado/`) declara localmente 8 arrays dimensionados con variables `device` en tiempo de ejecución, no con constantes de compilación:
+
+```fortran
+type(vec3) :: d1wfhe4(nhe4), d1wfhe3(nhe3), d1wfm(ngatom), d1wfx(natom)
+real(kind=r8) :: d2wfhe4(nhe4), d2wfhe3(nhe3), d2wfm(ngatom), d2wfx(natom)
+```
+
+En la CPU esto es un array automático normal (pila). **En la GPU no existe ese mecanismo** — `nvfortran` lo resuelve pidiendo memoria dinámica a un heap de `device` compartido por *toda* la GPU, con un tamaño fijo por defecto de **8 MB**. Con miles de hilos (un hilo = un walker) pidiendo su propio trozo a la vez, ese heap compartido se agota.
+
+Confirmado con `compute-sanitizer --tool memcheck`:
+```
+Malloc/Free Warning encountered : Empty malloc
+  at mderananum_derananum_+0x990 in derananum_mod.cuf:136
+  Device Frame: k_derananum_t ... dmc2_pipeline.cuf:270
+```
+La reserva fallida corrompe el contexto de CUDA; el mensaje `cudaMemcpy2D ... FAILED: 719` que se veía antes ocurre después, en una operación sin relación — solo es el primer sitio donde algo comprueba el estado de error (`lanza_pipeline`, en `dmc2_pipeline.cuf`, tampoco comprobaba el código de retorno de `cudaGraphLaunch`/`cudaStreamSynchronize`, lo que ocultaba el error real; corregido de paso).
+
+Comprobado también que `derwavefhe4`/`derwavefm`/`derwavefx`/`derwavefhe3` (a las que `derananum` llama) **no** tienen este problema — sus propios argumentos son "de paso" (no reservan nada) y sus variables locales ya son fijas o escalares. El problema está únicamente en las 8 declaraciones locales de `derananum`.
+
+### Solución aplicada: subir el límite del heap compartido
+
+En `inicializa_pipeline` (`dmc2_pipeline.cuf`), una vez, antes de construir el grafo:
+
+```fortran
+istat = cudaDeviceSetLimit(cudaLimitMallocHeapSize, 512_8*1024_8*1024_8)
+```
+
+Verificado: 4.000 walkers, que antes fallaba siempre, corre limpio tras el cambio (`EXIT=0`, `numero de walkers que tengo finales 4000`). Caso normal (1.000 walkers) sin cambios de comportamiento.
+
+### Solución alternativa (explicada, NO implementada): arrays de tamaño fijo
+
+Subir el límite mueve el techo más arriba, pero no lo elimina — con walkers suficientes, volvería a fallar. La solución de raíz es la que ya usa `k_dmc2` (`dmc2.cuf`) para su propio buffer local (`atom_l(64)`, recortado con `(1:natom)` al usarlo): declarar estos 8 arrays con un tamaño **fijo, conocido en compilación** (p.ej. `64`, con margen de sobra sobre `nhe4=20`/`natom=21` reales) en vez de con la variable runtime, y recortarlos `(1:nhe4)`/`(1:natom)`/etc. en las 4 llamadas donde se usan.
+
+Con tamaño fijo, cada array pasa a vivir en **memoria local del hilo** (privada, reservada de antemano por hilo, sin pedir nada a ningún heap compartido) en vez de en el heap de `device`: no hay ya ningún almacén común del que tirar, así que no hay nada que agotar por muchos hilos que corran a la vez. El coste es que cada hilo reserva más espacio del que usa en la práctica (`64` en vez de `~20` elementos por array, unos 8 KB extra por hilo en total) — lo que en teoría podría reducir cuántos hilos caben a la vez en cada núcleo de la GPU (menor ocupación, no un fallo, como mucho algo más lento), el mismo compromiso ya aceptado conscientemente en `k_dmc2`.
+
+No implementada en esta sesión — queda como mejora de raíz pendiente si el límite de 512 MB llegara a no ser suficiente en el futuro.
