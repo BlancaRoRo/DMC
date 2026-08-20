@@ -255,7 +255,7 @@ C  myexp-optimizacion.md antes de usarse aqui.
       attributes(host,device) SUBROUTINE He_dihydrogen (N, r_dih, rHH,
      &                          orHH, X, V, ENERGY1,
      &                          ENERGY2, ENERGY3)
-      use mVheheVphehe, only: V_hehe, Vp_hehe
+      use mVheheVphehe, only: V_hehe, Vp_hehe, V_and_Vp_hehe
       use angle_scalar_vec, only: angle, scalar_product, vec_norm
       use glibc_exp_mod, only: myexp
       use glibc_sincos_mod, only: mysin, mycos
@@ -266,7 +266,7 @@ C  myexp-optimizacion.md antes de usarse aqui.
       LOGICAL, PARAMETER :: GTEST = .false.
       DOUBLE PRECISION X(3*N), ENERGY1,ENERGY2,ENERGY3,
      1     V(3*N), R2(natms,natms), R,
-     2     G(natms,natms), DUMMY,
+     2     G(natms,natms), DUMMY, v_tmp, vp_tmp,
      3     r_RGTH(3),dVdx(3),
      4     rHH(3,nHH),orHH(3,nHH),
      7     cte,alpha,q,q0,r_dih(3,ndih),rvec(3),
@@ -317,9 +317,10 @@ C  poder darle a FN1/DFN1/FN2/DFN2 acumulacion secuencial explicita.
      2             +(X(3*(J1-1)+3)-X(3*(J2-1)+3))**2
           R2(J2,J1)=DSQRT(R2(J2,J1))
           R=R2(J2,J1)
-          G(J2,J1)=Vp_hehe(R)/R
+          call V_and_Vp_hehe(R, v_tmp, vp_tmp)
+          G(J2,J1)=vp_tmp/R
           G(J1,J2)=G(J2,J1)
-          ENERGY1=ENERGY1+V_hehe(R)
+          ENERGY1=ENERGY1+v_tmp
          ENDDO
       ENDDO
 
