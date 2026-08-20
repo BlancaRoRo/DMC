@@ -1,0 +1,19 @@
+Generating SQLite file nsys_pipeline_2000w_v2.sqlite from nsys_pipeline_2000w_v2.nsys-rep
+Processing [nsys_pipeline_2000w_v2.sqlite] with [/opt/nvidia/hpc_sdk/Linux_x86_64/24.1/profilers/Nsight_Systems/host-linux-x64/reports/cuda_gpu_kern_sum.py]... 
+
+ ** CUDA GPU Kernel Summary (cuda_gpu_kern_sum):
+
+ Time (%)  Total Time (ns)  Instances    Avg (ns)      Med (ns)     Min (ns)    Max (ns)   StdDev (ns)              Name             
+ --------  ---------------  ---------  ------------  ------------  ----------  ----------  -----------  -----------------------------
+     72,0   50.101.084.971      2.368  21.157.552,0  21.119.198,0  19.010.959  26.652.795    690.092,0  mdmc2_pipeline_k_derananum_t_
+     26,0   18.075.251.835      2.368   7.633.130,0   7.627.374,0   6.294.363   8.977.277    327.710,0  mdmc2_pipeline_k_vpot_t_     
+      0,0      497.755.938      1.184     420.402,0     444.571,0     357.756     466.363     38.226,0  mdmc2_pipeline_k_fase_a_     
+      0,0      295.074.849      1.184     249.218,0     262.077,0     213.149     279.165     21.322,0  mdmc2_pipeline_k_fase_h_     
+      0,0       20.061.059      1.184      16.943,0      17.199,0      15.647      20.384        670,0  mdmc2_pipeline_k_fase_d_     
+      0,0        3.240.512      1.184       2.736,0       2.688,0       2.528       3.392        101,0  mdmc2_pipeline_k_fase_g_     
+      0,0        2.278.439      1.184       1.924,0       1.920,0       1.824       2.464         39,0  mdmc2_pipeline_k_fase_c_     
+      0,0        2.205.166      1.184       1.862,0       1.856,0       1.823       2.336         34,0  mdmc2_pipeline_k_fase_f_     
+      0,0          549.851        540       1.018,0         960,0         895       1.536        124,0  __pgi_dev_cumemset_16n       
+      0,0          197.850        192       1.030,0       1.024,0         960       1.600         74,0  __pgi_dev_cumemset_8n        
+      0,0          145.471          1     145.471,0     145.471,0     145.471     145.471          0,0  mrandgpu_k_split_seeds_      
+
