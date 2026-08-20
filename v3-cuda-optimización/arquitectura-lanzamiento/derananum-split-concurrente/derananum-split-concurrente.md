@@ -230,8 +230,13 @@ el límite de ~3000-3500 walkers para el heap de `device` documentado en
 ## Estado y siguiente paso
 
 - Split de `derananum`: verificado correcto y ~2,6x más rápido en
-  500-2000w (cae a ~2,1x en 3000w, sin explicar todavía) -- no migrado a
-  producción todavía.
+  500-2000w (cae a ~2,1x en 3000w, sin explicar todavía, aunque sigue
+  siendo una mejora neta en todas las escalas probadas) -- **migrado a
+  producción** (`hibrido_instrumentado/derananum_split_mod.cuf` +
+  `dmc2_pipeline.cuf`/`wavef_mod.cuf`/`der_wavefx_mod.cuf` actualizados,
+  `compilar_pipeline.sh` con `derananum_split_mod.cuf` añadido a `FILES`).
+  Verificado bit a bit tras la migración (`-615.5737694991 meV`, 2000w,
+  semilla 11, coincide con `v3-cuda-optimización/optimizacion-vpot/`).
 - Arreglo `nhe3` en los bucles: verificado correcto, mejora real a nivel
   de función, sin impacto medible en el cuello de botella actual de
   `resto_t` -- se mantiene en el código aislado por ser una mejora limpia

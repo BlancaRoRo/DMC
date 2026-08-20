@@ -33,7 +33,7 @@ Cómo se reparte el trabajo entre bloques/hilos/kernels — no cambia fórmulas,
 |---|---|---|
 | [`arquitectura-lanzamiento/fase1-bloque-por-walker/`](arquitectura-lanzamiento/fase1-bloque-por-walker/) | ¿Más de 1 hilo por walker ayuda? (bloque=walker, multiwalker, atomics a memoria global) | **Negativo** en todos los casos reales — documentado para no repetir el intento |
 | [`arquitectura-lanzamiento/fase3-arquitecturas-alternativas/`](arquitectura-lanzamiento/fase3-arquitecturas-alternativas/) | Overhead de CUDA Graph, persistir kernels entre pasos, dónde se va el tiempo "invisible" | Descartó varias vías (overhead de grafo despreciable) |
-| [`arquitectura-lanzamiento/derananum-split-concurrente/`](arquitectura-lanzamiento/derananum-split-concurrente/) | Split de `derananum` en 3 kernels concurrentes (He4/resto/cierre) + arreglo de bucles `ngatom→nhe3` | Positivo (~2,6x en 500-2000w), no migrado a producción todavía |
+| [`arquitectura-lanzamiento/derananum-split-concurrente/`](arquitectura-lanzamiento/derananum-split-concurrente/) | Split de `derananum` en 3 kernels concurrentes (He4/resto/cierre) + arreglo de bucles `ngatom→nhe3` | **En producción** (~2,6x en 500-2000w, ~2,1x en 3000w) |
 
 ### Funciones matemáticas
 
