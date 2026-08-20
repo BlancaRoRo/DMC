@@ -1,0 +1,16 @@
+WARNING: CPU IP/backtrace sampling not supported, disabling.
+Try the 'nsys status --environment' command to learn more.
+
+WARNING: CPU context switch tracing not supported, disabling.
+Try the 'nsys status --environment' command to learn more.
+
+muestra kin_solo(1)      = 1.28425652415662597E+02
+muestra kin_multiblock(1)= 1.28425652415662597E+02
+n walkers = 1500
+bloques_por_walker = 4
+grid total (multiblock) = 6000
+ PASA: k_solo_parejas y k_multiblock_parejas_atomic dan los mismos resultados (con tolerancia numerica)
+Generating '/tmp/nsys-report-de04.qdstrm'
+[1/1] [0%                          ] nsys_multiblock_B4.nsys-rep[1/1] [0%                          ] nsys_multiblock_B4.nsys-rep[1/1] [=====32%                    ] nsys_multiblock_B4.nsys-rep[1/1] [===============65%          ] nsys_multiblock_B4.nsys-rep[1/1] [===============66%          ] nsys_multiblock_B4.nsys-rep[1/1] [========================97% ] nsys_multiblock_B4.nsys-rep[1/1] [========================100%] nsys_multiblock_B4.nsys-rep[1/1] [========================100%] nsys_multiblock_B4.nsys-rep
+Generated:
+    /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v3-cuda-optimización/fase1-bloque-por-walker/prueba_aislada/multiblock/nsys_multiblock_B4.nsys-rep

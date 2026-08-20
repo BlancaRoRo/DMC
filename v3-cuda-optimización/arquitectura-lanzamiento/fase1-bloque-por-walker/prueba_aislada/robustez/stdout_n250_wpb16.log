@@ -1,0 +1,19 @@
+WARNING: CPU IP/backtrace sampling not supported, disabling.
+Try the 'nsys status --environment' command to learn more.
+
+WARNING: CPU context switch tracing not supported, disabling.
+Try the 'nsys status --environment' command to learn more.
+
+muestra kin_solo(1)   = 1.52064453299338538E+03
+muestra kin_bloque(1) = 1.52064453299338538E+03
+muestra kin_arbol(1)  = 1.52064453299338538E+03
+muestra kin_grupo(1)  = 1.52064453299338538E+03
+muestra kin_multi(1)  = 1.52064453299338538E+03
+n walkers = 250
+atomos_por_hilo = 1
+walkers_por_bloque = 16
+ PASA: _solo, _bloque, _arbol, _grupo y _multi dan los mismos resultados (con tolerancia numerica donde aplica)
+Generating '/tmp/nsys-report-f925.qdstrm'
+[1/1] [0%                          ] nsys_n250_wpb16.nsys-rep[1/1] [0%                          ] nsys_n250_wpb16.nsys-rep[1/1] [=====30%                    ] nsys_n250_wpb16.nsys-rep[1/1] [=============60%            ] nsys_n250_wpb16.nsys-rep[1/1] [==============61%           ] nsys_n250_wpb16.nsys-rep[1/1] [=======================96%  ] nsys_n250_wpb16.nsys-rep[1/1] [========================100%] nsys_n250_wpb16.nsys-rep[1/1] [========================100%] nsys_n250_wpb16.nsys-rep
+Generated:
+    /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v3-cuda-optimización/fase1-bloque-por-walker/prueba_aislada/robustez/nsys_n250_wpb16.nsys-rep

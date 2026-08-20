@@ -1,0 +1,13 @@
+=== REFERENCIA, 500w ===
+  wall=35.264130883s
+=== OPTIMIZADO (duhe4x/uhe4x), 500w ===
+  wall=31.888691611s
+=== REFERENCIA, 2000w ===
+  wall=71.906456134s
+=== OPTIMIZADO (duhe4x/uhe4x), 2000w ===
+  wall=71.529394041s
+=== REFERENCIA, 3000w ===
+  wall=113.316453146s
+=== OPTIMIZADO (duhe4x/uhe4x), 3000w ===
+  wall=112.368718292s
+=== TODO OK ===

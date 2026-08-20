@@ -1,0 +1,30 @@
+# Artefactos de compilacion (nvfortran/gfortran): se regeneran con los
+# scripts de compilacion ya documentados en cada carpeta -- no se versionan.
+*.mod
+*.o
+
+# Binarios (test_<kernel>, driver_<kernel>, qmccluster*, diag, sin
+# extension) -- se mantienen los fuentes correspondientes (.cuf/.f90).
+test_*
+!test_*.cuf
+!test_*.f90
+driver_*
+!driver_*.f90
+qmccluster*
+!qmccluster*.f90
+diag
+!diag.cuf
+
+# Perfiles binarios de ncu/nsys: pesan varios MB y se regeneran
+# relanzando el comando de perfilado ya documentado en cada .md.
+*.ncu-rep
+*.nsys-rep
+*.sqlite
+
+# Configuraciones .HH: se regeneran en cada corrida excepto la
+# referencia maestra que arranca la simulacion desde cero.
+*.HH
+!conf.20.00.HH
+
+__pycache__/
+*.pyc

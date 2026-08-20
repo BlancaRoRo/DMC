@@ -1,0 +1,13 @@
+sweep,x,metodos_op4_hpsi_s,total_op4_s,conversion_op5_s,total_op5_s
+walkers (n. walkers),50,0.0939,0.1276,0.0027,21.7384
+walkers (n. walkers),100,0.1828,0.2299,0.0036,22.2861
+walkers (n. walkers),200,0.35,0.4135,0.0052,31.5937
+bloques de calculo,1,0.0939,0.1276,0.0027,21.7384
+bloques de calculo,2,0.0473,0.067,0.0044,36.492
+bloques de calculo,4,0.0892,0.1168,0.0084,69.129
+bloques de equilibrio,1,0.0939,0.1276,0.0027,21.7384
+bloques de equilibrio,2,0.0291,0.0445,0.0029,22.7907
+bloques de equilibrio,4,0.038,0.057,0.004,28.9581
+pasos por bloque,5,0.0939,0.1276,0.0027,21.7384
+pasos por bloque,10,0.0502,0.0668,0.0049,40.4639
+pasos por bloque,20,0.1024,0.1241,0.0091,77.9204

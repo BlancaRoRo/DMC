@@ -1,0 +1,209 @@
+! dmc2.cuf
+!
+! Puerto CUDA Fortran de dmc2 (msteps.f90:67-131): el paso DMC de un
+! solo walker -- mueve los atomos (difusion + arrastre con dwf viejo),
+! rota sprop si aplica, evalua hpsi, comprueba el test de aceptacion
+! de la funcion de onda, aplica la correccion de arrastre del segundo
+! medio paso con el dwf nuevo, vuelve a evaluar hpsi, comprueba otra
+! vez, y calcula el factor de ramificacion (nsons) con un ultimo
+! sorteo. Combina, sin formula propia nueva, tres piezas ya portadas
+! y probadas por separado: hpsi (mhpsi), rota (mrota) y gauss3/rand1
+! (mrandgpu).
+!
+! sigma1/sigma2/sig1rot/sig2rot/sig1hrot/sig2hrot: en el original son
+! CAMPOS del walker (mtipos.f90), calculados una vez en iniwalkers
+! (mmontecarlo.f90:436-480) a partir de hb2m/dtau/b (=brot) y nunca
+! modificados despues. Como son funciones puras de datos que dmc2 YA
+! recibe (hb2m(iatom), b, dtau), aqui se recalculan en el sitio en vez
+! de guardarlos como campos aparte -- mismo resultado, sin arrastrar
+! estado redundante (sigma2=sigma1**2, sig2rot=sig1rot**2,
+! sig2hrot=sig1hrot**2, por construccion):
+!   sigma1  = sqrt(2*hb2m(iatom)*dtau)      sigma2  = 2*hb2m(iatom)*dtau
+!   sig1rot = sqrt(2*b*dtau)                sig2rot = 2*b*dtau
+!   sig1hrot= sqrt(b*dtau)                  sig2hrot= b*dtau
+! (sig1hrot/sig2hrot vienen de sustituir dtau->0.5*dtau en sig1rot/
+! sig2rot, ver mmontecarlo.f90:478-480).
+!
+! signoup/signodw: el original comprueba if(supold.ne.signoup) return
+! tras cada hpsi -- aqui se omite, seleccionamos el mismo criterio ya
+! aplicado en toda la rama de wavefhe3/derananum/hpsi (wavef.md §4):
+! con slaterdet_trivial (nhe3up/nhe3dw<=1) el signo es siempre +1, la
+! comprobacion nunca dispara, y nuestro puerto de hpsi ni siquiera
+! expone signoup/signodw en su interfaz.
+!
+! ncmtras/dtau/etrial: variables reales de mparametros.f90 (publicas,
+! sin "parameter", fijadas al leer in.mcv o actualizadas paso a paso
+! -- etrial se recalcula una vez por paso DMC en pasodmc, no aqui).
+! Se declaran device de modulo, mismo tratamiento que opot/impureza/
+! dhcm en kernels anteriores. ratio SI es un parameter real
+! (=1.0d-7, mparametros.f90) -- se copia tal cual, sin necesitar
+! ninguna variable device.
+
+module mdmc2
+ use mtipos, only: vec3
+ use mhpsi, only: hpsi
+ use mrota, only: rota
+ use mrandgpu, only: gauss3_gpu, rand1_gpu
+ use der_wavefx, only: natom
+ use mderananum, only: rotamol
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: i8 = selected_int_kind(15)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ real(kind=r8), parameter :: ratio = 1.0d-7
+ integer(kind=i4), device :: ncmtras
+ real(kind=r8), device :: dtau, etrial
+
+contains
+
+attributes(host, device) subroutine dmc2(atom, sprop, hb2m, b, &
+                                          wf, wfhe4, wfhe3, wfm, wfx, &
+                                          kin, eimp, erot, pot, ene, &
+                                          dwf, dphi, irn, nsons)
+  type(vec3), intent (inout) :: atom(natom)
+  type(vec3), intent (inout) :: sprop(3)
+  real(kind=r8), intent (in) :: hb2m(natom)
+  real(kind=r8), intent (in) :: b
+  real(kind=r8), intent (inout) :: wf, wfhe4, wfhe3, wfm, wfx
+  real(kind=r8), intent (inout) :: kin, eimp, erot, pot, ene
+  type(vec3), intent (inout) :: dwf(natom)
+  real(kind=r8), intent (inout) :: dphi(2)
+  integer(kind=i8), intent (inout) :: irn
+  integer(kind=i4), intent (out) :: nsons
+
+  type(vec3) :: rtemp
+  real(kind=r8) :: phix1, phiy, phix2
+  real(kind=r8) :: gvar3(3)
+  real(kind=r8) :: eold, wfold
+  real(kind=r8) :: wftest
+  real(kind=r8) :: gb, rn
+  real(kind=r8) :: sigma1_l, sigma2_l, sig1rot_l, sig2rot_l, sig1hrot_l, sig2hrot_l
+  integer(kind=i4) :: iatom
+
+    nsons = 0
+
+    eold = ene
+    wfold = wf
+
+    do iatom = 1, ncmtras
+      call gauss3_gpu(irn, gvar3)
+      sigma1_l = sqrt(2.0_r8*hb2m(iatom)*dtau)
+      sigma2_l = 2.0_r8*hb2m(iatom)*dtau
+      rtemp%comp(:) = sigma1_l*gvar3(:)
+      rtemp%comp(:) = rtemp%comp(:) + 0.50_r8*sigma2_l*dwf(iatom)%comp(:)
+      atom(iatom)%comp(:) = atom(iatom)%comp(:) + rtemp%comp(:)
+    enddo
+    if (rotamol) then
+      call gauss3_gpu(irn, gvar3)
+      sig1rot_l  = sqrt(2.0_r8*b*dtau)
+      sig2rot_l  = 2.0_r8*b*dtau
+      sig1hrot_l = sqrt(b*dtau)
+      sig2hrot_l = b*dtau
+      phix1 = sig1hrot_l*gvar3(1) + 0.50_r8*sig2hrot_l*dphi(1)
+      phiy  = sig1rot_l *gvar3(2) + 0.50_r8*sig2rot_l *dphi(2)
+      phix2 = sig1hrot_l*gvar3(3) + 0.50_r8*sig2hrot_l*dphi(1)
+      call rota(1, phix1, sprop)
+      call rota(2, phiy,  sprop)
+      call rota(1, phix2, sprop)
+    endif
+
+    call hpsi(atom, sprop, hb2m, b, wf, wfhe4, wfhe3, wfm, wfx, &
+              kin, eimp, erot, pot, ene, dwf, dphi)
+
+    wftest = (wf/wfold)**2
+    if (wftest .lt. ratio) return
+
+    do iatom = 1, ncmtras
+      sigma2_l = 2.0_r8*hb2m(iatom)*dtau
+      atom(iatom)%comp(:) = atom(iatom)%comp(:) + 0.50_r8*sigma2_l*dwf(iatom)%comp(:)
+    enddo
+    if (rotamol) then
+      sig2rot_l  = 2.0_r8*b*dtau
+      sig2hrot_l = b*dtau
+      phix1 = 0.50_r8*sig2hrot_l*dphi(1)
+      phiy  = 0.50_r8*sig2rot_l *dphi(2)
+      phix2 = 0.50_r8*sig2hrot_l*dphi(1)
+      call rota(1, phix1, sprop)
+      call rota(2, phiy,  sprop)
+      call rota(1, phix2, sprop)
+    endif
+
+    call hpsi(atom, sprop, hb2m, b, wf, wfhe4, wfhe3, wfm, wfx, &
+              kin, eimp, erot, pot, ene, dwf, dphi)
+
+    wftest = (wf/wfold)**2
+    if (wftest .lt. ratio) return
+
+    gb = exp(-(0.50_r8*(eold+ene)-etrial)*dtau)
+    call rand1_gpu(rn, irn)
+    nsons = int(gb+rn)
+
+    if (nsons .gt. 10) nsons = 0
+
+end subroutine dmc2
+
+! ---- k_dmc2: arrays SoA con el WALKER como dimension RAPIDA/contigua
+! (n,natom) en vez de (natom,n) -- ver tiempo-ncu-resultado.md Parte 3
+! para el porque (32 hilos consecutivos = walkers consecutivos del
+! mismo warp, deben leer/escribir posiciones consecutivas en memoria).
+! Como una seccion por walker (atom(i,:)) ya NO es contigua con este
+! layout, cada hilo se copia primero su propio walker a una "libreta"
+! local natom-contigua (atom_l, dwf_l, ...) -- esa copia SI es
+! coalescida entre los hilos del warp (mismo iatom, walkers
+! consecutivos) -- calcula exactamente igual que antes con dmc2()
+! (sin cambiar dmc2 ni nada de la fisica), y copia el resultado de
+! vuelta igual de coalescido. Tamaño fijo (64) + recorte (1:natom) en
+! vez de un array automatico de tamaño natom: verificado en
+! test-tiempos/prueba_transpuesta_atom/ que es el patron que compila
+! y funciona en un kernel device. ----
+attributes(global) subroutine k_dmc2(n, atom, sprop, hb2m, b, &
+                                      wf, wfhe4, wfhe3, wfm, wfx, &
+                                      kin, eimp, erot, pot, ene, &
+                                      dwf, dphi, irn, nsons)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (inout) :: atom(n,natom)
+  type(vec3), device, intent (inout) :: sprop(n,3)
+  real(kind=r8), device, intent (in) :: hb2m(n,natom)
+  real(kind=r8), device, intent (in) :: b(n)
+  real(kind=r8), device, intent (inout) :: wf(n), wfhe4(n), wfhe3(n), wfm(n), wfx(n)
+  real(kind=r8), device, intent (inout) :: kin(n), eimp(n), erot(n), pot(n), ene(n)
+  type(vec3), device, intent (inout) :: dwf(n,natom)
+  real(kind=r8), device, intent (inout) :: dphi(n,2)
+  integer(kind=i8), device, intent (inout) :: irn(n)
+  integer(kind=i4), device, intent (out) :: nsons(n)
+  integer(kind=i4) :: i, iatom
+  type(vec3) :: atom_l(64), dwf_l(64), sprop_l(3)
+  real(kind=r8) :: hb2m_l(64), dphi_l(2)
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    do iatom = 1, natom
+      atom_l(iatom) = atom(i,iatom)
+      hb2m_l(iatom) = hb2m(i,iatom)
+      dwf_l(iatom)  = dwf(i,iatom)
+    enddo
+    sprop_l(1) = sprop(i,1)
+    sprop_l(2) = sprop(i,2)
+    sprop_l(3) = sprop(i,3)
+    dphi_l(1) = dphi(i,1)
+    dphi_l(2) = dphi(i,2)
+
+    call dmc2(atom_l(1:natom), sprop_l, hb2m_l(1:natom), b(i), &
+              wf(i), wfhe4(i), wfhe3(i), wfm(i), wfx(i), &
+              kin(i), eimp(i), erot(i), pot(i), ene(i), &
+              dwf_l(1:natom), dphi_l, irn(i), nsons(i))
+
+    do iatom = 1, natom
+      atom(i,iatom) = atom_l(iatom)
+      dwf(i,iatom)  = dwf_l(iatom)
+    enddo
+    sprop(i,1) = sprop_l(1)
+    sprop(i,2) = sprop_l(2)
+    sprop(i,3) = sprop_l(3)
+    dphi(i,1) = dphi_l(1)
+    dphi(i,2) = dphi_l(2)
+  endif
+end subroutine k_dmc2
+
+end module mdmc2

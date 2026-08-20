@@ -1,0 +1,206 @@
+! test_recompute.cuf
+!
+! Prueba aislada de la Estrategia 2 (docs-kernels/tiempo-ncu-resultado.md
+! Parte 8): compara la version ACTUAL de derwavefhe4 (der_wavefhe4_mod.cuf
+! lineas 62-94) -- bucle O(n^2/2) sobre parejas iatom<jatom, acumulando en
+! el array d1wf(iatom)/d1wf(jatom) con lectura-modificacion-escritura
+! repetida -- contra una version RECALCULADA -- bucle O(n^2) por atomo,
+! recorriendo TODAS las demas parejas y acumulando en un escalar local,
+! escribiendo el array de salida una sola vez por atomo al final.
+!
+! La formula fisica es identica (misma phe4, mismo ujasp/ujass); lo unico
+! que cambia es COMO se organiza el bucle. Comprobado a mano que el orden
+! de sumas en punto flotante para un atomo fijo coincide EXACTAMENTE entre
+! las dos versiones (mismo orden creciente de indice del otro atomo,
+! saltando el propio) -- se espera bit a bit identico.
+
+module mtest_recompute
+ use cudafor
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ type :: vec3
+   real(kind=r8) :: comp(3)
+ end type vec3
+
+ real(kind=r8), parameter :: phe4_1 = 1.7_r8, phe4_2 = 2.3_r8, phe4_3 = 0.05_r8
+
+contains
+
+! =====================================================================
+! ---- VERSION ACTUAL (_orig): bucle iatom<jatom, array acumulador ----
+! copia exacta del patron de der_wavefhe4_mod.cuf:62-94 ----
+! =====================================================================
+attributes(host, device) subroutine derwavefhe4_orig(nhe4, atom, d1wf, d2wf)
+  integer(kind=i4), value :: nhe4
+  type(vec3), intent (in)  :: atom(nhe4)
+  type(vec3), intent (out)   :: d1wf(nhe4)
+  real(kind=r8), intent (out) :: d2wf(nhe4)
+  type(vec3) :: rtemp
+  integer(kind=i4) :: iatom,jatom
+  real(kind=r8) :: ujasp,ujass,rij
+
+   do iatom=1,nhe4
+     d1wf(iatom)%comp(:)=0.0_r8
+     d2wf(iatom)=0.0_r8
+   enddo
+
+   do iatom=1,nhe4-1
+     do jatom=iatom+1,nhe4
+         rtemp%comp=atom(iatom)%comp-atom(jatom)%comp
+         rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+         ujasp=phe4_1*phe4_2/(rij**(phe4_2+1.0_r8))
+         ujass=-(phe4_2+1)*ujasp/rij
+         ujasp=(ujasp-phe4_3)/rij
+         d1wf(iatom)%comp(:)=d1wf(iatom)%comp(:)+ujasp*rtemp%comp(:)
+         d1wf(jatom)%comp(:)=d1wf(jatom)%comp(:)-ujasp*rtemp%comp(:)
+         d2wf(iatom)=d2wf(iatom)+ujass
+         d2wf(iatom)=d2wf(iatom)+2.0_r8*ujasp
+         d2wf(jatom)=d2wf(jatom)+ujass
+         d2wf(jatom)=d2wf(jatom)+2.0_r8*ujasp
+     enddo
+   enddo
+   do iatom=1,nhe4
+     d2wf(iatom)=d2wf(iatom)+dot_product(d1wf(iatom)%comp,d1wf(iatom)%comp)
+   enddo
+
+end subroutine derwavefhe4_orig
+
+! =====================================================================
+! ---- VERSION RECALCULADA (_re): bucle por atomo, O(n^2), acumulador
+! escalar (nunca toca el array hasta el final de cada atomo) ----
+! =====================================================================
+attributes(host, device) subroutine derwavefhe4_re(nhe4, atom, d1wf, d2wf)
+  integer(kind=i4), value :: nhe4
+  type(vec3), intent (in)  :: atom(nhe4)
+  type(vec3), intent (out)   :: d1wf(nhe4)
+  real(kind=r8), intent (out) :: d2wf(nhe4)
+  type(vec3) :: rtemp, d1_acc
+  integer(kind=i4) :: iatom,katom
+  real(kind=r8) :: ujasp,ujass,rij,d2_acc
+
+   do iatom=1,nhe4
+     d1_acc%comp(:) = 0.0_r8
+     d2_acc = 0.0_r8
+     do katom=1,nhe4
+       if (katom /= iatom) then
+         rtemp%comp=atom(iatom)%comp-atom(katom)%comp
+         rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+         ujasp=phe4_1*phe4_2/(rij**(phe4_2+1.0_r8))
+         ujass=-(phe4_2+1)*ujasp/rij
+         ujasp=(ujasp-phe4_3)/rij
+         d1_acc%comp(:)=d1_acc%comp(:)+ujasp*rtemp%comp(:)
+         d2_acc=d2_acc+ujass
+         d2_acc=d2_acc+2.0_r8*ujasp
+       endif
+     enddo
+     d2_acc = d2_acc + dot_product(d1_acc%comp,d1_acc%comp)
+     d1wf(iatom)%comp(:) = d1_acc%comp(:)
+     d2wf(iatom) = d2_acc
+   enddo
+
+end subroutine derwavefhe4_re
+
+! un hilo = un walker, version _orig
+attributes(global) subroutine k_orig(nhe4, n, atom, d1wf, d2wf)
+  integer(kind=i4), value :: nhe4, n
+  type(vec3), device, intent(in)  :: atom(nhe4,n)
+  type(vec3), device, intent(out) :: d1wf(nhe4,n)
+  real(kind=r8), device, intent(out) :: d2wf(nhe4,n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) call derwavefhe4_orig(nhe4, atom(:,i), d1wf(:,i), d2wf(:,i))
+end subroutine k_orig
+
+! un hilo = un walker, version _re
+attributes(global) subroutine k_re(nhe4, n, atom, d1wf, d2wf)
+  integer(kind=i4), value :: nhe4, n
+  type(vec3), device, intent(in)  :: atom(nhe4,n)
+  type(vec3), device, intent(out) :: d1wf(nhe4,n)
+  real(kind=r8), device, intent(out) :: d2wf(nhe4,n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) call derwavefhe4_re(nhe4, atom(:,i), d1wf(:,i), d2wf(:,i))
+end subroutine k_re
+
+end module mtest_recompute
+
+
+program test_recompute
+ use mtest_recompute
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ integer(kind=i4), parameter :: nhe4 = 22, n = 50
+ type(vec3) :: atom_h(nhe4,n)
+ type(vec3) :: d1wf_orig(nhe4,n), d1wf_re(nhe4,n)
+ real(kind=r8) :: d2wf_orig(nhe4,n), d2wf_re(nhe4,n)
+ type(vec3), device :: atom_d(nhe4,n), d1wf_orig_d(nhe4,n), d1wf_re_d(nhe4,n)
+ real(kind=r8), device :: d2wf_orig_d(nhe4,n), d2wf_re_d(nhe4,n)
+ integer(kind=i4) :: iatom, iw, threads, blocks
+ logical :: todo_ok
+ real(kind=r8) :: seed
+
+  do iw=1,n
+    do iatom=1,nhe4
+      seed = real(iw,r8)*0.37_r8 + real(iatom,r8)*1.91_r8
+      atom_h(iatom,iw)%comp(1) = sin(seed)*3.0_r8
+      atom_h(iatom,iw)%comp(2) = cos(seed*1.3_r8)*3.0_r8
+      atom_h(iatom,iw)%comp(3) = sin(seed*0.7_r8)*3.0_r8
+    enddo
+  enddo
+
+  atom_d = atom_h
+
+  threads = 32
+  blocks = (n + threads - 1) / threads
+  call k_orig<<<blocks,threads>>>(nhe4, n, atom_d, d1wf_orig_d, d2wf_orig_d)
+  call k_re<<<blocks,threads>>>(nhe4, n, atom_d, d1wf_re_d, d2wf_re_d)
+
+  d1wf_orig = d1wf_orig_d
+  d2wf_orig = d2wf_orig_d
+  d1wf_re = d1wf_re_d
+  d2wf_re = d2wf_re_d
+
+  todo_ok = .true.
+  do iw=1,n
+    do iatom=1,nhe4
+      if (any(d1wf_orig(iatom,iw)%comp /= d1wf_re(iatom,iw)%comp)) then
+        write(*,'(a,i0,a,i0)') 'DIFERENCIA d1wf en walker ', iw, ' atomo ', iatom
+        todo_ok = .false.
+      endif
+      if (d2wf_orig(iatom,iw) /= d2wf_re(iatom,iw)) then
+        write(*,'(a,i0,a,i0)') 'DIFERENCIA d2wf en walker ', iw, ' atomo ', iatom
+        todo_ok = .false.
+      endif
+    enddo
+  enddo
+
+  write(*,'(a,es24.17)') 'muestra d1wf_orig(1,1)%comp(1) =', d1wf_orig(1,1)%comp(1)
+  write(*,'(a,es24.17)') 'muestra d1wf_re(1,1)%comp(1)   =', d1wf_re(1,1)%comp(1)
+  write(*,'(a,es24.17)') 'muestra d2wf_orig(5,10)         =', d2wf_orig(5,10)
+  write(*,'(a,es24.17)') 'muestra d2wf_re(5,10)           =', d2wf_re(5,10)
+
+  ! version CPU (host) tambien, para descartar diferencias CPU/GPU
+  block
+    type(vec3) :: d1wf_cpu_o(nhe4), d1wf_cpu_r(nhe4)
+    real(kind=r8) :: d2wf_cpu_o(nhe4), d2wf_cpu_r(nhe4)
+    call derwavefhe4_orig(nhe4, atom_h(:,7), d1wf_cpu_o, d2wf_cpu_o)
+    call derwavefhe4_re(nhe4, atom_h(:,7), d1wf_cpu_r, d2wf_cpu_r)
+    if (any(d1wf_cpu_o(3)%comp /= d1wf_cpu_r(3)%comp) .or. d2wf_cpu_o(3)/=d2wf_cpu_r(3)) then
+      write(*,*) 'DIFERENCIA en CPU (host), walker 7, atomo 3'
+      todo_ok = .false.
+    endif
+    write(*,'(a,es24.17)') 'CPU muestra d1wf_orig(3)%comp(1) =', d1wf_cpu_o(3)%comp(1)
+    write(*,'(a,es24.17)') 'CPU muestra d1wf_re(3)%comp(1)   =', d1wf_cpu_r(3)%comp(1)
+  end block
+
+  if (todo_ok) then
+    write(*,*) 'PASA: version recalculada (sin array acumulador) da EXACTAMENTE los mismos resultados'
+  else
+    write(*,*) 'FALLA: hay diferencias, ver arriba'
+  endif
+
+end program test_recompute

@@ -1,0 +1,186 @@
+! test_histograma.cuf
+!
+! Prueba aislada de la parte mas pesada de denssumapaso (mdensidades.f90,
+! bucle drb44): con los parametros reales de este proyecto (nhe4=20,
+! nhr=2000, rmax=20.0), cada walker aporta C(20,2)=190 incrementos a un
+! histograma de 2000 casillas COMPARTIDO por todos los walkers -- a
+! diferencia de derananum/vpot (cada walker escribe solo lo suyo), aqui
+! muchos walkers pueden incrementar la MISMA casilla a la vez.
+!
+! CPU: bucle secuencial en host, walker a walker (equivalente exacto a
+! denssumapaso real, solo con posiciones sinteticas en vez de fisica
+! real -- no hace falta mypow/myexp para esta prueba, es un problema de
+! ARQUITECTURA de acceso a memoria, no de coste aritmetico).
+! GPU: 1 hilo = 1 walker (el patron que ya sabemos que funciona), cada
+! hilo hace sus 190 parejas y suma con atomicadd en el histograma de
+! device, compartido por todos los hilos.
+!
+! Los incrementos son siempre +1.0 (sin peso) -- la suma de una serie
+! de +1.0, en cualquier orden, es EXACTA en punto flotante mientras no
+! se pase de 2^53 (aqui, como mucho unos pocos millones) -- se espera
+! bit a bit identico entre CPU y GPU, no solo con tolerancia.
+
+module mtest_histograma
+ use cudafor
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ integer(kind=i4), parameter :: natom_real = 20   ! nhe4 real del proyecto
+ integer(kind=i4), parameter :: nhr_real = 2000    ! nhr real del proyecto
+ real(kind=r8), parameter :: rmax_real = 20.0_r8
+ real(kind=r8), parameter :: dhr_real = rmax_real/real(nhr_real,r8)
+
+contains
+
+! ---- GPU: 1 hilo = 1 walker, bucle de parejas O(n^2/2), atomicadd en
+! el histograma de device compartido por TODOS los hilos ----
+attributes(global) subroutine k_hist_atomic(n, natomv, nhr, dhr, x, y, z, hist)
+  integer(kind=i4), value :: n, natomv, nhr
+  real(kind=r8), value :: dhr
+  real(kind=r8), device, intent(in) :: x(natomv,n), y(natomv,n), z(natomv,n)
+  real(kind=r8), device :: hist(nhr)
+  integer(kind=i4) :: i, iatom, jatom, ihr
+  real(kind=r8) :: dx, dy, dz, rij, dummy
+
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) then
+     do iatom=1,natomv-1
+       do jatom=iatom+1,natomv
+         dx = x(iatom,i)-x(jatom,i)
+         dy = y(iatom,i)-y(jatom,i)
+         dz = z(iatom,i)-z(jatom,i)
+         rij = sqrt(dx*dx+dy*dy+dz*dz)
+         ihr = int(rij/dhr)+1
+         ihr = min(ihr,nhr)
+         dummy = atomicadd(hist(ihr), 1.0_r8)
+       enddo
+     enddo
+   endif
+end subroutine k_hist_atomic
+
+end module mtest_histograma
+
+
+program test_histograma
+ use mtest_histograma
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: i8 = selected_int_kind(15)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ integer(kind=i4) :: n
+ integer(kind=i4), parameter :: natomv = natom_real
+ integer(kind=i4), parameter :: nhr = nhr_real
+ real(kind=r8), parameter :: dhr = dhr_real
+ real(kind=r8), allocatable :: x_h(:,:), y_h(:,:), z_h(:,:)
+ real(kind=r8) :: hist_cpu(nhr)
+ real(kind=r8), allocatable :: hist_gpu(:)
+ real(kind=r8), device, allocatable :: x_d(:,:), y_d(:,:), z_d(:,:)
+ real(kind=r8), device :: hist_d(nhr)
+ integer(kind=i4) :: iatom, jatom, iw, threads, blocks, ihr
+ real(kind=r8) :: dx, dy, dz, rij, seed
+ logical :: todo_ok
+ character(len=32) :: arg
+ integer(kind=i4) :: nrep, irep
+ integer(kind=i8) :: total_cpu, total_gpu
+ integer(kind=i8) :: c0, c1, tasa
+ integer :: istat_sync
+
+  n = 1500
+  if (command_argument_count() >= 1) then
+    call get_command_argument(1, arg)
+    read(arg,*) n
+  endif
+  nrep = 1
+  if (command_argument_count() >= 2) then
+    call get_command_argument(2, arg)
+    read(arg,*) nrep
+  endif
+
+  allocate(x_h(natomv,n), y_h(natomv,n), z_h(natomv,n))
+  allocate(hist_gpu(nhr))
+  allocate(x_d(natomv,n), y_d(natomv,n), z_d(natomv,n))
+
+  ! posiciones sinteticas, escala fisica realista (~1-3 A de separacion
+  ! tipica, dentro del rango rmax=20 del histograma real)
+  do iw=1,n
+    do iatom=1,natomv
+      seed = real(iw,r8)*0.37_r8 + real(iatom,r8)*1.91_r8
+      x_h(iatom,iw) = sin(seed)*3.0_r8
+      y_h(iatom,iw) = cos(seed*1.3_r8)*3.0_r8
+      z_h(iatom,iw) = sin(seed*0.7_r8)*3.0_r8
+    enddo
+  enddo
+  x_d = x_h; y_d = y_h; z_d = z_h
+
+  ! ---- referencia CPU: bucle secuencial, igual que denssumapaso real ----
+  call system_clock(count_rate=tasa)
+  call system_clock(c0)
+  do irep=1,nrep
+    hist_cpu = 0.0_r8
+    do iw=1,n
+      do iatom=1,natomv-1
+        do jatom=iatom+1,natomv
+          dx = x_h(iatom,iw)-x_h(jatom,iw)
+          dy = y_h(iatom,iw)-y_h(jatom,iw)
+          dz = z_h(iatom,iw)-z_h(jatom,iw)
+          rij = sqrt(dx*dx+dy*dy+dz*dz)
+          ihr = int(rij/dhr)+1
+          ihr = min(ihr,nhr)
+          hist_cpu(ihr) = hist_cpu(ihr) + 1.0_r8
+        enddo
+      enddo
+    enddo
+  enddo
+  call system_clock(c1)
+  write(*,'(a,i0,a,f12.6,a)') 'CPU: tiempo total (', nrep, ' repeticiones) = ', &
+    real(c1-c0,r8)/real(tasa,r8), ' s'
+  write(*,'(a,f12.6,a)') 'CPU: tiempo por repeticion = ', real(c1-c0,r8)/real(tasa,r8)/real(nrep,r8), ' s'
+
+  ! ---- GPU: 1 hilo = 1 walker, atomicadd ----
+  threads = 32
+  blocks = (n + threads - 1) / threads
+  ! -- 1 lanzamiento de calentamiento, fuera de la medicion (arranque
+  ! de CUDA, ver prueba_arranque_cuda/ -- no forma parte del coste real
+  ! del kernel, y no existiria en la corrida real del programa completo,
+  ! que ya ha tocado la GPU mucho antes de llegar a denssumapaso) --
+  hist_d = 0.0_r8
+  call k_hist_atomic<<<blocks,threads>>>(n, natomv, nhr, dhr, x_d, y_d, z_d, hist_d)
+  istat_sync = cudaDeviceSynchronize()
+
+  call system_clock(c0)
+  do irep=1,nrep
+    hist_d = 0.0_r8
+    call k_hist_atomic<<<blocks,threads>>>(n, natomv, nhr, dhr, x_d, y_d, z_d, hist_d)
+  enddo
+  istat_sync = cudaDeviceSynchronize()
+  call system_clock(c1)
+  write(*,'(a,i0,a,f12.6,a)') 'GPU: tiempo total (', nrep, ' repeticiones) = ', &
+    real(c1-c0,r8)/real(tasa,r8), ' s'
+  write(*,'(a,f12.6,a)') 'GPU: tiempo por repeticion = ', real(c1-c0,r8)/real(tasa,r8)/real(nrep,r8), ' s'
+  hist_gpu = hist_d
+
+  todo_ok = .true.
+  total_cpu = 0; total_gpu = 0
+  do ihr=1,nhr
+    total_cpu = total_cpu + int(hist_cpu(ihr),i8)
+    total_gpu = total_gpu + int(hist_gpu(ihr),i8)
+    if (hist_cpu(ihr) /= hist_gpu(ihr)) then
+      write(*,'(a,i0,a,f12.1,a,f12.1)') 'DIFERENCIA casilla ', ihr, ': cpu=', hist_cpu(ihr), ' gpu=', hist_gpu(ihr)
+      todo_ok = .false.
+    endif
+  enddo
+
+  write(*,'(a,i0)') 'n walkers = ', n
+  write(*,'(a,i0)') 'total incrementos CPU = ', total_cpu
+  write(*,'(a,i0)') 'total incrementos GPU = ', total_gpu
+  write(*,'(a,i0)') 'esperado (n * C(natom,2)) = ', int(n,i8)*int(natomv,i8)*int(natomv-1,i8)/2
+
+  if (todo_ok) then
+    write(*,*) 'PASA: histogramas CPU y GPU EXACTAMENTE identicos'
+  else
+    write(*,*) 'FALLA: hay diferencias, ver arriba'
+  endif
+
+end program test_histograma

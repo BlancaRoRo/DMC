@@ -1,0 +1,207 @@
+! glibc_exp.cuf
+!
+! Port a CUDA Fortran de __exp de glibc 2.39
+! (sysdeps/ieee754/dbl-64/e_exp.c + e_exp_data.c, N=128/EXP_TABLE_BITS=7,
+! EXP_POLY_ORDER=5 -- la variante realmente activa en x86_64, comprobado:
+! no hay override especifico de x86_64 para esta funcion en glibc).
+!
+! Objetivo: que myexp(x) de, en esta maquina, el mismo bit que dexp(x)
+! calculado por gfortran (que enlaza contra esta misma glibc), tanto en
+! CPU como en GPU. Parte de la nueva convencion acordada: portar las
+! funciones transcendentales en vez de asumir que la GPU y gfortran
+! van a coincidir por pura casualidad (ver docs-kernels/
+! gpu_vs_gfortran_arbol.md).
+!
+! Fuente original: LGPL-2.1-or-later, (C) 2018-2024 Free Software
+! Foundation, Inc. -- ver https://sourceware.org/git/?p=glibc.git;
+! a=blob;f=sysdeps/ieee754/dbl-64/e_exp.c;hb=glibc-2.39
+
+module glibc_exp_mod
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: i8 = selected_int_kind(18)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! ---- constantes de e_exp_data.c, N=128 ----
+ ! InvLn2N = (1/ln2)*N
+ real(kind=r8), parameter :: exp_invln2N  = transfer(int(z'40671547652b82fe',8), 1.0_r8)
+ ! -ln2/N, partido en hi+lo (precision extendida)
+ real(kind=r8), parameter :: exp_negln2hiN = transfer(int(z'bf762e42fefa0000',8), 1.0_r8)
+ real(kind=r8), parameter :: exp_negln2loN = transfer(int(z'bd0cf79abc9e3b3a',8), 1.0_r8)
+ ! "magic number" 1.5*2^52, para redondear al entero mas cercano via suma
+ real(kind=r8), parameter :: exp_shift = transfer(int(z'4338000000000000',8), 1.0_r8)
+ ! coeficientes del polinomio (grado 5, ver comentario de e_exp_data.c)
+ real(kind=r8), parameter :: exp_c2 = transfer(int(z'3fdffffffffffdbd',8), 1.0_r8)
+ real(kind=r8), parameter :: exp_c3 = transfer(int(z'3fc555555555543c',8), 1.0_r8)
+ real(kind=r8), parameter :: exp_c4 = transfer(int(z'3fa55555cf172b91',8), 1.0_r8)
+ real(kind=r8), parameter :: exp_c5 = transfer(int(z'3f81111167a4d017',8), 1.0_r8)
+
+ ! top12(x) de umbrales usados en __exp (calculados una vez, ver
+ ! docs-kernels/glibc_math.md): top12(2^-54)=969, top12(512)=1032,
+ ! top12(1024)=1033, top12(+inf)=2047
+ integer(kind=i4), parameter :: exp_top12_tiny  = 969
+ integer(kind=i4), parameter :: exp_top12_512   = 1032
+ integer(kind=i4), parameter :: exp_top12_1024  = 1033
+ integer(kind=i4), parameter :: exp_top12_inf   = 2047
+ integer(kind=i8), parameter :: exp_bits_neginf = int(z'fff0000000000000',8)
+ integer(kind=i8), parameter :: exp_bits_posinf = int(z'7ff0000000000000',8)
+
+ include 'exp_tab_fortran.txt'
+
+contains
+
+! ---- reinterpretacion de bits real(8)<->integer(8): TRANSFER escalar
+! directo hace fallar el enlazado en esta version de nvfortran dentro
+! de una funcion attributes(host,device) compilada con -cuda (falta
+! el simbolo de runtime __pgi_transfer_dbl2long/long2dbl -- comprobado
+! que no existe en ningun .a/.so del SDK instalado). El workaround
+! original (TRANSFER envuelto en array de tamano 1) compila y da el
+! resultado correcto, pero perfilado con Nsight Compute resulto ser
+! el mayor foco de accesos a memoria no coalescidos de todo el kernel
+! k_dmc2 (ver test-tiempos/tiempo-ncu.md) -- sospecha: el array fuerza
+! al compilador a reservar memoria "local" en vez de mantener el valor
+! en un registro. EQUIVALENCE evita el TRANSFER (y por tanto el
+! simbolo que faltaba) sin tocar el algoritmo -- verificado bit a bit
+! contra la version anterior, en host y en device, con los 14 casos de
+! test_glibc_exp (ver test-tiempos/prueba_equivalence_exp/). ----
+attributes(host, device) function bits_of(x) result(ii)
+  real(kind=r8), intent (in) :: x
+  integer(kind=i8) :: ii
+  real(kind=r8) :: xx
+  integer(kind=i8) :: iii
+  equivalence (xx, iii)
+    xx = x
+    ii = iii
+end function bits_of
+
+attributes(host, device) function real_of(ii) result(x)
+  integer(kind=i8), intent (in) :: ii
+  real(kind=r8) :: x
+  real(kind=r8) :: xx
+  integer(kind=i8) :: iii
+  equivalence (xx, iii)
+    iii = ii
+    x = xx
+end function real_of
+
+attributes(host, device) function top12_of(x) result(t)
+  real(kind=r8), intent (in) :: x
+  integer(kind=i4) :: t
+    t = int(ishft(bits_of(x), -52), i4)
+    t = iand(t, int(z'7ff',i4))
+end function top12_of
+
+! ---- myexp: puerto fiel de __exp (e_exp.c). math_narrow_eval es la
+! identidad en x86_64 (FLT_EVAL_METHOD==0, comprobado: no hay
+! sysdeps/x86_64 especifico para esta funcion) -- se omite. La rama
+! con TOINT_INTRINSICS tampoco aplica en x86_64 generico (idem
+! comprobado), asi que solo se porta la rama "#else" de z-a-entero. ----
+attributes(host, device) function myexp(x) result(y)
+  real(kind=r8), intent (in) :: x
+  real(kind=r8) :: y
+  integer(kind=i4) :: abstop
+  integer(kind=i8) :: ki, idx, topbits, sbits, xbits
+  real(kind=r8) :: kd, z, r, r2, scale, tail, tmp
+
+    abstop = top12_of(x)
+
+    if (abstop < exp_top12_tiny .or. abstop >= exp_top12_512) then
+      if (abstop < exp_top12_tiny) then
+        ! |x| muy pequeno: exp(x) ~= 1+x (WANT_ROUNDING=1 en el original)
+        y = 1.0_r8 + x
+        return
+      endif
+      if (abstop >= exp_top12_1024) then
+        xbits = bits_of(x)
+        if (xbits == exp_bits_neginf) then
+          y = 0.0_r8
+          return
+        endif
+        if (abstop >= exp_top12_inf) then
+          ! x es NaN, o +Inf: exp(NaN)=NaN, exp(+Inf)=+Inf; 1.0+x lo da
+          y = 1.0_r8 + x
+          return
+        endif
+        if (xbits < 0_i8) then
+          ! x muy negativo (bit de signo puesto): underflow -> 0
+          y = 0.0_r8
+        else
+          ! x muy positivo: overflow -> +Inf
+          y = real_of(exp_bits_posinf)
+        endif
+        return
+      endif
+      abstop = 0
+    endif
+
+    z = exp_invln2N * x
+    kd = z + exp_shift
+    ki = bits_of(kd)
+    kd = kd - exp_shift
+    r = x + kd*exp_negln2hiN + kd*exp_negln2loN
+
+    idx = 2_i8 * iand(ki, 127_i8)
+    topbits = ishft(ki, 52 - 7)
+    tail = real_of(exp_tab(idx))
+    sbits = exp_tab(idx+1) + topbits
+
+    r2 = r*r
+    tmp = tail + r + r2*(exp_c2 + r*exp_c3) + r2*r2*(exp_c4 + r*exp_c5)
+
+    if (abstop == 0) then
+      y = exp_specialcase(tmp, sbits, ki)
+      return
+    endif
+
+    scale = real_of(sbits)
+    y = scale + scale*tmp
+
+end function myexp
+
+! ---- specialcase: rama de exp() para x en (-1024,-512]U[512,1024)
+! aprox, donde el resultado final puede des/sobre-desbordar aunque la
+! parte "core" del calculo (tmp) ya este bien. Puerto fiel de
+! specialcase() en e_exp.c -- WANT_ERRNO/WANT_ROUNDING se toman en su
+! valor por defecto (1) del original; no hay equivalente a errno en
+! este port (no hace falta para el resultado numerico). ----
+attributes(host, device) function exp_specialcase(tmp, sbits_in, ki) result(y)
+  real(kind=r8), intent (in) :: tmp
+  integer(kind=i8), intent (in) :: sbits_in, ki
+  real(kind=r8) :: y
+  integer(kind=i8) :: sbits
+  real(kind=r8) :: scale, hi, lo
+
+    sbits = sbits_in
+    if (iand(ki, int(z'80000000',i8)) == 0_i8) then
+      ! k>0: el exponente de scale puede haberse desbordado hasta 460
+      sbits = sbits - ishft(1009_i8, 52)
+      scale = real_of(sbits)
+      y = (2.0_r8**1009) * (scale + scale*tmp)
+      return
+    endif
+    ! k<0: cuidado especial en el rango subnormal
+    sbits = sbits + ishft(1022_i8, 52)
+    scale = real_of(sbits)
+    y = scale + scale*tmp
+    if (y < 1.0_r8) then
+      lo = scale - y + scale*tmp
+      hi = 1.0_r8 + y
+      lo = 1.0_r8 - hi + y + lo
+      y = (hi + lo) - 1.0_r8
+      if (y == 0.0_r8) y = 0.0_r8
+    endif
+    y = (2.0_r8**(-1022)) * y
+
+end function exp_specialcase
+
+attributes(global) subroutine k_myexp(n, x, y)
+  integer(kind=i4), value :: n
+  real(kind=r8), device, intent (in)  :: x(n)
+  real(kind=r8), device, intent (out) :: y(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) y(i) = myexp(x(i))
+end subroutine k_myexp
+
+end module glibc_exp_mod

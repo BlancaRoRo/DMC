@@ -1,0 +1,189 @@
+module der_wavefhe4
+ ! vec3: se reutiliza mtipos.f90, igual que en duhe4x. Aqui tampoco se
+ ! usan los operadores sobrecargados de vec3 (todo via %comp).
+ use mtipos, only: vec3
+ ! rij**phe4(2)/rij**(phe4(2)+1): exponente REAL (nu de in.mcv, no
+ ! entero) -> pow(), mismo motivo que en d_uhex4.cuf/der_wavefx.cuf.
+ ! Ver docs-kernels/glibc_math.md Parte 4.
+ use glibc_pow_mod, only: mypow, mypow_log, mypow_desde_log
+ ! nhe4: consolidada en mcuda_globals (docs-kernels/hibrido.md Paso 3)
+ ! -- antes se declaraba aqui, por separado de der_wavefx.
+ use glibc_exp_mod, only: myexp
+ use mcuda_globals, only: nhe4
+
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! umax/umin SI son PARAMETER en el original (mwavef.f90), a diferencia
+ ! de nhe4/phe4 -- se declaran tal cual, sin necesitar copia a la GPU.
+ real(kind=r8), parameter :: umax = 200.0_r8, umin = -200.0_r8
+
+ ! phe4 es una variable de verdad en mparametros.f90 (publica, sin
+ ! "parameter"): mentradatos.f90 la rellena una vez al leer in.mcv y se
+ ! queda fija el resto de la simulacion. Mismo tratamiento que
+ ! lxhe4/impurmol/pxhe4 en duhe4x: device a nivel de modulo.
+ real(kind=r8), device :: phe4(3)
+
+contains
+
+! ---- wavefhe4: la interfaz cambia de w1 (type walker) a atom(nhe4) ----
+! El original recibe el walker completo, pero type(walker) tiene
+! componentes ALLOCATABLE (atom, dwf, delta, hb2m, sigma1, sigma2) --
+! un tipo derivado con componentes allocatable no se puede usar como
+! dato device. wavefhe4 solo lee w1%atom(:) y escribe w1%lw%wfhe4, asi
+! que la interfaz se reduce a justo eso: el array de posiciones de
+! entrada, y un escalar de salida.
+attributes(host, device) subroutine wavefhe4(atom, wfhe4)
+  type(vec3), intent (in)  :: atom(nhe4)
+  real(kind=r8), intent (out) :: wfhe4
+  type(vec3) :: rtemp
+  real(kind=r8) :: ujas,rij
+  integer(kind=i4) :: iatom,jatom
+
+  ujas=0.0_r8
+  do iatom=1,nhe4-1
+    do jatom=iatom+1,nhe4
+      rtemp%comp=atom(iatom)%comp-atom(jatom)%comp
+      rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+      ujas=ujas-phe4(1)/mypow(rij,phe4(2))
+      ujas=ujas-phe4(3)*rij
+    enddo
+  enddo
+
+  ujas=min(ujas,umax)
+  ujas=max(ujas,umin)
+
+  wfhe4=myexp(ujas)
+
+end subroutine wavefhe4
+
+! ---- derwavefhe4: apenas cambia -- ya escribia d1wf/d2wf aparte,
+! solo hacia falta sustituir w1%atom(:) por atom(:) ----
+attributes(host, device) subroutine derwavefhe4(atom, d1wf, d2wf)
+  type(vec3), intent (in)  :: atom(nhe4)
+  type(vec3), intent (out)   :: d1wf(nhe4)
+  real(kind=r8), intent (out) :: d2wf(nhe4)
+  type(vec3) :: rtemp
+  integer(kind=i4) :: iatom,jatom
+  real(kind=r8) :: ujasp,ujass,rij
+
+   do iatom=1,nhe4
+     d1wf(iatom)%comp(:)=0.0_r8
+     d2wf(iatom)=0.0_r8
+   enddo
+
+   do iatom=1,nhe4-1
+     do jatom=iatom+1,nhe4
+         rtemp%comp=atom(iatom)%comp-atom(jatom)%comp
+         rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+         ujasp=phe4(1)*phe4(2)/mypow(rij,phe4(2)+1.0_r8)
+         ujass=-(phe4(2)+1)*ujasp/rij
+         ujasp=(ujasp-phe4(3))/rij
+         d1wf(iatom)%comp(:)=d1wf(iatom)%comp(:)+ujasp*rtemp%comp(:)
+         d1wf(jatom)%comp(:)=d1wf(jatom)%comp(:)-ujasp*rtemp%comp(:)
+         d2wf(iatom)=d2wf(iatom)+ujass
+         d2wf(iatom)=d2wf(iatom)+2.0_r8*ujasp
+         d2wf(jatom)=d2wf(jatom)+ujass
+         d2wf(jatom)=d2wf(jatom)+2.0_r8*ujasp
+     enddo
+   enddo
+   do iatom=1,nhe4
+     d2wf(iatom)=d2wf(iatom)+dot_product(d1wf(iatom)%comp,d1wf(iatom)%comp)
+   enddo
+
+ end subroutine derwavefhe4
+
+! ---- v3-cuda-optimizacion/optimizacion-mypow: wavefhe4 + derwavefhe4
+! FUSIONADAS -- las dos recorren los MISMOS pares (iatom,jatom) y
+! calculan el MISMO rij cada una, por separado (wavefhe4 y
+! derwavefhe4 no se tocan, se dejan intactas como referencia). Aqui se
+! calcula rij UNA vez por par, y mypow_log(rij) UNA vez por par (en
+! vez de que mypow lo recalcule por su cuenta en cada una de las 2
+! llamadas -- ver optimizacion-mypow.md). Cada acumulador (ujas,
+! d1wf, d2wf) sigue sumando en el MISMO orden exacto que en las
+! subrutinas originales -- fusionar los bucles no cambia el orden de
+! ninguna suma, solo evita recalcular rij/log(rij). Bit a bit
+! identico a llamar wavefhe4+derwavefhe4 por separado, verificado
+! antes de usarse en derananum. ----
+attributes(host, device) subroutine wavef_derwavefhe4(atom, wfhe4, d1wf, d2wf)
+  type(vec3), intent (in)  :: atom(nhe4)
+  real(kind=r8), intent (out) :: wfhe4
+  type(vec3), intent (out) :: d1wf(nhe4)
+  real(kind=r8), intent (out) :: d2wf(nhe4)
+  type(vec3) :: rtemp
+  real(kind=r8) :: ujas,ujasp,ujass,rij
+  real(kind=r8) :: rij_hi,rij_lo,rijp2,rijp2p1
+  integer(kind=i4) :: iatom,jatom
+
+  do iatom=1,nhe4
+    d1wf(iatom)%comp(:)=0.0_r8
+    d2wf(iatom)=0.0_r8
+  enddo
+
+  ujas=0.0_r8
+  do iatom=1,nhe4-1
+    do jatom=iatom+1,nhe4
+      rtemp%comp=atom(iatom)%comp-atom(jatom)%comp
+      rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+      call mypow_log(rij, rij_hi, rij_lo)
+
+      ! ---- parte de wavefhe4 (valor) ----
+      rijp2=mypow_desde_log(rij_hi,rij_lo,phe4(2))
+      ujas=ujas-phe4(1)/rijp2
+      ujas=ujas-phe4(3)*rij
+
+      ! ---- parte de derwavefhe4 (derivada) ----
+      rijp2p1=mypow_desde_log(rij_hi,rij_lo,phe4(2)+1.0_r8)
+      ujasp=phe4(1)*phe4(2)/rijp2p1
+      ujass=-(phe4(2)+1)*ujasp/rij
+      ujasp=(ujasp-phe4(3))/rij
+      d1wf(iatom)%comp(:)=d1wf(iatom)%comp(:)+ujasp*rtemp%comp(:)
+      d1wf(jatom)%comp(:)=d1wf(jatom)%comp(:)-ujasp*rtemp%comp(:)
+      d2wf(iatom)=d2wf(iatom)+ujass
+      d2wf(iatom)=d2wf(iatom)+2.0_r8*ujasp
+      d2wf(jatom)=d2wf(jatom)+ujass
+      d2wf(jatom)=d2wf(jatom)+2.0_r8*ujasp
+    enddo
+  enddo
+
+  ujas=min(ujas,umax)
+  ujas=max(ujas,umin)
+  wfhe4=myexp(ujas)
+
+  do iatom=1,nhe4
+    d2wf(iatom)=d2wf(iatom)+dot_product(d1wf(iatom)%comp,d1wf(iatom)%comp)
+  enddo
+
+end subroutine wavef_derwavefhe4
+
+! un hilo = un walker = un wfhe4
+attributes(global) subroutine k_wavefhe4(n, atom, wfhe4_out)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in)  :: atom(nhe4,n)
+  real(kind=r8), device, intent (out) :: wfhe4_out(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call wavefhe4(atom(:,i), wfhe4_out(i))
+  endif
+end subroutine k_wavefhe4
+
+! un hilo = un walker = un (d1wf,d2wf) de nhe4 componentes
+attributes(global) subroutine k_derwavefhe4(n, atom, d1wf, d2wf)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in)  :: atom(nhe4,n)
+  type(vec3), device, intent (out) :: d1wf(nhe4,n)
+  real(kind=r8), device, intent (out) :: d2wf(nhe4,n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call derwavefhe4(atom(:,i), d1wf(:,i), d2wf(:,i))
+  endif
+end subroutine k_derwavefhe4
+
+end module der_wavefhe4
+
+

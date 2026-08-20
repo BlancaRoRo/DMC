@@ -1,0 +1,229 @@
+! test_streams.cuf
+!
+! Prueba aislada de la arquitectura descrita en
+! docs-kernels/arquitectura-streams-kin-pot.md: compara la version
+! ACTUAL (_secuencial, 1 hilo = 1 walker, calcula kin y pot uno detras
+! de otro dentro del mismo hilo -- como hace hpsi_mod.cuf hoy) contra
+! una version con 2 kernels SEPARADOS (k_kin, k_pot) lanzados en 2
+! streams de CUDA distintos, seguidos de un tercer kernel
+! (k_combina_ene) que suma kin+pot una vez ambos han terminado.
+!
+! k_kin: fisica de juguete tipo derananum (bucle de parejas O(n^2/2),
+! como derwavefhe4/derwavefx de pruebas anteriores), pero solo produce
+! un ESCALAR por walker (la energia cinetica total), no arrays de
+! derivadas -- es lo unico que hace falta para esta prueba de
+! concurrencia entre streams.
+!
+! k_pot: fisica de juguete tipo vpot/He_dihydrogen -- formula distinta
+! (para no depender de mypow/myexp reales), tambien con un termino
+! O(n^2/2) (tipo V_hehe/Vp_hehe) y un termino O(n) extra (tipo
+! ENERGY3/induccion), para parecerse mas en peso al He_dihydrogen real.
+
+module mtest_streams
+ use cudafor
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ type :: vec3
+   real(kind=r8) :: comp(3)
+ end type vec3
+
+contains
+
+! ---- kin: bucle de parejas O(n^2/2), acumula un escalar (no arrays) ----
+attributes(host, device) subroutine calc_kin(natom, atom, kin)
+  integer(kind=i4), value :: natom
+  type(vec3), intent(in) :: atom(natom)
+  real(kind=r8), intent(out) :: kin
+  type(vec3) :: rtemp
+  real(kind=r8) :: rij, ujasp
+  integer(kind=i4) :: iatom, jatom
+
+   kin = 0.0_r8
+   do iatom=1,natom-1
+     do jatom=iatom+1,natom
+       rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+       rij = sqrt(dot_product(rtemp%comp,rtemp%comp)) + 0.1_r8
+       ujasp = 1.7_r8*2.3_r8/(rij**2.3_r8)
+       kin = kin + ujasp
+     enddo
+   enddo
+end subroutine calc_kin
+
+! ---- pot: bucle de parejas O(n^2/2) con formula distinta (tipo
+! V_hehe/Vp_hehe) + bucle O(n) extra (tipo ENERGY3/induccion) ----
+attributes(host, device) subroutine calc_pot(natom, atom, pot)
+  integer(kind=i4), value :: natom
+  type(vec3), intent(in) :: atom(natom)
+  real(kind=r8), intent(out) :: pot
+  type(vec3) :: rtemp
+  real(kind=r8) :: rij, vterm, r0
+  integer(kind=i4) :: iatom, jatom
+
+   pot = 0.0_r8
+   do iatom=1,natom-1
+     do jatom=iatom+1,natom
+       rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+       rij = sqrt(dot_product(rtemp%comp,rtemp%comp)) + 0.1_r8
+       vterm = exp(-2.5_r8*rij) - 0.9_r8/rij**6
+       pot = pot + vterm
+     enddo
+   enddo
+   do iatom=1,natom
+     r0 = sqrt(dot_product(atom(iatom)%comp,atom(iatom)%comp)) + 0.1_r8
+     pot = pot - 0.4_r8/r0**3
+   enddo
+end subroutine calc_pot
+
+! ---- _secuencial: 1 hilo = 1 walker, kin y pot uno detras de otro,
+! como hpsi_mod.cuf hoy ----
+attributes(global) subroutine k_secuencial(n, natom, atom, ene)
+  integer(kind=i4), value :: n, natom
+  type(vec3), device, intent(in) :: atom(natom,n)
+  real(kind=r8), device, intent(out) :: ene(n)
+  real(kind=r8) :: kinl, potl
+  integer(kind=i4) :: i
+
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) then
+     call calc_kin(natom, atom(:,i), kinl)
+     call calc_pot(natom, atom(:,i), potl)
+     ene(i) = kinl + potl
+   endif
+end subroutine k_secuencial
+
+! ---- k_kin/k_pot: kernels separados, cada uno solo su pieza ----
+attributes(global) subroutine k_kin(n, natom, atom, kin)
+  integer(kind=i4), value :: n, natom
+  type(vec3), device, intent(in) :: atom(natom,n)
+  real(kind=r8), device, intent(out) :: kin(n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) call calc_kin(natom, atom(:,i), kin(i))
+end subroutine k_kin
+
+attributes(global) subroutine k_pot(n, natom, atom, pot)
+  integer(kind=i4), value :: n, natom
+  type(vec3), device, intent(in) :: atom(natom,n)
+  real(kind=r8), device, intent(out) :: pot(n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) call calc_pot(natom, atom(:,i), pot(i))
+end subroutine k_pot
+
+attributes(global) subroutine k_combina_ene(n, kin, pot, ene)
+  integer(kind=i4), value :: n
+  real(kind=r8), device, intent(in) :: kin(n), pot(n)
+  real(kind=r8), device, intent(out) :: ene(n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) ene(i) = kin(i) + pot(i)
+end subroutine k_combina_ene
+
+end module mtest_streams
+
+
+program test_streams
+ use mtest_streams
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ integer(kind=i4), parameter :: natom = 20, n = 4000
+ type(vec3) :: atom_h(natom,n)
+ real(kind=r8) :: ene_sec(n), ene_str(n)
+ type(vec3), device :: atom_d(natom,n)
+ real(kind=r8), device :: ene_sec_d(n), ene_str_d(n)
+ real(kind=r8), device :: kin_d(n), pot_d(n)
+ integer(kind=i4) :: iatom, iw, threads, blocks, istat
+ logical :: todo_ok
+ real(kind=r8) :: seed
+ integer(kind=cuda_stream_kind) :: stream_kin, stream_pot
+ type(cudaEvent) :: ev_sec0, ev_sec1, ev_kin0, ev_kin1, ev_pot0, ev_pot1
+ real :: t_sec, t_kin, t_pot
+
+  do iw=1,n
+    do iatom=1,natom
+      seed = real(iw,r8)*0.37_r8 + real(iatom,r8)*1.91_r8
+      atom_h(iatom,iw)%comp(1) = sin(seed)*3.0_r8
+      atom_h(iatom,iw)%comp(2) = cos(seed*1.3_r8)*3.0_r8
+      atom_h(iatom,iw)%comp(3) = sin(seed*0.7_r8)*3.0_r8
+    enddo
+  enddo
+  atom_d = atom_h
+
+  threads = 32
+  blocks = (n + threads - 1) / threads
+
+  istat = cudaStreamCreateWithFlags(stream_kin, cudaStreamNonBlocking)
+  istat = cudaStreamCreateWithFlags(stream_pot, cudaStreamNonBlocking)
+  istat = cudaEventCreate(ev_sec0)
+  istat = cudaEventCreate(ev_sec1)
+  istat = cudaEventCreate(ev_kin0)
+  istat = cudaEventCreate(ev_kin1)
+  istat = cudaEventCreate(ev_pot0)
+  istat = cudaEventCreate(ev_pot1)
+
+  ! ---- calentamiento: lanzamiento previo, sin medir, para que el
+  ! coste de arranque en frio del contexto (inicializacion/JIT del
+  ! primer kernel del programa) no contamine ninguna medida ----
+  call k_secuencial<<<blocks,threads>>>(n, natom, atom_d, ene_sec_d)
+  istat = cudaDeviceSynchronize()
+
+  ! ---- _secuencial: linea base, arquitectura actual, ya en caliente ----
+  istat = cudaEventRecord(ev_sec0, 0)
+  call k_secuencial<<<blocks,threads>>>(n, natom, atom_d, ene_sec_d)
+  istat = cudaEventRecord(ev_sec1, 0)
+  istat = cudaEventSynchronize(ev_sec1)
+  istat = cudaEventElapsedTime(t_sec, ev_sec0, ev_sec1)
+
+  ! drena TODO antes de tocar los streams -- que no quede nada
+  ! pendiente en el stream por defecto entre este punto y el lanzamiento
+  ! de k_kin/k_pot (checklist: un evento en stream 0 justo antes puede
+  ! imponer una barrera implicita con los demas streams)
+  istat = cudaDeviceSynchronize()
+
+  ! ---- streams: k_kin y k_pot lanzados en streams distintos, sin
+  ! esperarse entre si; eventos grabados en CADA stream (no en el 0)
+  ! para no tocar el stream por defecto entre los dos lanzamientos ----
+  istat = cudaEventRecord(ev_kin0, stream_kin)
+  call k_kin<<<blocks,threads,0,stream_kin>>>(n, natom, atom_d, kin_d)
+  istat = cudaEventRecord(ev_kin1, stream_kin)
+
+  istat = cudaEventRecord(ev_pot0, stream_pot)
+  call k_pot<<<blocks,threads,0,stream_pot>>>(n, natom, atom_d, pot_d)
+  istat = cudaEventRecord(ev_pot1, stream_pot)
+
+  istat = cudaStreamSynchronize(stream_kin)
+  istat = cudaStreamSynchronize(stream_pot)
+  call k_combina_ene<<<blocks,threads>>>(n, kin_d, pot_d, ene_str_d)
+  istat = cudaDeviceSynchronize()
+  istat = cudaEventElapsedTime(t_kin, ev_kin0, ev_kin1)
+  istat = cudaEventElapsedTime(t_pot, ev_pot0, ev_pot1)
+
+  ene_sec = ene_sec_d
+  ene_str = ene_str_d
+
+  todo_ok = .true.
+  do iw=1,n
+    if (ene_sec(iw) /= ene_str(iw)) then
+      write(*,'(a,i0)') 'DIFERENCIA ene en walker ', iw
+      todo_ok = .false.
+    endif
+  enddo
+
+  write(*,'(a,es24.17)') 'muestra ene_sec(1) =', ene_sec(1)
+  write(*,'(a,es24.17)') 'muestra ene_str(1) =', ene_str(1)
+  write(*,'(a,f10.4,a)') 'tiempo _secuencial (en caliente) : ', t_sec, ' ms'
+  write(*,'(a,f10.4,a)') 'tiempo k_kin (su propio stream)  : ', t_kin, ' ms'
+  write(*,'(a,f10.4,a)') 'tiempo k_pot (su propio stream)  : ', t_pot, ' ms'
+  write(*,'(a,f10.4,a)') 'suma k_kin+k_pot (si NO solapan) : ', t_kin+t_pot, ' ms'
+
+  if (todo_ok) then
+    write(*,*) 'PASA: streams (kin/pot separados) da EXACTAMENTE los mismos resultados'
+  else
+    write(*,*) 'FALLA: hay diferencias, ver arriba'
+  endif
+
+end program test_streams

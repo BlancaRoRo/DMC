@@ -1,0 +1,163 @@
+! test_streams_minimal.cuf
+!
+! Hipotesis B del usuario (saturacion de ALUs FP64) y prueba sintetica
+! minima (sin fisica en absoluto): 2 kernels triviales, 1 solo bloque
+! cada uno, en 2 streams distintos.
+!
+! k_dummy_i4: solo enteros (sin punto flotante en absoluto) -- si esto
+! tampoco solapa, se descarta que el problema sea saturacion de ALUs de
+! ningun tipo (ni FP64 ni FP32), y apunta a algo puramente de
+! planificacion/driver, independiente del contenido del kernel.
+!
+! k_kin_fp32/k_pot_fp32: misma formula que k_kin/k_pot de
+! test_streams.cuf, pero en real(kind=4) en vez de real(kind=8) -- para
+! probar directamente si la precision doble es la causa (Hipotesis B).
+
+module mtest_streams_minimal
+ use cudafor
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r4 = selected_real_kind(6)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ type :: vec3_4
+   real(kind=r4) :: comp(3)
+ end type vec3_4
+
+contains
+
+! ---- kernel minimo: solo enteros, ni una operacion en punto flotante ----
+attributes(global) subroutine k_dummy_i4(n, out)
+  integer(kind=i4), value :: n
+  integer(kind=i4), device, intent(out) :: out(n)
+  integer(kind=i4) :: i, k, acc
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) then
+     acc = 0
+     do k=1,2000000
+       acc = acc + iand(k,7) - 1
+     enddo
+     out(i) = acc
+   endif
+end subroutine k_dummy_i4
+
+! ---- version FP32 de kin/pot (misma formula que test_streams.cuf) ----
+attributes(host, device) subroutine calc_kin_fp32(natom, atom, kin)
+  integer(kind=i4), value :: natom
+  type(vec3_4), intent(in) :: atom(natom)
+  real(kind=r4), intent(out) :: kin
+  type(vec3_4) :: rtemp
+  real(kind=r4) :: rij, ujasp
+  integer(kind=i4) :: iatom, jatom
+   kin = 0.0_r4
+   do iatom=1,natom-1
+     do jatom=iatom+1,natom
+       rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+       rij = sqrt(dot_product(rtemp%comp,rtemp%comp)) + 0.1_r4
+       ujasp = 1.7_r4*2.3_r4/(rij**2.3_r4)
+       kin = kin + ujasp
+     enddo
+   enddo
+end subroutine calc_kin_fp32
+
+attributes(host, device) subroutine calc_pot_fp32(natom, atom, pot)
+  integer(kind=i4), value :: natom
+  type(vec3_4), intent(in) :: atom(natom)
+  real(kind=r4), intent(out) :: pot
+  type(vec3_4) :: rtemp
+  real(kind=r4) :: rij, vterm, r0
+  integer(kind=i4) :: iatom, jatom
+   pot = 0.0_r4
+   do iatom=1,natom-1
+     do jatom=iatom+1,natom
+       rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+       rij = sqrt(dot_product(rtemp%comp,rtemp%comp)) + 0.1_r4
+       vterm = exp(-2.5_r4*rij) - 0.9_r4/rij**6
+       pot = pot + vterm
+     enddo
+   enddo
+   do iatom=1,natom
+     r0 = sqrt(dot_product(atom(iatom)%comp,atom(iatom)%comp)) + 0.1_r4
+     pot = pot - 0.4_r4/r0**3
+   enddo
+end subroutine calc_pot_fp32
+
+attributes(global) subroutine k_kin_fp32(n, natom, atom, kin)
+  integer(kind=i4), value :: n, natom
+  type(vec3_4), device, intent(in) :: atom(natom,n)
+  real(kind=r4), device, intent(out) :: kin(n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) call calc_kin_fp32(natom, atom(:,i), kin(i))
+end subroutine k_kin_fp32
+
+attributes(global) subroutine k_pot_fp32(n, natom, atom, pot)
+  integer(kind=i4), value :: n, natom
+  type(vec3_4), device, intent(in) :: atom(natom,n)
+  real(kind=r4), device, intent(out) :: pot(n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) call calc_pot_fp32(natom, atom(:,i), pot(i))
+end subroutine k_pot_fp32
+
+end module mtest_streams_minimal
+
+
+program test_streams_minimal
+ use mtest_streams_minimal
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r4 = selected_real_kind(6)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ integer(kind=i4), parameter :: natom = 20, n = 4000
+ integer(kind=i4), device :: out1_d(32), out2_d(32)
+ type(vec3_4) :: atom_h(natom,n)
+ type(vec3_4), device :: atom_d(natom,n)
+ real(kind=r4), device :: kin_d(n), pot_d(n)
+ integer(kind=i4) :: iatom, iw, threads, blocks, istat
+ real(kind=r8) :: seed
+ integer(kind=cuda_stream_kind) :: stream_a, stream_b
+
+  istat = cudaStreamCreateWithFlags(stream_a, cudaStreamNonBlocking)
+  istat = cudaStreamCreateWithFlags(stream_b, cudaStreamNonBlocking)
+
+  ! =====================================================================
+  ! ---- Parte 1: kernel minimo, solo enteros, 1 bloque cada uno ----
+  ! =====================================================================
+  call k_dummy_i4<<<1,32,0,stream_a>>>(32, out1_d)
+  istat = cudaDeviceSynchronize()
+
+  call k_dummy_i4<<<1,32,0,stream_a>>>(32, out1_d)
+  call k_dummy_i4<<<1,32,0,stream_b>>>(32, out2_d)
+  istat = cudaStreamSynchronize(stream_a)
+  istat = cudaStreamSynchronize(stream_b)
+
+  ! =====================================================================
+  ! ---- Parte 2: kin/pot en FP32 (real*4), mismo tamano que la prueba
+  ! original (n=4000, natom=20) ----
+  ! =====================================================================
+  do iw=1,n
+    do iatom=1,natom
+      seed = real(iw,r8)*0.37_r8 + real(iatom,r8)*1.91_r8
+      atom_h(iatom,iw)%comp(1) = real(sin(seed)*3.0_r8, r4)
+      atom_h(iatom,iw)%comp(2) = real(cos(seed*1.3_r8)*3.0_r8, r4)
+      atom_h(iatom,iw)%comp(3) = real(sin(seed*0.7_r8)*3.0_r8, r4)
+    enddo
+  enddo
+  atom_d = atom_h
+
+  threads = 32
+  blocks = (n + threads - 1) / threads
+
+  call k_kin_fp32<<<blocks,threads,0,stream_a>>>(n, natom, atom_d, kin_d)
+  istat = cudaDeviceSynchronize()
+
+  call k_kin_fp32<<<blocks,threads,0,stream_a>>>(n, natom, atom_d, kin_d)
+  call k_pot_fp32<<<blocks,threads,0,stream_b>>>(n, natom, atom_d, pot_d)
+  istat = cudaStreamSynchronize(stream_a)
+  istat = cudaStreamSynchronize(stream_b)
+
+  write(*,*) 'listo'
+
+end program test_streams_minimal

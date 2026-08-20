@@ -1,0 +1,90 @@
+! hpsi.cuf
+!
+! Puerto CUDA Fortran de hpsi (mwavef.f90:20-40). Despachador puro
+! entre valibre (libre=.T., "sin interaccion") y derananum+vpot
+! (libre=.F., caso real con interaccion) -- las tres ya portadas y
+! probadas por separado (mvalibre, mderananum, mvpot). La unica
+! operacion propia de hpsi es "ene=kin+pot": suma de 2 terminos, sin
+! reasociacion posible (hacen falta 3 o mas sumandos para que el
+! orden de suma pueda dar un resultado distinto -- ver
+! docs-kernels/hpsi.md para la comprobacion).
+!
+! signoup/signodw (que valibre SI devuelve) se quedan locales aqui,
+! sin exponerse en la interfaz de hpsi -- mismo criterio ya aplicado
+! en wavefhe3 (wavef.cuf): con slaterdet_trivial (nhe3up/nhe3dw<=1,
+! signo siempre +1) no aportan nada, y derananum ya no los expone
+! tampoco (ver docs-kernels/wavef.md §4).
+
+module mhpsi
+ use mtipos, only: vec3
+ use mvalibre, only: valibre
+ use mderananum, only: derananum
+ use mvpot, only: vpot
+ use der_wavefx, only: natom
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! libre: variable real de mparametros.f90 (publica, sin "parameter"),
+ ! fijada una vez al leer in.mcv -- mismo tratamiento device que
+ ! opot/impureza en kernels anteriores.
+ logical, device :: libre
+
+contains
+
+attributes(host, device) subroutine hpsi(atom, sprop, hb2m, b, &
+                                          wf, wfhe4, wfhe3, wfm, wfx, &
+                                          kin, eimp, erot, pot, ene, &
+                                          dwf, dphi)
+  type(vec3), intent (inout) :: atom(natom)
+  type(vec3), intent (in) :: sprop(3)
+  real(kind=r8), intent (in) :: hb2m(natom)
+  real(kind=r8), intent (in) :: b
+  real(kind=r8), intent (out) :: wf, wfhe4, wfhe3, wfm, wfx
+  real(kind=r8), intent (out) :: kin, eimp, erot, pot, ene
+  type(vec3), intent (out) :: dwf(natom)
+  real(kind=r8), intent (out) :: dphi(2)
+  real(kind=r8) :: dwf_libre(3,natom)
+  integer(kind=i4) :: iatom, signoup_l, signodw_l
+
+    if (libre) then
+      call valibre(natom, wf, wfhe4, wfhe3, wfm, wfx, kin, pot, ene, &
+                   signoup_l, signodw_l, dwf_libre, dphi)
+      do iatom = 1, natom
+        dwf(iatom)%comp = dwf_libre(:,iatom)
+      enddo
+      eimp = 0.0_r8
+      erot = 0.0_r8
+    else
+      call derananum(atom, sprop, hb2m, b, wf, wfhe4, wfhe3, wfm, wfx, &
+                      kin, eimp, erot, dwf, dphi)
+      call vpot(atom, sprop, pot)
+      ene = kin + pot
+    endif
+
+end subroutine hpsi
+
+attributes(global) subroutine k_hpsi(n, atom, sprop, hb2m, b, &
+                                      wf, wfhe4, wfhe3, wfm, wfx, &
+                                      kin, eimp, erot, pot, ene, dwf, dphi)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (inout) :: atom(natom,n)
+  type(vec3), device, intent (in) :: sprop(3,n)
+  real(kind=r8), device, intent (in) :: hb2m(natom,n)
+  real(kind=r8), device, intent (in) :: b(n)
+  real(kind=r8), device, intent (out) :: wf(n), wfhe4(n), wfhe3(n), wfm(n), wfx(n)
+  real(kind=r8), device, intent (out) :: kin(n), eimp(n), erot(n), pot(n), ene(n)
+  type(vec3), device, intent (out) :: dwf(natom,n)
+  real(kind=r8), device, intent (out) :: dphi(2,n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call hpsi(atom(:,i), sprop(:,i), hb2m(:,i), b(i), &
+              wf(i), wfhe4(i), wfhe3(i), wfm(i), wfx(i), &
+              kin(i), eimp(i), erot(i), pot(i), ene(i), &
+              dwf(:,i), dphi(:,i))
+  endif
+end subroutine k_hpsi
+
+end module mhpsi

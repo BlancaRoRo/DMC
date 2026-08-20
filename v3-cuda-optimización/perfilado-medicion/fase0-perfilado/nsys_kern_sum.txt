@@ -1,0 +1,18 @@
+Generating SQLite file /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v3-cuda-optimización/fase0-perfilado/nsys_pipeline_1500w.sqlite from /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v3-cuda-optimización/fase0-perfilado/nsys_pipeline_1500w.nsys-rep
+Processing [/home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v3-cuda-optimización/fase0-perfilado/nsys_pipeline_1500w.sqlite] with [/opt/nvidia/hpc_sdk/Linux_x86_64/24.1/profilers/Nsight_Systems/host-linux-x64/reports/cuda_gpu_kern_sum.py]... 
+
+ ** CUDA GPU Kernel Summary (cuda_gpu_kern_sum):
+
++----------+-----------------+-----------+------------+------------+----------+----------+-------------+-------------------------------+
+| Time (%) | Total Time (ns) | Instances |  Avg (ns)  |  Med (ns)  | Min (ns) | Max (ns) | StdDev (ns) |             Name              |
++----------+-----------------+-----------+------------+------------+----------+----------+-------------+-------------------------------+
+|     73.8 |      2705319489 |       128 | 21135308.5 | 20881444.5 | 19605623 | 26914568 |   1349707.8 | mdmc2_pipeline_k_derananum_t_ |
+|     25.5 |       935404364 |       128 |  7307846.6 |  7255778.0 |  6628155 |  9133910 |    489495.2 | mdmc2_pipeline_k_vpot_t_      |
+|      0.6 |        23430817 |        64 |   366106.5 |   359498.5 |   357147 |   465849 |     25405.8 | mdmc2_pipeline_k_fase_a_      |
+|      0.0 |         1029334 |        64 |    16083.3 |    15887.5 |    15455 |    20032 |       890.5 | mdmc2_pipeline_k_fase_d_      |
+|      0.0 |          140799 |        64 |     2200.0 |     2144.0 |     2080 |     2720 |       134.9 | mdmc2_pipeline_k_fase_g_      |
+|      0.0 |          127261 |        64 |     1988.5 |     1984.0 |     1888 |     2528 |       120.8 | mdmc2_pipeline_k_fase_f_      |
+|      0.0 |          117659 |        64 |     1838.4 |     1824.0 |     1791 |     2400 |       113.8 | mdmc2_pipeline_k_fase_c_      |
+|      0.0 |           98591 |         1 |    98591.0 |    98591.0 |    98591 |    98591 |         0.0 | mrandgpu_k_split_seeds_       |
++----------+-----------------+-----------+------------+------------+----------+----------+-------------+-------------------------------+
+

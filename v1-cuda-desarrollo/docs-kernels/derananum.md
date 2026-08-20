@@ -231,7 +231,7 @@ FATAL ERROR: FORTRAN AUTO ALLOCATION FAILED   (repetido varias veces)
 
 ### Causa raíz
 
-`derananum` (línea 136 de `derananum_mod.cuf`, `v2-cuda-integracion/test-tiempos/hibrido_instrumentado/`) declara localmente 8 arrays dimensionados con variables `device` en tiempo de ejecución, no con constantes de compilación:
+`derananum` (línea 136 de `derananum_mod.cuf`, `v2-cuda-integracion/hibrido_instrumentado/`) declara localmente 8 arrays dimensionados con variables `device` en tiempo de ejecución, no con constantes de compilación:
 
 ```fortran
 type(vec3) :: d1wfhe4(nhe4), d1wfhe3(nhe3), d1wfm(ngatom), d1wfx(natom)

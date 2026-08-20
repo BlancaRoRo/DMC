@@ -1,0 +1,17 @@
+reparto de tiempos, opcion=4 (CPU)
+tiempo total (bucle bloques+pasos), s =         0.1295
+ 
+jerarquia real de llamadas dentro de dmc2 (tiempos INCLUSIVOS, no sumar entre niveles):
+  hpsi                                                      0.0927 s  ( 71.573 % del total)
+    valibre                                                 0.0000 s  (  0.000 % del total)
+    derananum                                               0.0522 s  ( 40.316 % del total)
+    vpot                                                    0.0403 s  ( 31.088 % del total)
+      ccuerpo                                               0.0009 s  (  0.671 % del total)
+      potenbh                                               0.0392 s  ( 30.236 % del total)
+ 
+rota (todas las llamadas)                                   0.0002 s  (  0.134 % del total)
+mrandom (gauss3+rn1)                                        0.0019 s  (  1.446 % del total)
+ 
+dmc2 (bucle sobre walkers)                                  0.0967 s  ( 74.690 % del total)
+pasodmc completo (dmc2+reparticion)                         0.0971 s  ( 74.981 % del total)
+otros (E/S por bloque, promedios...)                        0.0324 s  ( 25.019 % del total)

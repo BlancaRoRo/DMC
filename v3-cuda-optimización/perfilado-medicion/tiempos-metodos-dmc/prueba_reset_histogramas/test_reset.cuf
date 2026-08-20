@@ -1,0 +1,105 @@
+! test_reset.cuf
+!
+! Confirma o descarta la hipotesis de tiempos-metodos-dmc.md:
+! resetea_histogramas_gpu (dmc2_pipeline.cuf) cuesta 36,3 ms/llamada
+! para poner a cero solo ~620 KB en 12 arrays de device -- demasiado
+! para ser ancho de banda, sospecha de que son 12 lanzamientos de
+! kernel separados (cada uno con su propio gasto fijo), no el volumen
+! de datos en si.
+!
+! Mismos TAMAÑOS totales que los 12 arrays reales (nhr=2000; angulares
+! 121x60=7260; angulares "y" 121x121=14641), aplanados a 1D para esta
+! prueba (la forma 2D real no cambia el argumento: el coste que se
+! mide es de LANZAMIENTO, no de indexado).
+!
+! version A: 12 asignaciones de array separadas (igual que el codigo real)
+! version B: 1 solo kernel que pone a cero los 12 a la vez
+
+module mtest_reset
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ integer(kind=i4), parameter :: n_r = 2000    ! como h44_p etc (x6)
+ integer(kind=i4), parameter :: n_c = 7260    ! como hbhe4_p etc (x3)
+ integer(kind=i4), parameter :: n_y = 14641   ! como hybhe4_p etc (x3)
+contains
+
+! ---- version B: un solo kernel, cada hilo pone a cero su posicion en
+! los 12 arrays si esta dentro de su tamano ----
+attributes(global) subroutine k_reset_todos(r1,r2,r3,r4,r5,r6, c1,c2,c3, y1,y2,y3)
+  real(kind=r8), device :: r1(n_r),r2(n_r),r3(n_r),r4(n_r),r5(n_r),r6(n_r)
+  real(kind=r8), device :: c1(n_c),c2(n_c),c3(n_c)
+  real(kind=r8), device :: y1(n_y),y2(n_y),y3(n_y)
+  integer(kind=i4) :: i
+
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n_r) then
+     r1(i)=0.0_r8; r2(i)=0.0_r8; r3(i)=0.0_r8
+     r4(i)=0.0_r8; r5(i)=0.0_r8; r6(i)=0.0_r8
+   endif
+   if (i<=n_c) then
+     c1(i)=0.0_r8; c2(i)=0.0_r8; c3(i)=0.0_r8
+   endif
+   if (i<=n_y) then
+     y1(i)=0.0_r8; y2(i)=0.0_r8; y3(i)=0.0_r8
+   endif
+end subroutine k_reset_todos
+
+end module mtest_reset
+
+
+program test_reset
+ use mtest_reset
+ use cudafor
+ implicit none
+ integer(kind=i4), parameter :: nrep = 60   ! igual que el nº de bloques real (test)
+
+ real(kind=r8), device, allocatable :: r1(:),r2(:),r3(:),r4(:),r5(:),r6(:)
+ real(kind=r8), device, allocatable :: c1(:),c2(:),c3(:)
+ real(kind=r8), device, allocatable :: y1(:),y2(:),y3(:)
+
+ integer(kind=i4) :: irep, threads, blocks, istat
+ integer(kind=8) :: c0,cc1,tasa
+ real(kind=r8) :: t_a, t_b
+
+  allocate(r1(n_r),r2(n_r),r3(n_r),r4(n_r),r5(n_r),r6(n_r))
+  allocate(c1(n_c),c2(n_c),c3(n_c))
+  allocate(y1(n_y),y2(n_y),y3(n_y))
+
+  call system_clock(count_rate=tasa)
+
+  ! ---- calentamiento (fuera de la medicion, ver hallazgo de arranque
+  ! CUDA de fase3) ----
+  r1=0.0_r8
+  istat = cudaDeviceSynchronize()
+
+  ! ---- version A: 12 asignaciones separadas ----
+  call system_clock(c0)
+  do irep=1,nrep
+    r1=0.0_r8; r2=0.0_r8; r3=0.0_r8
+    r4=0.0_r8; r5=0.0_r8; r6=0.0_r8
+    c1=0.0_r8; c2=0.0_r8; c3=0.0_r8
+    y1=0.0_r8; y2=0.0_r8; y3=0.0_r8
+  enddo
+  istat = cudaDeviceSynchronize()
+  call system_clock(cc1)
+  t_a = real(cc1-c0,r8)/tasa
+
+  ! ---- version B: 1 kernel combinado ----
+  threads = 256
+  blocks = (n_y + threads - 1) / threads
+  call system_clock(c0)
+  do irep=1,nrep
+    call k_reset_todos<<<blocks,threads>>>(r1,r2,r3,r4,r5,r6, c1,c2,c3, y1,y2,y3)
+  enddo
+  istat = cudaDeviceSynchronize()
+  call system_clock(cc1)
+  t_b = real(cc1-c0,r8)/tasa
+
+  write(*,'(a,i0,a)') 'repeticiones = ', nrep, ' (igual que nº de bloques de la corrida real)'
+  write(*,'(a,f10.4,a,f8.4,a)') 'version A (12 asignaciones separadas): ', t_a, ' s total, ', 1000.0_r8*t_a/nrep, ' ms/rep'
+  write(*,'(a,f10.4,a,f8.4,a)') 'version B (1 kernel combinado):        ', t_b, ' s total, ', 1000.0_r8*t_b/nrep, ' ms/rep'
+  write(*,'(a,f6.2,a)') 'factor de mejora: ', t_a/t_b, 'x'
+
+end program test_reset

@@ -1,0 +1,138 @@
+! test_streams_sweep.cuf
+!
+! Variante de test_streams.cuf con "n" configurable por linea de
+! comandos, para la Hipotesis A del usuario: si la falta de
+! solapamiento es por saturacion de ocupacion/recursos (grid grande
+! llenando todas las SMs), reducir n debe permitir que k_pot empiece
+! DURANTE k_kin, no despues. Misma fisica de juguete, mismos kernels
+! que test_streams.cuf -- solo cambia que "n" se lee de argv en vez de
+! ser un parametro fijo.
+
+module mtest_streams_sweep
+ use cudafor
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ type :: vec3
+   real(kind=r8) :: comp(3)
+ end type vec3
+
+contains
+
+attributes(host, device) subroutine calc_kin(natom, atom, kin)
+  integer(kind=i4), value :: natom
+  type(vec3), intent(in) :: atom(natom)
+  real(kind=r8), intent(out) :: kin
+  type(vec3) :: rtemp
+  real(kind=r8) :: rij, ujasp
+  integer(kind=i4) :: iatom, jatom
+   kin = 0.0_r8
+   do iatom=1,natom-1
+     do jatom=iatom+1,natom
+       rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+       rij = sqrt(dot_product(rtemp%comp,rtemp%comp)) + 0.1_r8
+       ujasp = 1.7_r8*2.3_r8/(rij**2.3_r8)
+       kin = kin + ujasp
+     enddo
+   enddo
+end subroutine calc_kin
+
+attributes(host, device) subroutine calc_pot(natom, atom, pot)
+  integer(kind=i4), value :: natom
+  type(vec3), intent(in) :: atom(natom)
+  real(kind=r8), intent(out) :: pot
+  type(vec3) :: rtemp
+  real(kind=r8) :: rij, vterm, r0
+  integer(kind=i4) :: iatom, jatom
+   pot = 0.0_r8
+   do iatom=1,natom-1
+     do jatom=iatom+1,natom
+       rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+       rij = sqrt(dot_product(rtemp%comp,rtemp%comp)) + 0.1_r8
+       vterm = exp(-2.5_r8*rij) - 0.9_r8/rij**6
+       pot = pot + vterm
+     enddo
+   enddo
+   do iatom=1,natom
+     r0 = sqrt(dot_product(atom(iatom)%comp,atom(iatom)%comp)) + 0.1_r8
+     pot = pot - 0.4_r8/r0**3
+   enddo
+end subroutine calc_pot
+
+attributes(global) subroutine k_kin(n, natom, atom, kin)
+  integer(kind=i4), value :: n, natom
+  type(vec3), device, intent(in) :: atom(natom,n)
+  real(kind=r8), device, intent(out) :: kin(n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) call calc_kin(natom, atom(:,i), kin(i))
+end subroutine k_kin
+
+attributes(global) subroutine k_pot(n, natom, atom, pot)
+  integer(kind=i4), value :: n, natom
+  type(vec3), device, intent(in) :: atom(natom,n)
+  real(kind=r8), device, intent(out) :: pot(n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) call calc_pot(natom, atom(:,i), pot(i))
+end subroutine k_pot
+
+end module mtest_streams_sweep
+
+
+program test_streams_sweep
+ use mtest_streams_sweep
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ integer(kind=i4), parameter :: natom = 20
+ integer(kind=i4) :: n
+ type(vec3), allocatable :: atom_h(:,:)
+ type(vec3), device, allocatable :: atom_d(:,:)
+ real(kind=r8), device, allocatable :: kin_d(:), pot_d(:)
+ integer(kind=i4) :: iatom, iw, threads, blocks, istat
+ real(kind=r8) :: seed
+ integer(kind=cuda_stream_kind) :: stream_kin, stream_pot
+ character(len=32) :: arg
+
+  if (command_argument_count() >= 1) then
+    call get_command_argument(1, arg)
+    read(arg,*) n
+  else
+    n = 4000
+  endif
+
+  allocate(atom_h(natom,n), atom_d(natom,n), kin_d(n), pot_d(n))
+
+  do iw=1,n
+    do iatom=1,natom
+      seed = real(iw,r8)*0.37_r8 + real(iatom,r8)*1.91_r8
+      atom_h(iatom,iw)%comp(1) = sin(seed)*3.0_r8
+      atom_h(iatom,iw)%comp(2) = cos(seed*1.3_r8)*3.0_r8
+      atom_h(iatom,iw)%comp(3) = sin(seed*0.7_r8)*3.0_r8
+    enddo
+  enddo
+  atom_d = atom_h
+
+  threads = 32
+  blocks = (n + threads - 1) / threads
+
+  istat = cudaStreamCreateWithFlags(stream_kin, cudaStreamNonBlocking)
+  istat = cudaStreamCreateWithFlags(stream_pot, cudaStreamNonBlocking)
+
+  ! calentamiento
+  call k_kin<<<blocks,threads,0,stream_kin>>>(n, natom, atom_d, kin_d)
+  istat = cudaDeviceSynchronize()
+
+  write(*,'(a,i0,a,i0,a)') 'n=', n, ' blocks=', blocks, ' (32 hilos/bloque)'
+
+  call k_kin<<<blocks,threads,0,stream_kin>>>(n, natom, atom_d, kin_d)
+  call k_pot<<<blocks,threads,0,stream_pot>>>(n, natom, atom_d, pot_d)
+  istat = cudaStreamSynchronize(stream_kin)
+  istat = cudaStreamSynchronize(stream_pot)
+
+  deallocate(atom_h, atom_d, kin_d, pot_d)
+
+end program test_streams_sweep

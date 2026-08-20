@@ -1,0 +1,261 @@
+! test_pack_unpack.cuf
+!
+! Cuantifica, por separado, el coste de empaquetar/copiar/desempaquetar
+! cada uno de los 3 grupos de variables senalados en aos-to-soa.md:
+!   - "necesaria": atom+sprop+dwf+dphi+wf+kin+pot+ene (referencia, la
+!     que sin duda hace falta -- para comparar los otros 3 grupos
+!     contra algo real)
+!   - "hb2m_b": constantes fisicas, nunca se traen de vuelta (solo
+!     pack+H2D en el codigo real)
+!   - "wf_muertas": wfhe4/wfhe3/wfm/wfx, viaje completo (pack+H2D+D2H+
+!     unpack) pero ningun kernel del pipeline ni el CPU las lee (ver
+!     aos-to-soa.md, confirmado por grep -- solo un comentario)
+!   - "erot_eimp": SI hacen falta (las usa dmcsumapaso en CPU), pero
+!     solo en la vuelta -- se mide el pack+H2D (la parte candidata a
+!     quitar) por separado de D2H+unpack (la parte necesaria)
+!
+! wsim(:) es del tipo REAL walker/vec3 (mtipos.f90, sin modificar) para
+! que el bucle de empaquetado tenga el mismo patron de acceso AoS que
+! el codigo real -- no una reimplementacion con otra estructura.
+!
+! natom=21 (nhe4=20 + 1 impureza), nw=3000: mismos valores reales del
+! proyecto, misma escala donde se midio el 12% en fase2-medicion-mejoras.md.
+
+module mtest_pack
+ use mtipos, only: walker, vec3, allocatewalker
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: i8t = selected_int_kind(15)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+contains
+end module mtest_pack
+
+program test_pack_unpack
+ use mtest_pack
+ use cudafor
+ implicit none
+
+ integer(kind=i4), parameter :: nw = 3000
+ integer(kind=i4), parameter :: natom = 21
+ integer(kind=i4), parameter :: nrep = 200
+
+ type(walker), allocatable :: wsim(:)
+ integer(kind=i4) :: iw, ia, irep
+
+ ! ---- host: grupo "necesaria" ----
+ type(vec3), allocatable :: atom_h(:,:), dwf_h(:,:), sprop_h(:,:)
+ real(kind=r8), allocatable :: dphi_h(:,:), wf_h(:), kin_h(:), pot_h(:), ene_h(:)
+ ! ---- device: grupo "necesaria" ----
+ type(vec3), device, allocatable :: atom_d(:,:), dwf_d(:,:), sprop_d(:,:)
+ real(kind=r8), device, allocatable :: dphi_d(:,:), wf_d(:), kin_d(:), pot_d(:), ene_d(:)
+
+ ! ---- host+device: hb2m/b ----
+ real(kind=r8), allocatable :: hb2m_h(:,:), b_h(:)
+ real(kind=r8), device, allocatable :: hb2m_d(:,:), b_d(:)
+
+ ! ---- host+device: wfhe4/wfhe3/wfm/wfx (las "muertas") ----
+ real(kind=r8), allocatable :: wfhe4_h(:), wfhe3_h(:), wfm_h(:), wfx_h(:)
+ real(kind=r8), device, allocatable :: wfhe4_d(:), wfhe3_d(:), wfm_d(:), wfx_d(:)
+
+ ! ---- host+device: erot/eimp ----
+ real(kind=r8), allocatable :: erot_h(:), eimp_h(:)
+ real(kind=r8), device, allocatable :: erot_d(:), eimp_d(:)
+
+ integer(kind=i8t) :: c0, c1, tasa
+ real(kind=r8) :: t_pack_nec, t_h2d_nec, t_d2h_nec, t_unpack_nec
+ real(kind=r8) :: t_pack_hb2m, t_h2d_hb2m
+ real(kind=r8) :: t_pack_muertas, t_h2d_muertas, t_d2h_muertas, t_unpack_muertas
+ real(kind=r8) :: t_pack_eroteimp, t_h2d_eroteimp, t_d2h_eroteimp, t_unpack_eroteimp
+ real(kind=r8) :: seed
+
+  call system_clock(count_rate=tasa)
+
+  allocate(wsim(nw))
+  do iw=1,nw
+    call allocatewalker(wsim(iw), natom)
+    do ia=1,natom
+      seed = real(iw,r8)*0.37_r8 + real(ia,r8)*1.91_r8
+      wsim(iw)%atom(ia)%comp = [sin(seed), cos(seed*1.3_r8), sin(seed*0.7_r8)]
+      wsim(iw)%dwf(ia)%comp  = [cos(seed), sin(seed*1.1_r8), cos(seed*0.9_r8)]
+      wsim(iw)%hb2m(ia) = 24.25_r8
+    enddo
+    wsim(iw)%sprop(1)%comp = [1.0_r8,0.0_r8,0.0_r8]
+    wsim(iw)%sprop(2)%comp = [0.0_r8,1.0_r8,0.0_r8]
+    wsim(iw)%sprop(3)%comp = [0.0_r8,0.0_r8,1.0_r8]
+    wsim(iw)%b = 16.85_r8
+    wsim(iw)%dphi = [0.01_r8, 0.02_r8]
+    wsim(iw)%lw%wf = 1.234_r8
+    wsim(iw)%lw%wfhe4 = 1.1_r8; wsim(iw)%lw%wfhe3 = 1.2_r8
+    wsim(iw)%lw%wfm = 1.3_r8; wsim(iw)%lw%wfx = 1.4_r8
+    wsim(iw)%lw%kin = -100.0_r8; wsim(iw)%lw%pot = -200.0_r8; wsim(iw)%lw%ene = -300.0_r8
+    wsim(iw)%lw%erot = 5.0_r8; wsim(iw)%lw%eimp = 6.0_r8
+  enddo
+
+  allocate(atom_h(nw,natom), dwf_h(nw,natom), sprop_h(nw,3))
+  allocate(dphi_h(nw,2), wf_h(nw), kin_h(nw), pot_h(nw), ene_h(nw))
+  allocate(atom_d(nw,natom), dwf_d(nw,natom), sprop_d(nw,3))
+  allocate(dphi_d(nw,2), wf_d(nw), kin_d(nw), pot_d(nw), ene_d(nw))
+  allocate(hb2m_h(nw,natom), b_h(nw), hb2m_d(nw,natom), b_d(nw))
+  allocate(wfhe4_h(nw), wfhe3_h(nw), wfm_h(nw), wfx_h(nw))
+  allocate(wfhe4_d(nw), wfhe3_d(nw), wfm_d(nw), wfx_d(nw))
+  allocate(erot_h(nw), eimp_h(nw), erot_d(nw), eimp_d(nw))
+
+  t_pack_nec=0; t_h2d_nec=0; t_d2h_nec=0; t_unpack_nec=0
+  t_pack_hb2m=0; t_h2d_hb2m=0
+  t_pack_muertas=0; t_h2d_muertas=0; t_d2h_muertas=0; t_unpack_muertas=0
+  t_pack_eroteimp=0; t_h2d_eroteimp=0; t_d2h_eroteimp=0; t_unpack_eroteimp=0
+
+  do irep=1,nrep
+
+    ! ---- grupo NECESARIA: pack ----
+    call system_clock(c0)
+    do iw=1,nw
+      do ia=1,natom
+        atom_h(iw,ia)=wsim(iw)%atom(ia)
+        dwf_h(iw,ia)=wsim(iw)%dwf(ia)
+      enddo
+      sprop_h(iw,:)=wsim(iw)%sprop(:)
+      dphi_h(iw,:)=wsim(iw)%dphi
+      wf_h(iw)=wsim(iw)%lw%wf
+      kin_h(iw)=wsim(iw)%lw%kin
+      pot_h(iw)=wsim(iw)%lw%pot
+      ene_h(iw)=wsim(iw)%lw%ene
+    enddo
+    call system_clock(c1)
+    t_pack_nec=t_pack_nec+real(c1-c0,r8)/real(tasa,r8)
+
+    call system_clock(c0)
+    atom_d=atom_h; dwf_d=dwf_h; sprop_d=sprop_h; dphi_d=dphi_h
+    wf_d=wf_h; kin_d=kin_h; pot_d=pot_h; ene_d=ene_h
+    call system_clock(c1)
+    t_h2d_nec=t_h2d_nec+real(c1-c0,r8)/real(tasa,r8)
+
+    call system_clock(c0)
+    atom_h=atom_d; dwf_h=dwf_d; sprop_h=sprop_d; dphi_h=dphi_d
+    wf_h=wf_d; kin_h=kin_d; pot_h=pot_d; ene_h=ene_d
+    call system_clock(c1)
+    t_d2h_nec=t_d2h_nec+real(c1-c0,r8)/real(tasa,r8)
+
+    call system_clock(c0)
+    do iw=1,nw
+      do ia=1,natom
+        wsim(iw)%atom(ia)=atom_h(iw,ia)
+        wsim(iw)%dwf(ia)=dwf_h(iw,ia)
+      enddo
+      wsim(iw)%sprop(:)=sprop_h(iw,:)
+      wsim(iw)%dphi=dphi_h(iw,:)
+      wsim(iw)%lw%wf=wf_h(iw)
+      wsim(iw)%lw%kin=kin_h(iw)
+      wsim(iw)%lw%pot=pot_h(iw)
+      wsim(iw)%lw%ene=ene_h(iw)
+    enddo
+    call system_clock(c1)
+    t_unpack_nec=t_unpack_nec+real(c1-c0,r8)/real(tasa,r8)
+
+    ! ---- grupo hb2m/b: solo pack+H2D (igual que el codigo real) ----
+    call system_clock(c0)
+    do iw=1,nw
+      hb2m_h(iw,:)=wsim(iw)%hb2m(:)
+      b_h(iw)=wsim(iw)%b
+    enddo
+    call system_clock(c1)
+    t_pack_hb2m=t_pack_hb2m+real(c1-c0,r8)/real(tasa,r8)
+
+    call system_clock(c0)
+    hb2m_d=hb2m_h; b_d=b_h
+    call system_clock(c1)
+    t_h2d_hb2m=t_h2d_hb2m+real(c1-c0,r8)/real(tasa,r8)
+
+    ! ---- grupo wfhe4/wfhe3/wfm/wfx ("muertas"): viaje completo ----
+    call system_clock(c0)
+    do iw=1,nw
+      wfhe4_h(iw)=wsim(iw)%lw%wfhe4
+      wfhe3_h(iw)=wsim(iw)%lw%wfhe3
+      wfm_h(iw)=wsim(iw)%lw%wfm
+      wfx_h(iw)=wsim(iw)%lw%wfx
+    enddo
+    call system_clock(c1)
+    t_pack_muertas=t_pack_muertas+real(c1-c0,r8)/real(tasa,r8)
+
+    call system_clock(c0)
+    wfhe4_d=wfhe4_h; wfhe3_d=wfhe3_h; wfm_d=wfm_h; wfx_d=wfx_h
+    call system_clock(c1)
+    t_h2d_muertas=t_h2d_muertas+real(c1-c0,r8)/real(tasa,r8)
+
+    call system_clock(c0)
+    wfhe4_h=wfhe4_d; wfhe3_h=wfhe3_d; wfm_h=wfm_d; wfx_h=wfx_d
+    call system_clock(c1)
+    t_d2h_muertas=t_d2h_muertas+real(c1-c0,r8)/real(tasa,r8)
+
+    call system_clock(c0)
+    do iw=1,nw
+      wsim(iw)%lw%wfhe4=wfhe4_h(iw)
+      wsim(iw)%lw%wfhe3=wfhe3_h(iw)
+      wsim(iw)%lw%wfm=wfm_h(iw)
+      wsim(iw)%lw%wfx=wfx_h(iw)
+    enddo
+    call system_clock(c1)
+    t_unpack_muertas=t_unpack_muertas+real(c1-c0,r8)/real(tasa,r8)
+
+    ! ---- grupo erot/eimp: viaje completo, medido en 2 tramos ----
+    call system_clock(c0)
+    do iw=1,nw
+      erot_h(iw)=wsim(iw)%lw%erot
+      eimp_h(iw)=wsim(iw)%lw%eimp
+    enddo
+    call system_clock(c1)
+    t_pack_eroteimp=t_pack_eroteimp+real(c1-c0,r8)/real(tasa,r8)
+
+    call system_clock(c0)
+    erot_d=erot_h; eimp_d=eimp_h
+    call system_clock(c1)
+    t_h2d_eroteimp=t_h2d_eroteimp+real(c1-c0,r8)/real(tasa,r8)
+
+    call system_clock(c0)
+    erot_h=erot_d; eimp_h=eimp_d
+    call system_clock(c1)
+    t_d2h_eroteimp=t_d2h_eroteimp+real(c1-c0,r8)/real(tasa,r8)
+
+    call system_clock(c0)
+    do iw=1,nw
+      wsim(iw)%lw%erot=erot_h(iw)
+      wsim(iw)%lw%eimp=eimp_h(iw)
+    enddo
+    call system_clock(c1)
+    t_unpack_eroteimp=t_unpack_eroteimp+real(c1-c0,r8)/real(tasa,r8)
+
+  enddo
+
+  write(*,'(a,i0,a,i0,a,i0)') 'nw=', nw, ' natom=', natom, ' repeticiones=', nrep
+  write(*,*) '--- por repeticion (ms) ---'
+  write(*,'(a,f10.4)') 'necesaria   pack   = ', 1000.0_r8*t_pack_nec/nrep
+  write(*,'(a,f10.4)') 'necesaria   H2D    = ', 1000.0_r8*t_h2d_nec/nrep
+  write(*,'(a,f10.4)') 'necesaria   D2H    = ', 1000.0_r8*t_d2h_nec/nrep
+  write(*,'(a,f10.4)') 'necesaria   unpack = ', 1000.0_r8*t_unpack_nec/nrep
+  write(*,'(a,f10.4)') 'necesaria   TOTAL  = ', 1000.0_r8*(t_pack_nec+t_h2d_nec+t_d2h_nec+t_unpack_nec)/nrep
+  write(*,*)
+  write(*,'(a,f10.4)') 'hb2m+b      pack   = ', 1000.0_r8*t_pack_hb2m/nrep
+  write(*,'(a,f10.4)') 'hb2m+b      H2D    = ', 1000.0_r8*t_h2d_hb2m/nrep
+  write(*,'(a,f10.4)') 'hb2m+b      TOTAL  = ', 1000.0_r8*(t_pack_hb2m+t_h2d_hb2m)/nrep
+  write(*,*)
+  write(*,'(a,f10.4)') 'wf muertas  pack   = ', 1000.0_r8*t_pack_muertas/nrep
+  write(*,'(a,f10.4)') 'wf muertas  H2D    = ', 1000.0_r8*t_h2d_muertas/nrep
+  write(*,'(a,f10.4)') 'wf muertas  D2H    = ', 1000.0_r8*t_d2h_muertas/nrep
+  write(*,'(a,f10.4)') 'wf muertas  unpack = ', 1000.0_r8*t_unpack_muertas/nrep
+  write(*,'(a,f10.4)') 'wf muertas  TOTAL  = ', 1000.0_r8*(t_pack_muertas+t_h2d_muertas+t_d2h_muertas+t_unpack_muertas)/nrep
+  write(*,*)
+  write(*,'(a,f10.4)') 'erot+eimp   pack   = ', 1000.0_r8*t_pack_eroteimp/nrep
+  write(*,'(a,f10.4)') 'erot+eimp   H2D    = ', 1000.0_r8*t_h2d_eroteimp/nrep
+  write(*,'(a,f10.4)') 'erot+eimp   D2H    = ', 1000.0_r8*t_d2h_eroteimp/nrep
+  write(*,'(a,f10.4)') 'erot+eimp   unpack = ', 1000.0_r8*t_unpack_eroteimp/nrep
+  write(*,'(a,f10.4)') 'erot+eimp   TOTAL  = ', 1000.0_r8*(t_pack_eroteimp+t_h2d_eroteimp+t_d2h_eroteimp+t_unpack_eroteimp)/nrep
+  write(*,'(a,f10.4)') 'erot+eimp   quitable (pack+H2D) = ', 1000.0_r8*(t_pack_eroteimp+t_h2d_eroteimp)/nrep
+
+  write(*,*)
+  write(*,'(a,f10.4)') 'SUMA total (necesaria+hb2m+muertas+erot_eimp), ms/rep = ', &
+    1000.0_r8*(t_pack_nec+t_h2d_nec+t_d2h_nec+t_unpack_nec + t_pack_hb2m+t_h2d_hb2m + &
+    t_pack_muertas+t_h2d_muertas+t_d2h_muertas+t_unpack_muertas + &
+    t_pack_eroteimp+t_h2d_eroteimp+t_d2h_eroteimp+t_unpack_eroteimp)/nrep
+
+end program test_pack_unpack

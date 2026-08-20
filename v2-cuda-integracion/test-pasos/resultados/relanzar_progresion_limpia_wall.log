@@ -1,0 +1,21 @@
+=== op4_limpio_300pasos ===
+  wall=31.898942391s
+=== op7_limpio_300pasos ===
+  wall=16.203042727s
+=== op4_limpio_600pasos ===
+  wall=62.834836089s
+=== op7_limpio_600pasos ===
+  wall=29.741539211s
+=== op4_limpio_1200pasos ===
+  wall=121.546648075s
+=== op7_limpio_1200pasos ===
+  wall=55.104149570s
+=== op4_limpio_2500pasos ===
+  wall=247.883926538s
+=== op7_limpio_2500pasos ===
+  wall=113.451508594s
+=== op4_limpio_5000pasos ===
+  wall=490.728438558s
+=== op7_limpio_5000pasos ===
+  wall=214.730468579s
+=== TODO OK ===

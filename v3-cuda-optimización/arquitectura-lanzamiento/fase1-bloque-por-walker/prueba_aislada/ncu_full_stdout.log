@@ -1,0 +1,10 @@
+==PROF== Connected to process 9033 (/home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v3-cuda-optimización/fase1-bloque-por-walker/prueba_aislada/test_bloque_walker)
+==PROF== Profiling "mtest_bloque_walker_k_solo_": 0%....50%....100% - 42 passes
+==PROF== Profiling "mtest_bloque_walker_k_bloque_arbol_": 0%....50%....100% - 42 passes
+muestra kin_solo(1)   = 1.52064453299338538E+03
+muestra kin_bloque(1) = 1.52064453299338538E+03
+muestra kin_arbol(1)  = 1.52064453299338538E+03
+n walkers = 1500
+ PASA: _solo, _bloque y _arbol dan los mismos resultados (arbol con tolerancia numerica)
+==PROF== Disconnected from process 9033
+==PROF== Report: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v3-cuda-optimización/fase1-bloque-por-walker/prueba_aislada/ncu_full_calibrado.ncu-rep

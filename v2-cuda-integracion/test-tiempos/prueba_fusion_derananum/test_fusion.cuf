@@ -1,0 +1,182 @@
+! test_fusion.cuf
+!
+! Prueba aislada: reproduce el patron exacto de derananum_mod.cuf ->
+! der_wavefhe4_mod.cuf (una variable LOCAL, de un solo walker, que se
+! pasa como argumento a una subrutina APARTE) y lo compara contra la
+! MISMA logica, pero con el codigo de esa subrutina pegado a mano
+! dentro de quien la llama (sin ninguna llamada de funcion real de por
+! medio). Ver tiempo-ncu-resultado.md Parte 4.
+!
+! Hipotesis a comprobar: al cruzar la llamada de funcion real,
+! "der_wavefhe4" recibe la variable local como una direccion generica
+! (no sabe que es local) y usa instrucciones mas lentas -- si eso es
+! cierto, la version fusionada (sin llamada de por medio) deberia salir
+! con Address Space=Local (no Global) y con menos sectores excedentes
+! en el mismo informe de ncu, dando el MISMO resultado numerico.
+
+module mtest_fusion
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ type :: vec3
+   real(kind=r8) :: comp(3)
+ end type vec3
+
+contains
+
+! =====================================================================
+! ---- version SEPARADA: exactamente el patron real -- una subrutina
+! aparte (como derwavefhe4) que recibe d1wf/d2wf como argumentos,
+! llamada desde otra subrutina (como derananum) que los declaro locales
+! justo antes de llamarla ----
+! =====================================================================
+ attributes(host, device) subroutine fisica_separada(natom, atom_l, d1wf_l, d2wf_l)
+  integer(kind=i4), value :: natom
+  type(vec3), intent(in)  :: atom_l(natom)
+  type(vec3), intent(out) :: d1wf_l(natom)
+  real(kind=r8), intent(out) :: d2wf_l(natom)
+  type(vec3) :: rtemp
+  real(kind=r8) :: rij, ujasp, ujass
+  integer(kind=i4) :: iatom, jatom
+
+   do iatom=1,natom
+     d1wf_l(iatom)%comp = 0.0_r8
+     d2wf_l(iatom) = 0.0_r8
+   enddo
+
+   do iatom=1,natom-1
+     do jatom=iatom+1,natom
+       rtemp%comp = atom_l(iatom)%comp - atom_l(jatom)%comp
+       rij = sqrt(rtemp%comp(1)**2+rtemp%comp(2)**2+rtemp%comp(3)**2)
+       ujasp = exp(-rij) / (rij + 1.0_r8)
+       ujass = ujasp * ujasp
+       d1wf_l(iatom)%comp = d1wf_l(iatom)%comp + ujasp*rtemp%comp
+       d1wf_l(jatom)%comp = d1wf_l(jatom)%comp - ujasp*rtemp%comp
+       d2wf_l(iatom) = d2wf_l(iatom) + ujass
+       d2wf_l(jatom) = d2wf_l(jatom) + ujass
+     enddo
+   enddo
+ end subroutine fisica_separada
+
+! "derananum de juguete": declara d1wf_sep/d2wf_sep LOCALES (como
+! d1wfhe4 real) y llama a fisica_separada -- funcion real aparte.
+ attributes(global) subroutine k_separado(n, natom, atom, dwf_out)
+  integer(kind=i4), value :: n, natom
+  type(vec3), device, intent(in)  :: atom(n,natom)
+  type(vec3), device, intent(out) :: dwf_out(n,natom)
+  type(vec3) :: atom_l(64), d1wf_sep(64)
+  real(kind=r8) :: d2wf_sep(64)
+  integer(kind=i4) :: i, iatom
+
+  i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+  if (i<=n) then
+    do iatom=1,natom
+      atom_l(iatom) = atom(i,iatom)
+    enddo
+    call fisica_separada(natom, atom_l(1:natom), d1wf_sep(1:natom), d2wf_sep(1:natom))
+    do iatom=1,natom
+      dwf_out(i,iatom) = d1wf_sep(iatom)
+    enddo
+  endif
+ end subroutine k_separado
+
+! =====================================================================
+! ---- version FUSIONADA: el mismo codigo de fisica_separada, pero
+! pegado a mano aqui dentro -- sin ninguna llamada de funcion real ----
+! =====================================================================
+ attributes(global) subroutine k_fusionado(n, natom, atom, dwf_out)
+  integer(kind=i4), value :: n, natom
+  type(vec3), device, intent(in)  :: atom(n,natom)
+  type(vec3), device, intent(out) :: dwf_out(n,natom)
+  type(vec3) :: atom_l(64), d1wf_fus(64)
+  real(kind=r8) :: d2wf_fus(64)
+  type(vec3) :: rtemp
+  real(kind=r8) :: rij, ujasp, ujass
+  integer(kind=i4) :: i, iatom, jatom
+
+  i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+  if (i<=n) then
+    do iatom=1,natom
+      atom_l(iatom) = atom(i,iatom)
+    enddo
+
+    ! ---- codigo de fisica_separada, pegado aqui mismo ----
+    do iatom=1,natom
+      d1wf_fus(iatom)%comp = 0.0_r8
+      d2wf_fus(iatom) = 0.0_r8
+    enddo
+    do iatom=1,natom-1
+      do jatom=iatom+1,natom
+        rtemp%comp = atom_l(iatom)%comp - atom_l(jatom)%comp
+        rij = sqrt(rtemp%comp(1)**2+rtemp%comp(2)**2+rtemp%comp(3)**2)
+        ujasp = exp(-rij) / (rij + 1.0_r8)
+        ujass = ujasp * ujasp
+        d1wf_fus(iatom)%comp = d1wf_fus(iatom)%comp + ujasp*rtemp%comp
+        d1wf_fus(jatom)%comp = d1wf_fus(jatom)%comp - ujasp*rtemp%comp
+        d2wf_fus(iatom) = d2wf_fus(iatom) + ujass
+        d2wf_fus(jatom) = d2wf_fus(jatom) + ujass
+      enddo
+    enddo
+    ! ---- fin del codigo pegado ----
+
+    do iatom=1,natom
+      dwf_out(i,iatom) = d1wf_fus(iatom)
+    enddo
+  endif
+ end subroutine k_fusionado
+
+end module mtest_fusion
+
+
+program test_fusion
+ use mtest_fusion
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ integer(kind=i4), parameter :: natom = 22, n = 50
+ type(vec3) :: atom_h(n,natom), dwf_sep(n,natom), dwf_fus(n,natom)
+ type(vec3), device :: atom_d(n,natom), dwf_sep_d(n,natom), dwf_fus_d(n,natom)
+ integer(kind=i4) :: iatom, iw, threads, blocks
+ logical :: todo_ok
+ real(kind=r8) :: seed
+
+  do iw=1,n
+    do iatom=1,natom
+      seed = real(iw,r8)*0.37_r8 + real(iatom,r8)*1.91_r8
+      atom_h(iw,iatom)%comp(1) = sin(seed)*3.0_r8
+      atom_h(iw,iatom)%comp(2) = cos(seed*1.3_r8)*3.0_r8
+      atom_h(iw,iatom)%comp(3) = sin(seed*0.7_r8)*3.0_r8
+    enddo
+  enddo
+  atom_d = atom_h
+
+  threads = 32
+  blocks = (n + threads - 1) / threads
+  call k_separado<<<blocks,threads>>>(n, natom, atom_d, dwf_sep_d)
+  call k_fusionado<<<blocks,threads>>>(n, natom, atom_d, dwf_fus_d)
+
+  dwf_sep = dwf_sep_d
+  dwf_fus = dwf_fus_d
+
+  todo_ok = .true.
+  do iw=1,n
+    do iatom=1,natom
+      if (any(dwf_sep(iw,iatom)%comp /= dwf_fus(iw,iatom)%comp)) then
+        write(*,'(a,i0,a,i0)') 'DIFERENCIA en walker ', iw, ' atomo ', iatom
+        todo_ok = .false.
+      endif
+    enddo
+  enddo
+
+  write(*,'(a,es24.17)') 'muestra separado  (1,1)%comp(1) =', dwf_sep(1,1)%comp(1)
+  write(*,'(a,es24.17)') 'muestra fusionado (1,1)%comp(1) =', dwf_fus(1,1)%comp(1)
+
+  if (todo_ok) then
+    write(*,*) 'PASA: fusionado da EXACTAMENTE el mismo resultado que separado'
+  else
+    write(*,*) 'FALLA: hay diferencias, ver arriba'
+  endif
+
+end program test_fusion

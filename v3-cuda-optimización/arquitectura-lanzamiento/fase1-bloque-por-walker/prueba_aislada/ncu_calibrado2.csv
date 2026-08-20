@@ -1,0 +1,20 @@
+==PROF== Connected to process 8871 (/home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v3-cuda-optimización/fase1-bloque-por-walker/prueba_aislada/test_bloque_walker)
+muestra kin_solo(1)   = 1.52064453299338538E+03
+muestra kin_bloque(1) = 1.52064453299338538E+03
+muestra kin_arbol(1)  = 1.52064453299338538E+03
+n walkers = 1500
+ PASA: _solo, _bloque y _arbol dan los mismos resultados (arbol con tolerancia numerica)
+==PROF== Disconnected from process 8871
+"ID","Process ID","Process Name","Host Name","Kernel Name","Context","Stream","Block Size","Grid Size","Device","CC","Section Name","Metric Name","Metric Unit","Metric Value"
+"0","8871","test_bloque_walker","127.0.0.1","mtest_bloque_walker_k_solo_","1","7","(32, 1, 1)","(47, 1, 1)","0","8.9","Command line profiler metrics","gpu__time_duration.sum","nsecond","14.099.456"
+"0","8871","test_bloque_walker","127.0.0.1","mtest_bloque_walker_k_solo_","1","7","(32, 1, 1)","(47, 1, 1)","0","8.9","Command line profiler metrics","launch__grid_size","","47"
+"0","8871","test_bloque_walker","127.0.0.1","mtest_bloque_walker_k_solo_","1","7","(32, 1, 1)","(47, 1, 1)","0","8.9","Command line profiler metrics","launch__registers_per_thread","register/thread","60"
+"0","8871","test_bloque_walker","127.0.0.1","mtest_bloque_walker_k_solo_","1","7","(32, 1, 1)","(47, 1, 1)","0","8.9","Command line profiler metrics","launch__waves_per_multiprocessor","","0,08"
+"0","8871","test_bloque_walker","127.0.0.1","mtest_bloque_walker_k_solo_","1","7","(32, 1, 1)","(47, 1, 1)","0","8.9","Command line profiler metrics","sm__throughput.avg.pct_of_peak_sustained_elapsed","%","66,80"
+"0","8871","test_bloque_walker","127.0.0.1","mtest_bloque_walker_k_solo_","1","7","(32, 1, 1)","(47, 1, 1)","0","8.9","Command line profiler metrics","sm__warps_active.avg.pct_of_peak_sustained_active","%","4,09"
+"1","8871","test_bloque_walker","127.0.0.1","mtest_bloque_walker_k_bloque_arbol_","1","7","(32, 1, 1)","(1500, 1, 1)","0","8.9","Command line profiler metrics","gpu__time_duration.sum","nsecond","16.942.880"
+"1","8871","test_bloque_walker","127.0.0.1","mtest_bloque_walker_k_bloque_arbol_","1","7","(32, 1, 1)","(1500, 1, 1)","0","8.9","Command line profiler metrics","launch__grid_size","","1.500"
+"1","8871","test_bloque_walker","127.0.0.1","mtest_bloque_walker_k_bloque_arbol_","1","7","(32, 1, 1)","(1500, 1, 1)","0","8.9","Command line profiler metrics","launch__registers_per_thread","register/thread","52"
+"1","8871","test_bloque_walker","127.0.0.1","mtest_bloque_walker_k_bloque_arbol_","1","7","(32, 1, 1)","(1500, 1, 1)","0","8.9","Command line profiler metrics","launch__waves_per_multiprocessor","","2,60"
+"1","8871","test_bloque_walker","127.0.0.1","mtest_bloque_walker_k_bloque_arbol_","1","7","(32, 1, 1)","(1500, 1, 1)","0","8.9","Command line profiler metrics","sm__throughput.avg.pct_of_peak_sustained_elapsed","%","83,80"
+"1","8871","test_bloque_walker","127.0.0.1","mtest_bloque_walker_k_bloque_arbol_","1","7","(32, 1, 1)","(1500, 1, 1)","0","8.9","Command line profiler metrics","sm__warps_active.avg.pct_of_peak_sustained_active","%","45,54"
