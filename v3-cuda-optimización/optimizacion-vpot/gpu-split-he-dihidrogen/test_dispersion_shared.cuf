@@ -1,0 +1,38 @@
+! v3-cuda-optimizacion/optimizacion-vpot/split-he-dihidrogen: driver
+! minimo para lanzar k_test_dispersion / k_test_dispersion_shared y medir
+! registros con ncu, sin tocar la cadena real de produccion (He_dihydrogen/
+! potenbh/vpot/hpsi/dmc2). Valores de theta/rnorm arbitrarios pero validos
+! (rnorm>0 para mypow_log, theta cualquier real) -- no hace falta que sean
+! fisicamente representativos, solo que no crasheen: el objetivo es medir
+! registros, no verificar fisica.
+program test_dispersion_shared
+use mterminodispersion, only: k_test_dispersion, k_test_dispersion_shared
+use cudafor
+implicit none
+integer, parameter :: n = 32
+double precision, device :: theta_d(n), rnorm_d(n)
+double precision, device :: eterm1_d(n), eterm2_d(n)
+double precision :: theta_h(n), rnorm_h(n)
+double precision :: eterm1_h(n), eterm2_h(n)
+integer :: i, istat
+
+do i = 1, n
+  theta_h(i) = 0.3d0 + 0.01d0*i
+  rnorm_h(i) = 2.0d0 + 0.05d0*i
+end do
+theta_d = theta_h
+rnorm_d = rnorm_h
+
+call k_test_dispersion<<<1,n>>>(n, theta_d, rnorm_d, eterm1_d, eterm2_d)
+istat = cudaDeviceSynchronize()
+eterm1_h = eterm1_d
+eterm2_h = eterm2_d
+print *, 'normal: eterm1(1)=', eterm1_h(1), ' eterm2(1)=', eterm2_h(1)
+
+call k_test_dispersion_shared<<<1,n>>>(n, theta_d, rnorm_d, eterm1_d, eterm2_d)
+istat = cudaDeviceSynchronize()
+eterm1_h = eterm1_d
+eterm2_h = eterm2_d
+print *, 'shared: eterm1(1)=', eterm1_h(1), ' eterm2(1)=', eterm2_h(1)
+
+end program test_dispersion_shared

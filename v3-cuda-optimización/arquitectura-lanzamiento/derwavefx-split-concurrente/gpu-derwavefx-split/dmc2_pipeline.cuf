@@ -46,24 +46,18 @@ module mdmc2_pipeline
  use mrandgpu, only: gauss3_gpu, rand1_gpu
  use der_wavefx, only: natom, nhe3
  use mderananum, only: rotamol, derananum
- use mderananum_split, only: k_derananum_he4_t, k_derananum_resto_t, k_derananum_join_t
- use mvpot, only: vpot, opot
+ use mderananum_split, only: k_derananum_he4_t, k_derananum_resto_t, k_derananum_join_t, k_derananum_derwavefx_t
+ use mvpot, only: vpot
  use mdmc2, only: ratio, ncmtras, dtau, etrial
  use mcuda_globals, only: nhe4, ngatom, impureza
  use d_uhex4, only: impurmol
  use mccuerpo, only: ccuerpo
- use mHe_dihydrogen, only: He_dihydrogen_hehe, He_dihydrogen_dispersion, &
-                            He_dihydrogen_induccion
- use mpotenbh, only: dhcm
  use glibc_exp_mod, only: myexp
 
  implicit none
  integer, private, parameter :: i4 = selected_int_kind(9)
  integer, private, parameter :: i8 = selected_int_kind(15)
  integer, private, parameter :: r8 = selected_real_kind(15,9)
- ! natms (cota maxima de atomos de He, para rhe en k_vpot_3warp_t) --
- ! mismo INCLUDE que ya usa mvpot para lo mismo.
- include 'param_atoms_bh_freeform.h'
 
  ! ---- Fase H (v3-cuda-optimizacion/fase3): constantes del histograma,
  ! MISMOS valores que mdensidades.f90 (son parametros fijos del
@@ -79,14 +73,6 @@ module mdmc2_pipeline
  real(kind=r8), private, parameter :: smax_h=6.0_r8
  integer(kind=i4), private, parameter :: nhs_h=60
  real(kind=r8), private, parameter :: dhs_h=smax_h/nhs_h
- ! PRUEBA v3-cuda-optimizacion/mapa-sfu: dhr_h/dhc_h/dhs_h son
- ! constantes de toda la simulacion (parameter) -- su reciproco
- ! tambien se puede calcular en compilacion, coste de ejecucion cero.
- ! Sustituye division por constante (recalculada en runtime en cada
- ! par de atomos, confirmado en SASS) por multiplicacion.
- real(kind=r8), private, parameter :: inv_dhr_h=1.0_r8/dhr_h
- real(kind=r8), private, parameter :: inv_dhc_h=1.0_r8/dhc_h
- real(kind=r8), private, parameter :: inv_dhs_h=1.0_r8/dhs_h
 
  ! ---- histogramas de device, persistentes (acumulan TODO un bloque de
  ! pasos DMC, igual que drb44 etc en mdensidades.f90 -- se ponen a cero
@@ -139,9 +125,11 @@ module mdmc2_pipeline
 
  integer(kind=i4), save :: nmax_g = 0
  logical, save :: grafo_listo = .false.
- integer(kind=cuda_stream_kind), save :: stream_a, stream_b, stream_c
+ integer(kind=cuda_stream_kind), save :: stream_a, stream_b, stream_c, stream_d
  type(cudaEvent), save :: ev_fork1, ev_join1, ev_fork2, ev_join2
  type(cudaEvent), save :: ev_resto1, ev_resto2
+ ! v3-cuda-optimizacion/arquitectura-lanzamiento/derwavefx-split-concurrente: PRUEBA
+ type(cudaEvent), save :: ev_dwfx1, ev_dwfx2
  type(cudaGraph), save :: pipeline_graph
  type(cudaGraphExec), save :: pipeline_graph_exec
 
@@ -156,10 +144,6 @@ contains
 attributes(host) subroutine inicializa_pipeline(nmax)
   integer(kind=i4), intent(in) :: nmax
   integer(kind=i4) :: threads, blocks, istat
-  ! k_vpot_3warp_t: bloque de 96 hilos = 32 walkers/bloque (3 hilos por
-  ! walker, uno por warp -- v3-cuda-optimizacion/optimizacion-vpot/
-  ! split-he-dihidrogen.md, Intento 8).
-  integer(kind=i4) :: threads_vpot, blocks_vpot
 
    if (grafo_listo) return
    nmax_g = nmax
@@ -211,36 +195,41 @@ attributes(host) subroutine inicializa_pipeline(nmax)
    istat = cudaStreamCreateWithFlags(stream_a, cudaStreamNonBlocking)
    istat = cudaStreamCreateWithFlags(stream_b, cudaStreamNonBlocking)
    istat = cudaStreamCreateWithFlags(stream_c, cudaStreamNonBlocking)
+   istat = cudaStreamCreateWithFlags(stream_d, cudaStreamNonBlocking)
    istat = cudaEventCreateWithFlags(ev_fork1, cudaEventDisableTiming)
    istat = cudaEventCreateWithFlags(ev_join1, cudaEventDisableTiming)
    istat = cudaEventCreateWithFlags(ev_fork2, cudaEventDisableTiming)
    istat = cudaEventCreateWithFlags(ev_join2, cudaEventDisableTiming)
    istat = cudaEventCreateWithFlags(ev_resto1, cudaEventDisableTiming)
    istat = cudaEventCreateWithFlags(ev_resto2, cudaEventDisableTiming)
+   istat = cudaEventCreateWithFlags(ev_dwfx1, cudaEventDisableTiming)
+   istat = cudaEventCreateWithFlags(ev_dwfx2, cudaEventDisableTiming)
 
    threads = 32
    blocks = (nmax + threads - 1) / threads
-
-   threads_vpot = 96
-   blocks_vpot = (nmax + 32 - 1) / 32
 
    istat = cudaStreamBeginCapture(stream_a, cudaStreamCaptureModeGlobal)
 
    call k_fase_a<<<blocks,threads,0,stream_a>>>(nmax, atom_p, sprop_p, hb2m_p, b_p, &
                   dwf_p, dphi_p, wf_p, ene_p, eold_p, wfold_p, irn_p, nsons_p)
 
-   ! horquilla 1 (fase B = 1a hpsi): He4 (stream_a) + resto (stream_c) +
-   ! vpot_t (stream_b) en paralelo, cierre de derananum en stream_a.
+   ! horquilla 1 (fase B = 1a hpsi): He4 (stream_a) + resto SIN derwavefx
+   ! (stream_c) + derwavefx (stream_d) + vpot_t (stream_b) en paralelo,
+   ! cierre de derananum en stream_a espera a resto Y derwavefx.
    istat = cudaEventRecord(ev_fork1, stream_a)
    istat = cudaStreamWaitEvent(stream_b, ev_fork1, 0)
    istat = cudaStreamWaitEvent(stream_c, ev_fork1, 0)
+   istat = cudaStreamWaitEvent(stream_d, ev_fork1, 0)
    call k_derananum_he4_t<<<blocks,threads,0,stream_a>>>(nmax, nw_actual, atom_p, wfhe4_s, d1wfhe4_s, d2wfhe4_s)
    call k_derananum_resto_t<<<blocks,threads,0,stream_c>>>(nmax, nw_actual, atom_p, sprop_p, &
-                  wfhe3_s, wfm_s, wfx_s, d1wfm_s, d2wfm_s, &
-                  d1wfx_s, d2wfx_s, d1zwfx_s, d2zwfx_s, d1wfhe3_s, d2wfhe3_s)
-   call k_vpot_3warp_t<<<blocks_vpot,threads_vpot,0,stream_b>>>(nmax, atom_p, sprop_p, pot_p)
+                  wfhe3_s, wfm_s, wfx_s, d1wfm_s, d2wfm_s, d1wfhe3_s, d2wfhe3_s)
+   call k_derananum_derwavefx_t<<<blocks,threads,0,stream_d>>>(nmax, nw_actual, atom_p, sprop_p, &
+                  d1wfx_s, d2wfx_s, d1zwfx_s, d2zwfx_s)
+   call k_vpot_t<<<blocks,threads,0,stream_b>>>(nmax, atom_p, sprop_p, pot_p)
    istat = cudaEventRecord(ev_resto1, stream_c)
+   istat = cudaEventRecord(ev_dwfx1, stream_d)
    istat = cudaStreamWaitEvent(stream_a, ev_resto1, 0)
+   istat = cudaStreamWaitEvent(stream_a, ev_dwfx1, 0)
    call k_derananum_join_t<<<blocks,threads,0,stream_a>>>(nmax, nw_actual, hb2m_p, b_p, &
                   wfhe4_s, d1wfhe4_s, d2wfhe4_s, &
                   wfhe3_s, wfm_s, wfx_s, d1wfm_s, d2wfm_s, &
@@ -258,13 +247,17 @@ attributes(host) subroutine inicializa_pipeline(nmax)
    istat = cudaEventRecord(ev_fork2, stream_a)
    istat = cudaStreamWaitEvent(stream_b, ev_fork2, 0)
    istat = cudaStreamWaitEvent(stream_c, ev_fork2, 0)
+   istat = cudaStreamWaitEvent(stream_d, ev_fork2, 0)
    call k_derananum_he4_t<<<blocks,threads,0,stream_a>>>(nmax, nw_actual, atom_p, wfhe4_s, d1wfhe4_s, d2wfhe4_s)
    call k_derananum_resto_t<<<blocks,threads,0,stream_c>>>(nmax, nw_actual, atom_p, sprop_p, &
-                  wfhe3_s, wfm_s, wfx_s, d1wfm_s, d2wfm_s, &
-                  d1wfx_s, d2wfx_s, d1zwfx_s, d2zwfx_s, d1wfhe3_s, d2wfhe3_s)
-   call k_vpot_3warp_t<<<blocks_vpot,threads_vpot,0,stream_b>>>(nmax, atom_p, sprop_p, pot_p)
+                  wfhe3_s, wfm_s, wfx_s, d1wfm_s, d2wfm_s, d1wfhe3_s, d2wfhe3_s)
+   call k_derananum_derwavefx_t<<<blocks,threads,0,stream_d>>>(nmax, nw_actual, atom_p, sprop_p, &
+                  d1wfx_s, d2wfx_s, d1zwfx_s, d2zwfx_s)
+   call k_vpot_t<<<blocks,threads,0,stream_b>>>(nmax, atom_p, sprop_p, pot_p)
    istat = cudaEventRecord(ev_resto2, stream_c)
+   istat = cudaEventRecord(ev_dwfx2, stream_d)
    istat = cudaStreamWaitEvent(stream_a, ev_resto2, 0)
+   istat = cudaStreamWaitEvent(stream_a, ev_dwfx2, 0)
    call k_derananum_join_t<<<blocks,threads,0,stream_a>>>(nmax, nw_actual, hb2m_p, b_p, &
                   wfhe4_s, d1wfhe4_s, d2wfhe4_s, &
                   wfhe3_s, wfm_s, wfx_s, d1wfm_s, d2wfm_s, &
@@ -486,81 +479,6 @@ attributes(global) subroutine k_vpot_t(nmax, atom, sprop, pot)
    endif
 end subroutine k_vpot_t
 
-! ---- k_vpot_3warp_t: v3-cuda-optimizacion/optimizacion-vpot/
-! split-he-dihidrogen.md, Intento 8 -- bloque de 96 hilos (3 warps) en
-! vez de 32 (1 walker/hilo): warp 0 calcula el bucle He4-He4
-! (He_dihydrogen_hehe), warp 1 el bloque de dispersion
-! (He_dihydrogen_dispersion) y warp 2 el de induccion
-! (He_dihydrogen_induccion) -- dispersion e induccion estaban
-! fusionadas en la He_dihydrogen original (comparten rvec/rnorm/onorm/
-! theta/cos2/cos4/cos6/btheta); separarlas en warps propios duplica ese
-! preambulo, pero el hueco de ocupacion libre que deja el Intento 7 lo
-! compensa con creces. Los 3 warps calculan para los MISMOS 32 walkers
-! del bloque, combinando por memoria compartida tras syncthreads().
-! Verificado bit a bit contra k_vpot_t en las 5 escalas de walkers
-! probadas (500-3000, diferencia maxima 0.0 exacta), ~46-52% mas rapido
-! que k_vpot_t y ~16-35% mas rapido que k_vpot_2warp_t (Intento 7) en
-! tiempo real medido aislado. k_vpot_t se deja sin tocar, como
-! referencia (mismo criterio que derananum_mod.cuf junto a
-! derananum_split_mod.cuf).
-attributes(global) subroutine k_vpot_3warp_t(nmax, atom, sprop, pot)
-  integer(kind=i4), value :: nmax
-  type(vec3), device, intent (in) :: atom(nmax,natom)
-  type(vec3), device, intent (in) :: sprop(nmax,3)
-  real(kind=r8), device, intent (out) :: pot(nmax)
-
-  real(kind=r8), shared :: hehe_s(32), disp_s(32), ind_s(32)
-  type(vec3) :: atom_l(64), sprop_l(3)
-  real(kind=r8) :: rhe(3*natms)
-  real(kind=r8) :: energy1, energy2, energy3
-  real(kind=r8) :: r_dih(3,2), orHH(3,1)
-  integer(kind=i4) :: tid, warp_id, lane, i, iatom
-
-   tid = threadIdx%x
-   warp_id = (tid-1) / 32
-   lane = mod(tid-1, 32) + 1
-   i = (blockIdx%x-1)*32 + lane
-
-   if (i <= nw_actual) then
-     do iatom = 1, natom
-       atom_l(iatom) = atom(i,iatom)
-     enddo
-     sprop_l(1) = sprop(i,1)
-     sprop_l(2) = sprop(i,2)
-     sprop_l(3) = sprop(i,3)
-
-     if (opot == 4) then
-       call ccuerpo(atom_l(1:natom), sprop_l, rhe(1:3*ngatom))
-
-       if (warp_id == 0) then
-         call He_dihydrogen_hehe(ngatom, rhe(1:3*ngatom), energy1)
-         hehe_s(lane) = energy1
-       else if (warp_id == 1) then
-         orHH = 0.0_r8
-         orHH(3,1) = -2.0_r8*dhcm
-         call He_dihydrogen_dispersion(ngatom, orHH, &
-                                        rhe(1:3*ngatom), energy2)
-         disp_s(lane) = energy2
-       else
-         r_dih = 0.0_r8
-         r_dih(3,1) =  dhcm
-         r_dih(3,2) = -dhcm
-         orHH = 0.0_r8
-         orHH(3,1) = -2.0_r8*dhcm
-         call He_dihydrogen_induccion(ngatom, r_dih, orHH, &
-                                       rhe(1:3*ngatom), energy3)
-         ind_s(lane) = energy3
-       endif
-     endif
-   endif
-
-   call syncthreads()
-
-   if (warp_id == 0 .and. i <= nw_actual) then
-     pot(i) = hehe_s(lane) + disp_s(lane) + ind_s(lane)
-   endif
-end subroutine k_vpot_3warp_t
-
 ! =====================================================================
 ! ---- Fase C: dmc2.cuf:114-115 -- wftest tras la 1a hpsi, decide la
 ! bandera activo. Tambien combina ene=kin+pot (dmc2.cuf no lo hace
@@ -712,7 +630,7 @@ attributes(global) subroutine k_fase_h(nmax, atom, sprop, nsons, &
 
   type(vec3) :: atom_l(64), sprop_l(3), rtemp
   real(kind=r8) :: rhe(3*64)
-  real(kind=r8) :: rij, cth, sth, dnor, inv_dnor, cval, sval, w, dummy
+  real(kind=r8) :: rij, cth, sth, dnor, cval, sval, w, dummy
   integer(kind=i4) :: i, iatom, jatom, izatom, ihr, ihc, ihs
 
    i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
@@ -729,25 +647,25 @@ attributes(global) subroutine k_fase_h(nmax, atom, sprop, nsons, &
          do jatom=iatom+1,nhe4
            rtemp%comp = atom_l(iatom)%comp - atom_l(jatom)%comp
            rij = sqrt(dot_product(rtemp%comp,rtemp%comp))
-           ihr = int(rij*inv_dhr_h)+1; ihr = min(ihr,nhr_h)
+           ihr = int(rij/dhr_h)+1; ihr = min(ihr,nhr_h)
            dummy = atomicadd(h44(ihr), w)
          enddo
        enddo
 
-       do iatom=nhe4+1,nhe4+nhe3
-         do jatom=iatom+1,nhe4+nhe3
+       do iatom=nhe4+1,ngatom
+         do jatom=iatom+1,ngatom
            rtemp%comp = atom_l(iatom)%comp - atom_l(jatom)%comp
            rij = sqrt(dot_product(rtemp%comp,rtemp%comp))
-           ihr = int(rij*inv_dhr_h)+1; ihr = min(ihr,nhr_h)
+           ihr = int(rij/dhr_h)+1; ihr = min(ihr,nhr_h)
            dummy = atomicadd(h33(ihr), w)
          enddo
        enddo
 
        do iatom=1,nhe4
-         do jatom=nhe4+1,nhe4+nhe3
+         do jatom=nhe4+1,ngatom
            rtemp%comp = atom_l(iatom)%comp - atom_l(jatom)%comp
            rij = sqrt(dot_product(rtemp%comp,rtemp%comp))
-           ihr = int(rij*inv_dhr_h)+1; ihr = min(ihr,nhr_h)
+           ihr = int(rij/dhr_h)+1; ihr = min(ihr,nhr_h)
            dummy = atomicadd(h43(ihr), w)
          enddo
        enddo
@@ -755,7 +673,6 @@ attributes(global) subroutine k_fase_h(nmax, atom, sprop, nsons, &
        if (impureza) then
          if (impurmol) then
            dnor = sqrt(dot_product(sprop_l(3)%comp, sprop_l(3)%comp))
-           inv_dnor = 1.0_r8/dnor
            call ccuerpo(atom_l(1:natom), sprop_l, rhe(1:3*ngatom))
            izatom = 3
          endif
@@ -763,22 +680,22 @@ attributes(global) subroutine k_fase_h(nmax, atom, sprop, nsons, &
          do iatom=1,nhe4
            rtemp%comp = atom_l(iatom)%comp - atom_l(natom)%comp
            rij = sqrt(dot_product(rtemp%comp,rtemp%comp))
-           ihr = int(rij*inv_dhr_h)+1; ihr = min(ihr,nhr_h)
+           ihr = int(rij/dhr_h)+1; ihr = min(ihr,nhr_h)
            dummy = atomicadd(hi4(ihr), w)
            dummy = atomicadd(hia(ihr), w)
            if (impurmol) then
-             cval = dot_product(rtemp%comp, sprop_l(3)%comp)*inv_dnor
+             cval = dot_product(rtemp%comp, sprop_l(3)%comp)/dnor
              cth = cval/rij; sth = sqrt(1.0_r8-cth**2); sval = rij*sth
              if (cval.gt.0.0_r8) then
-               ihc = int(cval*inv_dhc_h)+1; ihc = min(ihc,nhc_h)
+               ihc = int(cval/dhc_h)+1; ihc = min(ihc,nhc_h)
              else
-               ihc = int(cval*inv_dhc_h)-1; ihc = max(ihc,-nhc_h)
+               ihc = int(cval/dhc_h)-1; ihc = max(ihc,-nhc_h)
              endif
-             ihs = int(sval*inv_dhs_h)+1; ihs = min(ihs,nhs_h)
+             ihs = int(sval/dhs_h)+1; ihs = min(ihs,nhs_h)
              dummy = atomicadd(hbhe4(ihc,ihs), w/sth)
              dummy = atomicadd(hbhe(ihc,ihs), w/sth)
              if (rhe(izatom-1).lt.0.0_r8) then
-               ihs = int(-sval*inv_dhs_h)-1; ihs = max(ihs,-nhs_h)
+               ihs = int(-sval/dhs_h)-1; ihs = max(ihs,-nhs_h)
              endif
              dummy = atomicadd(hybhe4(ihc,ihs), w/sth)
              dummy = atomicadd(hybhe(ihc,ihs), w/sth)
@@ -786,25 +703,25 @@ attributes(global) subroutine k_fase_h(nmax, atom, sprop, nsons, &
            endif
          enddo
 
-         do iatom=nhe4+1,nhe4+nhe3
+         do iatom=nhe4+1,ngatom
            rtemp%comp = atom_l(iatom)%comp - atom_l(natom)%comp
            rij = sqrt(dot_product(rtemp%comp,rtemp%comp))
-           ihr = int(rij*inv_dhr_h)+1; ihr = min(ihr,nhr_h)
+           ihr = int(rij/dhr_h)+1; ihr = min(ihr,nhr_h)
            dummy = atomicadd(hi3(ihr), w)
            dummy = atomicadd(hia(ihr), w)
            if (impurmol) then
-             cval = dot_product(rtemp%comp, sprop_l(3)%comp)*inv_dnor
+             cval = dot_product(rtemp%comp, sprop_l(3)%comp)/dnor
              cth = cval/rij; sth = sqrt(1.0_r8-cth**2); sval = rij*sth
              if (cval.gt.0.0_r8) then
-               ihc = int(cval*inv_dhc_h)+1; ihc = min(ihc,nhc_h)
+               ihc = int(cval/dhc_h)+1; ihc = min(ihc,nhc_h)
              else
-               ihc = int(cval*inv_dhc_h)-1; ihc = max(ihc,-nhc_h)
+               ihc = int(cval/dhc_h)-1; ihc = max(ihc,-nhc_h)
              endif
-             ihs = int(sval*inv_dhs_h)+1; ihs = min(ihs,nhs_h)
+             ihs = int(sval/dhs_h)+1; ihs = min(ihs,nhs_h)
              dummy = atomicadd(hbhe3(ihc,ihs), w/sth)
              dummy = atomicadd(hbhe(ihc,ihs), w/sth)
              if (rhe(izatom-1).lt.0.0_r8) then
-               ihs = int(-sval*inv_dhs_h)-1; ihs = max(ihs,-nhs_h)
+               ihs = int(-sval/dhs_h)-1; ihs = max(ihs,-nhs_h)
              endif
              dummy = atomicadd(hybhe3(ihc,ihs), w/sth)
              dummy = atomicadd(hybhe(ihc,ihs), w/sth)

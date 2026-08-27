@@ -1,0 +1,165 @@
+! v3-cuda-optimizacion/optimizacion-vpot/split-he-dihidrogen: mide
+! registros y tiempo de cada bucle de He_dihydrogen POR SEPARADO (He4-He4
+! pares vs He-impureza), antes de disenar un split real de kernels
+! concurrentes. device-only, reutiliza dhcm/opot ya inicializados de los
+! modulos reales (mpotenbh/mvpot) en vez de duplicar su inicializacion --
+! mismo patron ya usado para medir termino_dispersion_shared.
+module mtest_split_loops
+use mtipos, only: vec3
+use mccuerpo, only: ccuerpo, ngatom, natom
+use mHe_dihydrogen, only: He_dihydrogen_hehe, He_dihydrogen_impureza, He_dihydrogen
+use mpotenbh, only: dhcm
+use mvpot, only: opot
+implicit none
+integer, private, parameter :: i4 = selected_int_kind(9)
+integer, private, parameter :: r8 = selected_real_kind(15,9)
+include 'param_atoms_bh_freeform.h'
+
+contains
+
+attributes(device) subroutine vpot_test_hehe(atom, sprop, pot)
+  type(vec3), intent (in) :: atom(natom), sprop(3)
+  real(kind=r8), intent (out) :: pot
+  real(kind=r8) :: rhe(3*natms)
+  real(kind=r8) :: energy1
+
+    if (opot == 4) then
+      call ccuerpo(atom, sprop, rhe(1:3*ngatom))
+      call He_dihydrogen_hehe(ngatom, rhe(1:3*ngatom), energy1)
+      pot = energy1
+    endif
+end subroutine vpot_test_hehe
+
+attributes(device) subroutine vpot_test_impureza(atom, sprop, pot)
+  type(vec3), intent (in) :: atom(natom), sprop(3)
+  real(kind=r8), intent (out) :: pot
+  real(kind=r8) :: rhe(3*natms)
+  real(kind=r8) :: energy2, energy3
+  integer(kind=i4), parameter :: ndih_l = 2, nHH_l = 1
+  real(kind=r8) :: r_dih(3,ndih_l), orHH(3,nHH_l)
+
+    if (opot == 4) then
+      call ccuerpo(atom, sprop, rhe(1:3*ngatom))
+      r_dih = 0.0_r8
+      r_dih(3,1) =  dhcm
+      r_dih(3,2) = -dhcm
+      orHH = 0.0_r8
+      orHH(3,1) = -2.0_r8*dhcm
+      call He_dihydrogen_impureza(ngatom, r_dih, orHH, rhe(1:3*ngatom), &
+                                   energy2, energy3)
+      pot = energy2 + energy3
+    endif
+end subroutine vpot_test_impureza
+
+! Mismo envoltorio (copia atom_l/sprop_l) que k_vpot_t real, para que la
+! presion de registros/tiempo de esa parte sea comparable.
+attributes(global) subroutine k_test_hehe_t(nmax, atom, sprop, pot)
+  integer(kind=i4), value :: nmax
+  type(vec3), device, intent (in) :: atom(nmax,natom)
+  type(vec3), device, intent (in) :: sprop(nmax,3)
+  real(kind=r8), device, intent (out) :: pot(nmax)
+  type(vec3) :: atom_l(64), sprop_l(3)
+  integer(kind=i4) :: i, iatom
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= nmax) then
+     do iatom = 1, natom
+       atom_l(iatom) = atom(i,iatom)
+     enddo
+     sprop_l(1) = sprop(i,1)
+     sprop_l(2) = sprop(i,2)
+     sprop_l(3) = sprop(i,3)
+     call vpot_test_hehe(atom_l(1:natom), sprop_l, pot(i))
+   endif
+end subroutine k_test_hehe_t
+
+attributes(global) subroutine k_test_impureza_t(nmax, atom, sprop, pot)
+  integer(kind=i4), value :: nmax
+  type(vec3), device, intent (in) :: atom(nmax,natom)
+  type(vec3), device, intent (in) :: sprop(nmax,3)
+  real(kind=r8), device, intent (out) :: pot(nmax)
+  type(vec3) :: atom_l(64), sprop_l(3)
+  integer(kind=i4) :: i, iatom
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= nmax) then
+     do iatom = 1, natom
+       atom_l(iatom) = atom(i,iatom)
+     enddo
+     sprop_l(1) = sprop(i,1)
+     sprop_l(2) = sprop(i,2)
+     sprop_l(3) = sprop(i,3)
+     call vpot_test_impureza(atom_l(1:natom), sprop_l, pot(i))
+   endif
+end subroutine k_test_impureza_t
+
+! Control: llama a He_dihydrogen ORIGINAL sin modificar (la que usa
+! produccion), con el mismo envoltorio de medicion -- si esto reproduce
+! los ~5,65 ms reales de k_vpot_t, el arnes de medicion es correcto y la
+! discrepancia hehe+impureza es real; si no, hay un problema de metodologia.
+attributes(device) subroutine vpot_test_combined(atom, sprop, pot)
+  type(vec3), intent (in) :: atom(natom), sprop(3)
+  real(kind=r8), intent (out) :: pot
+  real(kind=r8) :: rhe(3*natms)
+  real(kind=r8) :: energy1, energy2, energy3
+  real(kind=r8) :: v_out(3*natms)
+  integer(kind=i4), parameter :: ndih_l = 2, nHH_l = 1
+  real(kind=r8) :: r_dih(3,ndih_l), rHH_l(3,nHH_l), orHH(3,nHH_l)
+
+    if (opot == 4) then
+      call ccuerpo(atom, sprop, rhe(1:3*ngatom))
+      r_dih = 0.0_r8
+      r_dih(3,1) =  dhcm
+      r_dih(3,2) = -dhcm
+      rHH_l = 0.0_r8
+      orHH = 0.0_r8
+      orHH(3,1) = -2.0_r8*dhcm
+      call He_dihydrogen(ngatom, r_dih, rHH_l, orHH, rhe(1:3*ngatom), &
+                          v_out(1:3*ngatom), energy1, energy2, energy3)
+      pot = energy1 + energy2 + energy3
+    endif
+end subroutine vpot_test_combined
+
+attributes(global) subroutine k_test_combined_t(nmax, atom, sprop, pot)
+  integer(kind=i4), value :: nmax
+  type(vec3), device, intent (in) :: atom(nmax,natom)
+  type(vec3), device, intent (in) :: sprop(nmax,3)
+  real(kind=r8), device, intent (out) :: pot(nmax)
+  type(vec3) :: atom_l(64), sprop_l(3)
+  integer(kind=i4) :: i, iatom
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= nmax) then
+     do iatom = 1, natom
+       atom_l(iatom) = atom(i,iatom)
+     enddo
+     sprop_l(1) = sprop(i,1)
+     sprop_l(2) = sprop(i,2)
+     sprop_l(3) = sprop(i,3)
+     call vpot_test_combined(atom_l(1:natom), sprop_l, pot(i))
+   endif
+end subroutine k_test_combined_t
+
+attributes(global) subroutine k_test_ccuerpo_only_t(nmax, atom, sprop, pot)
+  integer(kind=i4), value :: nmax
+  type(vec3), device, intent (in) :: atom(nmax,natom)
+  type(vec3), device, intent (in) :: sprop(nmax,3)
+  real(kind=r8), device, intent (out) :: pot(nmax)
+  type(vec3) :: atom_l(64), sprop_l(3)
+  real(kind=r8) :: rhe(3*natms)
+  integer(kind=i4) :: i, iatom
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= nmax) then
+     do iatom = 1, natom
+       atom_l(iatom) = atom(i,iatom)
+     enddo
+     sprop_l(1) = sprop(i,1)
+     sprop_l(2) = sprop(i,2)
+     sprop_l(3) = sprop(i,3)
+     call ccuerpo(atom_l(1:natom), sprop_l, rhe(1:3*ngatom))
+     pot(i) = rhe(1)
+   endif
+end subroutine k_test_ccuerpo_only_t
+
+end module mtest_split_loops

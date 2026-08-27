@@ -25,7 +25,7 @@ C  libre, asi que esto no obliga a reformatear nada del cuerpo.
 C
 C*************************************************************************
 C
-      module mHe_dihydrogen
+      module mHe_dihydrogen_shared
       contains
 
 C  F00...DFN2 eran funciones-sentencia locales de He_dihydrogen (una
@@ -136,20 +136,14 @@ C  discrepancia GPU-vs-gfortran, independiente de dcos/dsin/dexp.
       use glibc_exp_mod, only: myexp
       IMPLICIT NONE
       DOUBLE PRECISION FN1, XDUMM, F00X
-! PRUEBA v3-cuda-optimizacion/mapa-sfu: 6.d0/24.d0/120.d0/720.d0 son
-! literales de compilacion (no potencias de 2, division real) -- se
-! precalcula el reciproco como PARAMETER y se multiplica. /2.d0 se deja
-! igual (dividir entre 2 ya es exacto, el compilador lo hace *0.5 gratis).
-      DOUBLE PRECISION, PARAMETER :: inv6=1.d0/6.d0, inv24=1.d0/24.d0
-      DOUBLE PRECISION, PARAMETER :: inv120=1.d0/120.d0, inv720=1.d0/720.d0
       F00X=myexp(-XDUMM)
       FN1=(1.d0-F00X)
       FN1=FN1+(-F00X*XDUMM)
       FN1=FN1+(-F00X*XDUMM**2/2.d0)
-      FN1=FN1+(-F00X*XDUMM**3*inv6)
-      FN1=FN1+(-F00X*XDUMM**4*inv24)
-      FN1=FN1+(-F00X*XDUMM**5*inv120)
-      FN1=FN1+(-F00X*XDUMM**6*inv720)
+      FN1=FN1+(-F00X*XDUMM**3/6.d0)
+      FN1=FN1+(-F00X*XDUMM**4/24.d0)
+      FN1=FN1+(-F00X*XDUMM**5/120.d0)
+      FN1=FN1+(-F00X*XDUMM**6/720.d0)
       END FUNCTION FN1
 
       attributes(host,device) FUNCTION DFN1(XDUMM)
@@ -258,7 +252,7 @@ C  hiciera falta el calculo de fuerzas, basta con cambiar este
 C  PARAMETER a .true. y recompilar -- no hace falta mantener una
 C  segunda copia de la rutina. Verificado bit a bit en
 C  myexp-optimizacion.md antes de usarse aqui.
-      attributes(host,device) SUBROUTINE He_dihydrogen (N, r_dih, rHH,
+      attributes(device) SUBROUTINE He_dihydrogen_shared (N, r_dih, rHH,
      &                          orHH, X, V, ENERGY1,
      &                          ENERGY2, ENERGY3)
       use mVheheVphehe, only: V_hehe, Vp_hehe, V_and_Vp_hehe
@@ -282,7 +276,9 @@ C  myexp-optimizacion.md antes de usarse aqui.
      &     atheta,btheta,c6theta,rnorm,onorm,theta,dvdR,dvdtheta,
      &     datheta,dbtheta,dc6theta,drrdx(3),dthetadx(3),fi,dfidx(3),
      &     drh1dx,drh1dy,drh1dz,drh2dx,drh2dy,drh2dz,dr0dx,dr0dy,dr0dz,
-     &     dbbbdx(3),eterm1,eterm2,e2terms(2*natms)
+     &     dbbbdx(3),eterm1,eterm2
+      DOUBLE PRECISION, SHARED :: e2terms(2*natms,32)
+      INTEGER :: tid
 C  v3-cuda-optimizacion/optimizacion-mypow: coshi/coslo, sinhi/sinlo,
 C  normhi/normlo = log(base) de mycos(theta)/mysin(theta)/rnorm,
 C  calculado UNA vez por atomo con mypow_log; cosN/sinN/normN son los
@@ -314,6 +310,7 @@ C  poder darle a FN1/DFN1/FN2/DFN2 acumulacion secuencial explicita.
 
 
 
+      tid = threadIdx%x
       ENERGY1=0.d0
       DO J1=1,N-1
           G(J1,J1)=0.0D0
@@ -446,8 +443,8 @@ C  acumularse aqui mismo -- la suma de verdad (treesum o kahansum,
 C  ver USE_TREESUM arriba) se hace de una vez, despues del DO, sobre
 C  los 2*N terminos completos. Ver docs-kernels/He_dihydrogen.md
 C  Parte 7-8.
-       e2terms(2*J1-1)=eterm1
-       e2terms(2*J1)=-eterm2
+       e2terms(2*J1-1,tid)=eterm1
+       e2terms(2*J1,tid)=-eterm2
        IF (GTEST) THEN
         cos3=mypow_desde_log(coshi,coslo,3.0d0)
         cos5=mypow_desde_log(coshi,coslo,5.0d0)
@@ -681,252 +678,13 @@ C  comparten el mismo GTEST, no hay desincronizacion posible).
       END DO
 
       IF (USE_TREESUM) THEN
-        ENERGY2=treesum(e2terms,2*N)
+        ENERGY2=treesum(e2terms(:,tid),2*N)
       ELSE
-        ENERGY2=kahansum(e2terms,2*N)
+        ENERGY2=kahansum(e2terms(:,tid),2*N)
       END IF
 
       ENERGY3=-0.5d0*alpha*cte*ENERGY3
 
       RETURN
-      END SUBROUTINE He_dihydrogen
-
-C  v3-cuda-optimizacion/optimizacion-vpot/split-he-dihidrogen: usadas
-C  por k_vpot_3warp_t (dmc2_pipeline.cuf, Intento 8) -- un bloque de 96
-C  hilos (3 warps) calcula el bucle He4-He4 (hehe), el bloque de
-C  dispersion y el de induccion en warps distintos del MISMO bloque
-C  (no kernels separados, ver Intento 5) y los combina por memoria
-C  compartida -- ~46-52% mas rapido que la version secuencial en las 5
-C  escalas de walkers probadas (500-3000), verificado bit a bit
-C  (diferencia maxima 0.0 exacta). dispersion e induccion estaban
-C  fusionadas en la He_dihydrogen de arriba (comparten
-C  rvec/rnorm/onorm/theta/cos2/cos4/cos6/btheta); separarlas duplica
-C  ese preambulo -- ver split-he-dihidrogen.md, Intento 8, para el
-C  balance de coste/beneficio medido.
-      attributes(device) SUBROUTINE He_dihydrogen_hehe(N, X, ENERGY1)
-      use mVheheVphehe, only: V_and_Vp_hehe
-      IMPLICIT NONE
-      INCLUDE 'param_atoms_bh.h'
-      INTEGER N, J1, J2
-      DOUBLE PRECISION X(3*N), ENERGY1, R2, R, v_tmp, vp_tmp
-
-      ENERGY1=0.d0
-      DO J1=1,N-1
-        DO J2=J1+1,N
-          R2=(X(3*(J1-1)+1)-X(3*(J2-1)+1))**2
-     1             +(X(3*(J1-1)+2)-X(3*(J2-1)+2))**2
-     2             +(X(3*(J1-1)+3)-X(3*(J2-1)+3))**2
-          R2=DSQRT(R2)
-          R=R2
-          call V_and_Vp_hehe(R, v_tmp, vp_tmp)
-          ENERGY1=ENERGY1+v_tmp
-         ENDDO
-      ENDDO
-
-      ENERGY1=ENERGY1*conve3   ! en meV
-
-      END SUBROUTINE He_dihydrogen_hehe
-
-      attributes(device) SUBROUTINE He_dihydrogen_dispersion(N, orHH,
-     &                          X, ENERGY2)
-      use angle_scalar_vec, only: angle, scalar_product, vec_norm
-      use glibc_exp_mod, only: myexp
-      use glibc_sincos_mod, only: mysin, mycos
-      use glibc_pow_mod, only: mypow_log, mypow_desde_log
-      IMPLICIT NONE
-      INCLUDE 'param_atoms_bh.h'
-      INTEGER N, J1
-      LOGICAL, PARAMETER :: GTEST = .false.
-      DOUBLE PRECISION X(3*N), ENERGY2,
-     &     orHH(3,nHH),
-     &     r_RGTH(3), rvec(3), ror, fi,
-     &     drrdx(3),dthetadx(3),dfidx(3),
-     &     atheta,btheta,c6theta,rnorm,onorm,theta,
-     &     e2terms(2*natms)
-      DOUBLE PRECISION coshi,coslo,cos2,cos4,cos6
-      DOUBLE PRECISION sinhi,sinlo,sin2,sin4,sin6
-      DOUBLE PRECISION normhi,normlo,norm6
-      DOUBLE PRECISION eterm1,eterm2
-      LOGICAL USE_TREESUM
-      PARAMETER (USE_TREESUM=.TRUE.)
-
-      DO J1=1,N
-       r_RGTH(1)=X(3*(J1-1)+1)
-       r_RGTH(2)=X(3*(J1-1)+2)
-       r_RGTH(3)=X(3*(J1-1)+3)
-       rvec(:)=r_RGTH(:)
-       call vec_norm(rvec,rnorm)
-       call vec_norm(orHH(:,1),onorm)
-       call angle (rvec,orHH(:,1),theta)
-       call scalar_product(rvec,orHH(:,1),ror)
-       fi=ror/(rnorm*onorm)
-       drrdx(:)=rvec(:)/rnorm
-       dfidx(:)=(orHH(:,1)*rnorm*onorm-ror*onorm*drrdx(:))
-     &         /(rnorm*onorm)**2
-       IF (fi.eq.1.d0) THEN
-        dthetadx(:)=-dfidx(:)
-       ELSE IF (fi.eq.-1.d0) THEN
-        dthetadx(:)=dfidx(:)
-       ELSE
-        dthetadx(:)=-dfidx(:)/dsqrt(1.d0-fi**2)
-       END IF
-
-       call mypow_log(abs(mycos(theta)), coshi, coslo)
-       cos2=mypow_desde_log(coshi,coslo,2.0d0)
-       cos4=mypow_desde_log(coshi,coslo,4.0d0)
-       cos6=mypow_desde_log(coshi,coslo,6.0d0)
-       call mypow_log(abs(mysin(theta)), sinhi, sinlo)
-       sin2=mypow_desde_log(sinhi,sinlo,2.0d0)
-       sin4=mypow_desde_log(sinhi,sinlo,4.0d0)
-       sin6=mypow_desde_log(sinhi,sinlo,6.0d0)
-       call mypow_log(rnorm, normhi, normlo)
-       norm6=mypow_desde_log(normhi,normlo,6.0d0)
-
-       atheta=a1*cos2
-       atheta=atheta+a2*cos4
-       atheta=atheta+a3*cos6
-       btheta=b0
-       btheta=btheta+b1*cos2
-       btheta=btheta+b2*cos4
-       btheta=btheta+b3*cos6
-       c6theta=c60
-       c6theta=c6theta+c61*sin2
-       c6theta=c6theta+c62*sin4
-       c6theta=c6theta+c63*sin6
-
-       eterm1=a0*myexp(atheta-rnorm*btheta)
-       eterm2=FN1(rnorm*btheta)*c6theta/norm6
-       e2terms(2*J1-1)=eterm1
-       e2terms(2*J1)=-eterm2
-
-      END DO
-
-      IF (USE_TREESUM) THEN
-        ENERGY2=treesum(e2terms,2*N)
-      ELSE
-        ENERGY2=kahansum(e2terms,2*N)
-      END IF
-
-      END SUBROUTINE He_dihydrogen_dispersion
-
-      attributes(device) SUBROUTINE He_dihydrogen_induccion(N, r_dih,
-     &                          orHH, X, ENERGY3)
-      use angle_scalar_vec, only: angle, scalar_product, vec_norm
-      use glibc_sincos_mod, only: mysin, mycos
-      use glibc_pow_mod, only: mypow_log, mypow_desde_log
-      IMPLICIT NONE
-      INCLUDE 'param_atoms_bh.h'
-      INTEGER N, J1
-      LOGICAL, PARAMETER :: GTEST = .false.
-      DOUBLE PRECISION X(3*N), ENERGY3,
-     &     r_RGTH(3), rvec(3), ror, fi,
-     &     drrdx(3),dthetadx(3),dfidx(3),
-     &     r_dih(3,ndih),orHH(3,nHH),
-     &     cte,alpha,q,q0,
-     &     Ex0,Ey0,Ez0,rh1,rh2,r0,
-     &     atheta,btheta,rnorm,onorm,theta,
-     &     drh1dx,drh1dy,drh1dz,drh2dx,drh2dy,drh2dz,dr0dx,dr0dy,dr0dz
-      DOUBLE PRECISION coshi,coslo,cos2,cos4,cos6
-! PRUEBA v3-cuda-optimizacion/mapa-sfu: factor comun 1/rh1,1/rh2,1/r0
-! (cada uno se dividia 3 veces por separado en Ex0/Ey0/Ez0) -- se
-! cachea el reciproco una vez y se multiplica. NO verificado bit a
-! bit (prueba_reciprocos/test_reciprocos.cuf ya mostro que diverge en
-! el ultimo bit) -- esta copia es para medir el efecto en el pipeline
-! completo, no para produccion.
-      DOUBLE PRECISION inv_rh1, inv_rh2, inv_r0
-      DOUBLE PRECISION inv_rh1_3, inv_rh2_3, inv_r0_3
-
-      ENERGY3=0.d0
-      cte=14393.894d0 ! (meV)
-      alpha=1.38d0*(0.5291772d0)**3
-      q=0.7435d0
-      q0=2.d0*q-1.d0
-
-      DO J1=1,N
-       r_RGTH(1)=X(3*(J1-1)+1)
-       r_RGTH(2)=X(3*(J1-1)+2)
-       r_RGTH(3)=X(3*(J1-1)+3)
-       rvec(:)=r_RGTH(:)
-       call vec_norm(rvec,rnorm)
-       call vec_norm(orHH(:,1),onorm)
-       call angle (rvec,orHH(:,1),theta)
-       call scalar_product(rvec,orHH(:,1),ror)
-       fi=ror/(rnorm*onorm)
-       drrdx(:)=rvec(:)/rnorm
-       dfidx(:)=(orHH(:,1)*rnorm*onorm-ror*onorm*drrdx(:))
-     &         /(rnorm*onorm)**2
-       IF (fi.eq.1.d0) THEN
-        dthetadx(:)=-dfidx(:)
-       ELSE IF (fi.eq.-1.d0) THEN
-        dthetadx(:)=dfidx(:)
-       ELSE
-        dthetadx(:)=-dfidx(:)/dsqrt(1.d0-fi**2)
-       END IF
-
-       call mypow_log(abs(mycos(theta)), coshi, coslo)
-       cos2=mypow_desde_log(coshi,coslo,2.0d0)
-       cos4=mypow_desde_log(coshi,coslo,4.0d0)
-       cos6=mypow_desde_log(coshi,coslo,6.0d0)
-
-       atheta=a1*cos2
-       atheta=atheta+a2*cos4
-       atheta=atheta+a3*cos6
-       btheta=b0
-       btheta=btheta+b1*cos2
-       btheta=btheta+b2*cos4
-       btheta=btheta+b3*cos6
-
-       rh1=(X(3*(J1-1)+1)-r_dih(1,1))**2+(X(3*(J1-1)+2)-r_dih(2,1))**2+
-     &     (X(3*(J1-1)+3)-r_dih(3,1))**2
-       rh1=DSQRT(rh1)
-
-       rh2=(X(3*(J1-1)+1)-r_dih(1,2))**2+(X(3*(J1-1)+2)-r_dih(2,2))**2+
-     &     (X(3*(J1-1)+3)-r_dih(3,2))**2
-       rh2=DSQRT(rh2)
-
-       r0=(X(3*(J1-1)+1))**2+(X(3*(J1-1)+2))**2+
-     &    (X(3*(J1-1)+3))**2
-       r0=DSQRT(r0)
-
-       drh1dx=(X(3*(J1-1)+1)-r_dih(1,1))/rh1
-       drh1dy=(X(3*(J1-1)+2)-r_dih(2,1))/rh1
-       drh1dz=(X(3*(J1-1)+3)-r_dih(3,1))/rh1
-
-       drh2dx=(X(3*(J1-1)+1)-r_dih(1,2))/rh2
-       drh2dy=(X(3*(J1-1)+2)-r_dih(2,2))/rh2
-       drh2dz=(X(3*(J1-1)+3)-r_dih(3,2))/rh2
-
-       dr0dx=X(3*(J1-1)+1)/r0
-       dr0dy=X(3*(J1-1)+2)/r0
-       dr0dz=X(3*(J1-1)+3)/r0
-
-       inv_rh1=1.d0/rh1
-       inv_rh2=1.d0/rh2
-       inv_r0=1.d0/r0
-       inv_rh1_3=inv_rh1*inv_rh1*inv_rh1
-       inv_rh2_3=inv_rh2*inv_rh2*inv_rh2
-       inv_r0_3=inv_r0*inv_r0*inv_r0
-
-       Ex0=q*FN2(btheta*rh1)*(X(3*(J1-1)+1)-r_dih(1,1))*inv_rh1_3
-       Ex0=Ex0+q*FN2(btheta*rh2)*(X(3*(J1-1)+1)-r_dih(1,2))*inv_rh2_3
-       Ex0=Ex0-q0*FN2(btheta*r0)*(X(3*(J1-1)+1))*inv_r0_3
-
-       Ey0=q*FN2(btheta*rh1)*(X(3*(J1-1)+2)-r_dih(2,1))*inv_rh1_3
-       Ey0=Ey0+q*FN2(btheta*rh2)*(X(3*(J1-1)+2)-r_dih(2,2))*inv_rh2_3
-       Ey0=Ey0-q0*FN2(btheta*r0)*(X(3*(J1-1)+2))*inv_r0_3
-
-       Ez0=q*FN2(btheta*rh1)*(X(3*(J1-1)+3)-r_dih(3,1))*inv_rh1_3
-       Ez0=Ez0+q*FN2(btheta*rh2)*(X(3*(J1-1)+3)-r_dih(3,2))*inv_rh2_3
-       Ez0=Ez0-q0*FN2(btheta*r0)*(X(3*(J1-1)+3))*inv_r0_3
-
-       ENERGY3=ENERGY3+Ex0*Ex0
-       ENERGY3=ENERGY3+Ey0*Ey0
-       ENERGY3=ENERGY3+Ez0*Ez0
-
-      END DO
-
-      ENERGY3=-0.5d0*alpha*cte*ENERGY3
-
-      END SUBROUTINE He_dihydrogen_induccion
-
-      end module mHe_dihydrogen
+      END SUBROUTINE He_dihydrogen_shared
+      end module mHe_dihydrogen_shared

@@ -136,20 +136,14 @@ C  discrepancia GPU-vs-gfortran, independiente de dcos/dsin/dexp.
       use glibc_exp_mod, only: myexp
       IMPLICIT NONE
       DOUBLE PRECISION FN1, XDUMM, F00X
-! PRUEBA v3-cuda-optimizacion/mapa-sfu: 6.d0/24.d0/120.d0/720.d0 son
-! literales de compilacion (no potencias de 2, division real) -- se
-! precalcula el reciproco como PARAMETER y se multiplica. /2.d0 se deja
-! igual (dividir entre 2 ya es exacto, el compilador lo hace *0.5 gratis).
-      DOUBLE PRECISION, PARAMETER :: inv6=1.d0/6.d0, inv24=1.d0/24.d0
-      DOUBLE PRECISION, PARAMETER :: inv120=1.d0/120.d0, inv720=1.d0/720.d0
       F00X=myexp(-XDUMM)
       FN1=(1.d0-F00X)
       FN1=FN1+(-F00X*XDUMM)
       FN1=FN1+(-F00X*XDUMM**2/2.d0)
-      FN1=FN1+(-F00X*XDUMM**3*inv6)
-      FN1=FN1+(-F00X*XDUMM**4*inv24)
-      FN1=FN1+(-F00X*XDUMM**5*inv120)
-      FN1=FN1+(-F00X*XDUMM**6*inv720)
+      FN1=FN1+(-F00X*XDUMM**3/6.d0)
+      FN1=FN1+(-F00X*XDUMM**4/24.d0)
+      FN1=FN1+(-F00X*XDUMM**5/120.d0)
+      FN1=FN1+(-F00X*XDUMM**6/720.d0)
       END FUNCTION FN1
 
       attributes(host,device) FUNCTION DFN1(XDUMM)
@@ -691,18 +685,13 @@ C  comparten el mismo GTEST, no hay desincronizacion posible).
       RETURN
       END SUBROUTINE He_dihydrogen
 
-C  v3-cuda-optimizacion/optimizacion-vpot/split-he-dihidrogen: usadas
-C  por k_vpot_3warp_t (dmc2_pipeline.cuf, Intento 8) -- un bloque de 96
-C  hilos (3 warps) calcula el bucle He4-He4 (hehe), el bloque de
-C  dispersion y el de induccion en warps distintos del MISMO bloque
-C  (no kernels separados, ver Intento 5) y los combina por memoria
-C  compartida -- ~46-52% mas rapido que la version secuencial en las 5
-C  escalas de walkers probadas (500-3000), verificado bit a bit
-C  (diferencia maxima 0.0 exacta). dispersion e induccion estaban
-C  fusionadas en la He_dihydrogen de arriba (comparten
-C  rvec/rnorm/onorm/theta/cos2/cos4/cos6/btheta); separarlas duplica
-C  ese preambulo -- ver split-he-dihidrogen.md, Intento 8, para el
-C  balance de coste/beneficio medido.
+C  v3-cuda-optimizacion/optimizacion-vpot/split-he-dihidrogen: copias
+C  DEVICE-ONLY, solo para medir registros/tiempo de cada bucle de
+C  He_dihydrogen POR SEPARADO, antes de diseñar un split real de
+C  kernels (candidato: bucle He4-He4 pares vs bucle He-impureza, ver
+C  split-he-dihidrogen.md -- confirmado que el segundo no lee ni G ni
+C  ENERGY1 del primero, independencia real). NO son candidatas a
+C  produccion, son copias de medicion.
       attributes(device) SUBROUTINE He_dihydrogen_hehe(N, X, ENERGY1)
       use mVheheVphehe, only: V_and_Vp_hehe
       IMPLICIT NONE
@@ -727,8 +716,8 @@ C  balance de coste/beneficio medido.
 
       END SUBROUTINE He_dihydrogen_hehe
 
-      attributes(device) SUBROUTINE He_dihydrogen_dispersion(N, orHH,
-     &                          X, ENERGY2)
+      attributes(device) SUBROUTINE He_dihydrogen_impureza(N, r_dih,
+     &                          orHH, X, ENERGY2, ENERGY3)
       use angle_scalar_vec, only: angle, scalar_product, vec_norm
       use glibc_exp_mod, only: myexp
       use glibc_sincos_mod, only: mysin, mycos
@@ -737,18 +726,28 @@ C  balance de coste/beneficio medido.
       INCLUDE 'param_atoms_bh.h'
       INTEGER N, J1
       LOGICAL, PARAMETER :: GTEST = .false.
-      DOUBLE PRECISION X(3*N), ENERGY2,
-     &     orHH(3,nHH),
-     &     r_RGTH(3), rvec(3), ror, fi,
-     &     drrdx(3),dthetadx(3),dfidx(3),
-     &     atheta,btheta,c6theta,rnorm,onorm,theta,
-     &     e2terms(2*natms)
-      DOUBLE PRECISION coshi,coslo,cos2,cos4,cos6
-      DOUBLE PRECISION sinhi,sinlo,sin2,sin4,sin6
-      DOUBLE PRECISION normhi,normlo,norm6
-      DOUBLE PRECISION eterm1,eterm2
+      DOUBLE PRECISION X(3*N), ENERGY2, ENERGY3,
+     &     V(3*N), dVdx(3),
+     &     r_RGTH(3), orHH(3,nHH),
+     &     cte,alpha,q,q0,r_dih(3,ndih),rvec(3),
+     &     Ex0,Ey0,Ez0,rh1,rh2,r0,ror,
+     &     dExdx,dEydx,dEzdx,dExdy,dEydy,dEzdy,
+     &     dExdz,dEydz,dEzdz,dExtot,dEytot,dEztot,
+     &     atheta,btheta,c6theta,rnorm,onorm,theta,dvdR,dvdtheta,
+     &     datheta,dbtheta,dc6theta,drrdx(3),dthetadx(3),fi,dfidx(3),
+     &     drh1dx,drh1dy,drh1dz,drh2dx,drh2dy,drh2dz,dr0dx,dr0dy,dr0dz,
+     &     dbbbdx(3),eterm1,eterm2,e2terms(2*natms)
+      DOUBLE PRECISION coshi,coslo,cos2,cos4,cos6,cos3,cos5
+      DOUBLE PRECISION sinhi,sinlo,sin2,sin4,sin6,sin3,sin5
+      DOUBLE PRECISION normhi,normlo,norm6,norm7
       LOGICAL USE_TREESUM
       PARAMETER (USE_TREESUM=.TRUE.)
+
+      ENERGY3=0.d0
+      cte=14393.894d0 ! (meV)
+      alpha=1.38d0*(0.5291772d0)**3
+      q=0.7435d0
+      q0=2.d0*q-1.d0
 
       DO J1=1,N
        r_RGTH(1)=X(3*(J1-1)+1)
@@ -798,83 +797,44 @@ C  balance de coste/beneficio medido.
        eterm2=FN1(rnorm*btheta)*c6theta/norm6
        e2terms(2*J1-1)=eterm1
        e2terms(2*J1)=-eterm2
+       IF (GTEST) THEN
+        cos3=mypow_desde_log(coshi,coslo,3.0d0)
+        cos5=mypow_desde_log(coshi,coslo,5.0d0)
+        sin3=mypow_desde_log(sinhi,sinlo,3.0d0)
+        sin5=mypow_desde_log(sinhi,sinlo,5.0d0)
+        norm7=mypow_desde_log(normhi,normlo,7.0d0)
 
-      END DO
+        datheta=-(2.d0*a1*(mycos(theta))+4.d0*a2*SIGN(1.d0,
+     &            mycos(theta))*cos3
+     &            +6.d0*a3*SIGN(1.d0,mycos(theta))
+     &            *cos5)*mysin(theta)
+        dbtheta=-(2.d0*b1*(mycos(theta))+4.d0*b2*SIGN(1.d0,
+     &            mycos(theta))*cos3
+     &            +6.d0*b3*SIGN(1.d0,mycos(theta))
+     &            *cos5)*mysin(theta)
+        dc6theta=(2.d0*c61*(mysin(theta))+4.d0*c62*SIGN(1.d0,
+     &            mysin(theta))*sin3
+     &            +6.d0*c63*SIGN(1.d0,mysin(theta))
+     &            *sin5)*mycos(theta)
 
-      IF (USE_TREESUM) THEN
-        ENERGY2=treesum(e2terms,2*N)
-      ELSE
-        ENERGY2=kahansum(e2terms,2*N)
-      END IF
+        dvdR=a0*myexp(atheta-rnorm*btheta)*(-btheta)
+     &      -DFN1(rnorm*btheta)*btheta*c6theta/norm6
+     &      +6.d0*FN1(rnorm*btheta)*c6theta/norm7
 
-      END SUBROUTINE He_dihydrogen_dispersion
+        dvdtheta=a0*myexp(atheta-rnorm*btheta)*(datheta-rnorm*dbtheta)
+     &          -DFN1(rnorm*btheta)*rnorm*dbtheta*c6theta
+     &          /norm6
+     &          -FN1(rnorm*btheta)*dc6theta/norm6
 
-      attributes(device) SUBROUTINE He_dihydrogen_induccion(N, r_dih,
-     &                          orHH, X, ENERGY3)
-      use angle_scalar_vec, only: angle, scalar_product, vec_norm
-      use glibc_sincos_mod, only: mysin, mycos
-      use glibc_pow_mod, only: mypow_log, mypow_desde_log
-      IMPLICIT NONE
-      INCLUDE 'param_atoms_bh.h'
-      INTEGER N, J1
-      LOGICAL, PARAMETER :: GTEST = .false.
-      DOUBLE PRECISION X(3*N), ENERGY3,
-     &     r_RGTH(3), rvec(3), ror, fi,
-     &     drrdx(3),dthetadx(3),dfidx(3),
-     &     r_dih(3,ndih),orHH(3,nHH),
-     &     cte,alpha,q,q0,
-     &     Ex0,Ey0,Ez0,rh1,rh2,r0,
-     &     atheta,btheta,rnorm,onorm,theta,
-     &     drh1dx,drh1dy,drh1dz,drh2dx,drh2dy,drh2dz,dr0dx,dr0dy,dr0dz
-      DOUBLE PRECISION coshi,coslo,cos2,cos4,cos6
-! PRUEBA v3-cuda-optimizacion/mapa-sfu: factor comun 1/rh1,1/rh2,1/r0
-! (cada uno se dividia 3 veces por separado en Ex0/Ey0/Ez0) -- se
-! cachea el reciproco una vez y se multiplica. NO verificado bit a
-! bit (prueba_reciprocos/test_reciprocos.cuf ya mostro que diverge en
-! el ultimo bit) -- esta copia es para medir el efecto en el pipeline
-! completo, no para produccion.
-      DOUBLE PRECISION inv_rh1, inv_rh2, inv_r0
-      DOUBLE PRECISION inv_rh1_3, inv_rh2_3, inv_r0_3
+        dVdx(1)=dVdR*drrdx(1)+dvdtheta*dthetadx(1)
+        dVdx(2)=dVdR*drrdx(2)+dvdtheta*dthetadx(2)
+        dVdx(3)=dVdR*drrdx(3)+dvdtheta*dthetadx(3)
 
-      ENERGY3=0.d0
-      cte=14393.894d0 ! (meV)
-      alpha=1.38d0*(0.5291772d0)**3
-      q=0.7435d0
-      q0=2.d0*q-1.d0
+        V(3*(J1-1)+1)=V(3*(J1-1)+1)+dVdx(1)
+        V(3*(J1-1)+2)=V(3*(J1-1)+2)+dVdx(2)
+        V(3*(J1-1)+3)=V(3*(J1-1)+3)+dVdx(3)
 
-      DO J1=1,N
-       r_RGTH(1)=X(3*(J1-1)+1)
-       r_RGTH(2)=X(3*(J1-1)+2)
-       r_RGTH(3)=X(3*(J1-1)+3)
-       rvec(:)=r_RGTH(:)
-       call vec_norm(rvec,rnorm)
-       call vec_norm(orHH(:,1),onorm)
-       call angle (rvec,orHH(:,1),theta)
-       call scalar_product(rvec,orHH(:,1),ror)
-       fi=ror/(rnorm*onorm)
-       drrdx(:)=rvec(:)/rnorm
-       dfidx(:)=(orHH(:,1)*rnorm*onorm-ror*onorm*drrdx(:))
-     &         /(rnorm*onorm)**2
-       IF (fi.eq.1.d0) THEN
-        dthetadx(:)=-dfidx(:)
-       ELSE IF (fi.eq.-1.d0) THEN
-        dthetadx(:)=dfidx(:)
-       ELSE
-        dthetadx(:)=-dfidx(:)/dsqrt(1.d0-fi**2)
        END IF
-
-       call mypow_log(abs(mycos(theta)), coshi, coslo)
-       cos2=mypow_desde_log(coshi,coslo,2.0d0)
-       cos4=mypow_desde_log(coshi,coslo,4.0d0)
-       cos6=mypow_desde_log(coshi,coslo,6.0d0)
-
-       atheta=a1*cos2
-       atheta=atheta+a2*cos4
-       atheta=atheta+a3*cos6
-       btheta=b0
-       btheta=btheta+b1*cos2
-       btheta=btheta+b2*cos4
-       btheta=btheta+b3*cos6
 
        rh1=(X(3*(J1-1)+1)-r_dih(1,1))**2+(X(3*(J1-1)+2)-r_dih(2,1))**2+
      &     (X(3*(J1-1)+3)-r_dih(3,1))**2
@@ -900,24 +860,17 @@ C  balance de coste/beneficio medido.
        dr0dy=X(3*(J1-1)+2)/r0
        dr0dz=X(3*(J1-1)+3)/r0
 
-       inv_rh1=1.d0/rh1
-       inv_rh2=1.d0/rh2
-       inv_r0=1.d0/r0
-       inv_rh1_3=inv_rh1*inv_rh1*inv_rh1
-       inv_rh2_3=inv_rh2*inv_rh2*inv_rh2
-       inv_r0_3=inv_r0*inv_r0*inv_r0
+       Ex0=q*FN2(btheta*rh1)*(X(3*(J1-1)+1)-r_dih(1,1))/rh1**3
+       Ex0=Ex0+q*FN2(btheta*rh2)*(X(3*(J1-1)+1)-r_dih(1,2))/rh2**3
+       Ex0=Ex0-q0*FN2(btheta*r0)*(X(3*(J1-1)+1))/r0**3
 
-       Ex0=q*FN2(btheta*rh1)*(X(3*(J1-1)+1)-r_dih(1,1))*inv_rh1_3
-       Ex0=Ex0+q*FN2(btheta*rh2)*(X(3*(J1-1)+1)-r_dih(1,2))*inv_rh2_3
-       Ex0=Ex0-q0*FN2(btheta*r0)*(X(3*(J1-1)+1))*inv_r0_3
+       Ey0=q*FN2(btheta*rh1)*(X(3*(J1-1)+2)-r_dih(2,1))/rh1**3
+       Ey0=Ey0+q*FN2(btheta*rh2)*(X(3*(J1-1)+2)-r_dih(2,2))/rh2**3
+       Ey0=Ey0-q0*FN2(btheta*r0)*(X(3*(J1-1)+2))/r0**3
 
-       Ey0=q*FN2(btheta*rh1)*(X(3*(J1-1)+2)-r_dih(2,1))*inv_rh1_3
-       Ey0=Ey0+q*FN2(btheta*rh2)*(X(3*(J1-1)+2)-r_dih(2,2))*inv_rh2_3
-       Ey0=Ey0-q0*FN2(btheta*r0)*(X(3*(J1-1)+2))*inv_r0_3
-
-       Ez0=q*FN2(btheta*rh1)*(X(3*(J1-1)+3)-r_dih(3,1))*inv_rh1_3
-       Ez0=Ez0+q*FN2(btheta*rh2)*(X(3*(J1-1)+3)-r_dih(3,2))*inv_rh2_3
-       Ez0=Ez0-q0*FN2(btheta*r0)*(X(3*(J1-1)+3))*inv_r0_3
+       Ez0=q*FN2(btheta*rh1)*(X(3*(J1-1)+3)-r_dih(3,1))/rh1**3
+       Ez0=Ez0+q*FN2(btheta*rh2)*(X(3*(J1-1)+3)-r_dih(3,2))/rh2**3
+       Ez0=Ez0-q0*FN2(btheta*r0)*(X(3*(J1-1)+3))/r0**3
 
        ENERGY3=ENERGY3+Ex0*Ex0
        ENERGY3=ENERGY3+Ey0*Ey0
@@ -925,8 +878,14 @@ C  balance de coste/beneficio medido.
 
       END DO
 
+      IF (USE_TREESUM) THEN
+        ENERGY2=treesum(e2terms,2*N)
+      ELSE
+        ENERGY2=kahansum(e2terms,2*N)
+      END IF
+
       ENERGY3=-0.5d0*alpha*cte*ENERGY3
 
-      END SUBROUTINE He_dihydrogen_induccion
+      END SUBROUTINE He_dihydrogen_impureza
 
       end module mHe_dihydrogen

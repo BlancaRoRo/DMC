@@ -52,17 +52,22 @@ attributes(host, device) subroutine duhe4x(rivec, smol, d1ux, d2ux, d1zux, d2zux
   ! del bucle, en vez de que cada mypow(rij,...) lo recalcule por su
   ! cuenta 2*(lxhe4+1) veces. Verificado bit a bit en prueba_split_mypow/.
   real(kind=r8) :: rij_hi, rij_lo
+  ! PRUEBA v3-cuda-optimizacion/mapa-sfu: idem He_dihydrogen, factor
+  ! comun 1/rij y 1/rijp2 -- no bit a bit (ver test_duhe4x.cuf).
+  real(kind=r8) :: inv_rij, inv_rij2, inv_rijp2
 
    rij=sqrt(dot_product(rivec%comp,rivec%comp))
+   inv_rij  = 1.0_r8/rij
+   inv_rij2 = inv_rij*inv_rij
    call mypow_log(rij, rij_hi, rij_lo)
    if(impurmol) then
-     cth=dot_product(rivec%comp,smol(3)%comp)/rij
-     zpr=cth/rij
-     grz%comp=(smol(3)%comp-zpr*rivec%comp)/rij
+     cth=dot_product(rivec%comp,smol(3)%comp)*inv_rij
+     zpr=cth*inv_rij
+     grz%comp=(smol(3)%comp-zpr*rivec%comp)*inv_rij
      grz2=dot_product(grz%comp,grz%comp)
-     lapz=-2.0_r8*zpr/rij
-     gpz(1)=-dot_product(rivec%comp,smol(2)%comp)/rij
-     gpz(2)= dot_product(rivec%comp,smol(1)%comp)/rij
+     lapz=-2.0_r8*zpr*inv_rij
+     gpz(1)=-dot_product(rivec%comp,smol(2)%comp)*inv_rij
+     gpz(2)= dot_product(rivec%comp,smol(1)%comp)*inv_rij
      gpz2=dot_product(gpz,gpz)
      lpz=-cth-cth
    else
@@ -87,15 +92,16 @@ attributes(host, device) subroutine duhe4x(rivec, smol, d1ux, d2ux, d1zux, d2zux
    do il=0,lxhe4
      rijp2=mypow_desde_log(rij_hi,rij_lo,pxhe4(2,il))
      rijp4=mypow_desde_log(rij_hi,rij_lo,pxhe4(4,il))
-     ulx=  -pxhe4(1,il)/rijp2                                   &
- &         -pxhe4(3,il)*rijp4-pxhe4(5,il)*log(rij)
-     ulxp=( pxhe4(1,il)*pxhe4(2,il)/rijp2                       &
- &         -pxhe4(3,il)*pxhe4(4,il)*rijp4-pxhe4(5,il))/rij
-     ulxs=(-pxhe4(1,il)*pxhe4(2,il)*(pxhe4(2,il)+1.0_r8)/rijp2  &
+     inv_rijp2 = 1.0_r8/rijp2
+     ulx=  -pxhe4(1,il)*inv_rijp2                                &
+ &         -pxhe4(3,il)*rijp4-pxhe4(5,il)*rij_hi
+     ulxp=( pxhe4(1,il)*pxhe4(2,il)*inv_rijp2                    &
+ &         -pxhe4(3,il)*pxhe4(4,il)*rijp4-pxhe4(5,il))*inv_rij
+     ulxs=(-pxhe4(1,il)*pxhe4(2,il)*(pxhe4(2,il)+1.0_r8)*inv_rijp2 &
  &         -pxhe4(3,il)*pxhe4(4,il)*(pxhe4(4,il)-1.0_r8)*rijp4  &
- &         +pxhe4(5,il))/rij**2
-     ulxs=ulxs+2.0_r8*ulxp/rij
-     grul%comp=ulxp/rij*rivec%comp
+ &         +pxhe4(5,il))*inv_rij2
+     ulxs=ulxs+2.0_r8*ulxp*inv_rij
+     grul%comp=ulxp*inv_rij*rivec%comp
      grpl%comp=d1pl(il)*grz%comp
      lapl=lapz*d1pl(il)+grz2*d2pl(il)
      d1ux%comp=d1ux%comp+pl(il)*grul%comp
@@ -125,7 +131,7 @@ attributes(host, device) function uhe4x(rij, cth)
    uhe4x=0.0_r8
    do il=0,lxhe4
      ul=-pxhe4(1,il)/mypow_desde_log(rij_hi,rij_lo,pxhe4(2,il))-pxhe4(3,il)*mypow_desde_log(rij_hi,rij_lo,pxhe4(4,il))  &
- &      -pxhe4(5,il)*log(rij)
+ &      -pxhe4(5,il)*rij_hi
      uhe4x=uhe4x+ul*pl(il)
    enddo
 end function uhe4x

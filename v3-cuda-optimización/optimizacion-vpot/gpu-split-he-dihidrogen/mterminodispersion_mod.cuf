@@ -1,0 +1,135 @@
+module mterminodispersion
+use glibc_exp_mod, only: myexp
+use glibc_sincos_mod, only: mysin, mycos
+use glibc_pow_mod, only: mypow_log, mypow_desde_log
+use mFN1, only: FN1
+implicit none
+contains
+
+!$pgi noinline
+attributes(host, device) SUBROUTINE termino_dispersion(theta, &
+     rnorm, eterm1, eterm2, coshi, coslo, sinhi, sinlo, normhi, &
+     normlo, atheta, btheta, c6theta, norm6)
+      IMPLICIT NONE
+      INCLUDE 'param_atoms_bh_freeform.h'
+      DOUBLE PRECISION theta, rnorm, eterm1, eterm2
+      DOUBLE PRECISION coshi, coslo, sinhi, sinlo
+      DOUBLE PRECISION normhi, normlo, atheta, btheta, c6theta, norm6
+      DOUBLE PRECISION cos2,cos4,cos6,sin2,sin4,sin6
+
+       call mypow_log(abs(mycos(theta)), coshi, coslo)
+       cos2=mypow_desde_log(coshi,coslo,2.0d0)
+       cos4=mypow_desde_log(coshi,coslo,4.0d0)
+       cos6=mypow_desde_log(coshi,coslo,6.0d0)
+       call mypow_log(abs(mysin(theta)), sinhi, sinlo)
+       sin2=mypow_desde_log(sinhi,sinlo,2.0d0)
+       sin4=mypow_desde_log(sinhi,sinlo,4.0d0)
+       sin6=mypow_desde_log(sinhi,sinlo,6.0d0)
+       call mypow_log(rnorm, normhi, normlo)
+       norm6=mypow_desde_log(normhi,normlo,6.0d0)
+
+       atheta=a1*cos2
+       atheta=atheta+a2*cos4
+       atheta=atheta+a3*cos6
+       btheta=b0
+       btheta=btheta+b1*cos2
+       btheta=btheta+b2*cos4
+       btheta=btheta+b3*cos6
+       c6theta=c60
+       c6theta=c6theta+c61*sin2
+       c6theta=c6theta+c62*sin4
+       c6theta=c6theta+c63*sin6
+
+       eterm1=a0*myexp(atheta-rnorm*btheta)
+       eterm2=FN1(rnorm*btheta)*c6theta/norm6
+      END SUBROUTINE termino_dispersion
+
+! v3-cuda-optimizacion/optimizacion-vpot/split-he-dihidrogen: copia
+! DEVICE-ONLY, solo para medir, de termino_dispersion con cos2/cos4/cos6/
+! sin2/sin4/sin6 en memoria compartida (scratchpad privado por hilo, no
+! compartido entre hilos) en vez de dejar que el compilador los mande a
+! memoria local si hace falta. No se puede hacer attributes(host,device)
+! porque SHARED no esta permitido en subprogramas host (confirmado) y
+! __CUDA_ARCH__ no existe en nvfortran (confirmado con un error deliberado
+! dentro de un #ifdef que nunca se disparo) -- asi que esta es una copia
+! real, no una rama condicional. NO es candidata a produccion mientras
+! exista como copia duplicada -- ver split-he-dihidrogen.md.
+!$pgi noinline
+attributes(device) SUBROUTINE termino_dispersion_shared(theta, &
+     rnorm, eterm1, eterm2, coshi, coslo, sinhi, sinlo, normhi, &
+     normlo, atheta, btheta, c6theta, norm6)
+      IMPLICIT NONE
+      INCLUDE 'param_atoms_bh_freeform.h'
+      DOUBLE PRECISION theta, rnorm, eterm1, eterm2
+      DOUBLE PRECISION coshi, coslo, sinhi, sinlo
+      DOUBLE PRECISION normhi, normlo, atheta, btheta, c6theta, norm6
+      DOUBLE PRECISION, SHARED :: cos2(32),cos4(32),cos6(32)
+      DOUBLE PRECISION, SHARED :: sin2(32),sin4(32),sin6(32)
+      INTEGER :: tid
+      tid = threadIdx%x
+
+       call mypow_log(abs(mycos(theta)), coshi, coslo)
+       cos2(tid)=mypow_desde_log(coshi,coslo,2.0d0)
+       cos4(tid)=mypow_desde_log(coshi,coslo,4.0d0)
+       cos6(tid)=mypow_desde_log(coshi,coslo,6.0d0)
+       call mypow_log(abs(mysin(theta)), sinhi, sinlo)
+       sin2(tid)=mypow_desde_log(sinhi,sinlo,2.0d0)
+       sin4(tid)=mypow_desde_log(sinhi,sinlo,4.0d0)
+       sin6(tid)=mypow_desde_log(sinhi,sinlo,6.0d0)
+       call mypow_log(rnorm, normhi, normlo)
+       norm6=mypow_desde_log(normhi,normlo,6.0d0)
+
+       atheta=a1*cos2(tid)
+       atheta=atheta+a2*cos4(tid)
+       atheta=atheta+a3*cos6(tid)
+       btheta=b0
+       btheta=btheta+b1*cos2(tid)
+       btheta=btheta+b2*cos4(tid)
+       btheta=btheta+b3*cos6(tid)
+       c6theta=c60
+       c6theta=c6theta+c61*sin2(tid)
+       c6theta=c6theta+c62*sin4(tid)
+       c6theta=c6theta+c63*sin6(tid)
+
+       eterm1=a0*myexp(atheta-rnorm*btheta)
+       eterm2=FN1(rnorm*btheta)*c6theta/norm6
+      END SUBROUTINE termino_dispersion_shared
+
+! Kernels de prueba minimos, solo para medir registros con ncu -- "bypass"
+! de toda la jerarquia real (He_dihydrogen/potenbh/vpot/hpsi/dmc2, todas
+! host,device de verdad por la ruta CPU-secuencial-con-semillas-GPU, ver
+! split-he-dihidrogen.md): un kernel attributes(global) nunca lo ve la
+! CPU, asi que puede llamar a termino_dispersion_shared sin arrastrar
+! ningun problema de dualidad host/device mas arriba. Mismo theta/rnorm
+! de entrada en los dos kernels, para comparar en igualdad de condiciones.
+attributes(global) SUBROUTINE k_test_dispersion(n, theta_in, rnorm_in, eterm1_out, eterm2_out)
+      INTEGER, VALUE :: n
+      DOUBLE PRECISION, DEVICE, INTENT(IN) :: theta_in(n), rnorm_in(n)
+      DOUBLE PRECISION, DEVICE, INTENT(OUT) :: eterm1_out(n), eterm2_out(n)
+      DOUBLE PRECISION :: coshi, coslo, sinhi, sinlo
+      DOUBLE PRECISION :: normhi, normlo, atheta, btheta, c6theta, norm6
+      INTEGER :: i
+      i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+      IF (i <= n) THEN
+        call termino_dispersion(theta_in(i), rnorm_in(i), eterm1_out(i), &
+             eterm2_out(i), coshi, coslo, sinhi, sinlo, normhi, normlo, &
+             atheta, btheta, c6theta, norm6)
+      END IF
+      END SUBROUTINE k_test_dispersion
+
+attributes(global) SUBROUTINE k_test_dispersion_shared(n, theta_in, rnorm_in, eterm1_out, eterm2_out)
+      INTEGER, VALUE :: n
+      DOUBLE PRECISION, DEVICE, INTENT(IN) :: theta_in(n), rnorm_in(n)
+      DOUBLE PRECISION, DEVICE, INTENT(OUT) :: eterm1_out(n), eterm2_out(n)
+      DOUBLE PRECISION :: coshi, coslo, sinhi, sinlo
+      DOUBLE PRECISION :: normhi, normlo, atheta, btheta, c6theta, norm6
+      INTEGER :: i
+      i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+      IF (i <= n) THEN
+        call termino_dispersion_shared(theta_in(i), rnorm_in(i), eterm1_out(i), &
+             eterm2_out(i), coshi, coslo, sinhi, sinlo, normhi, normlo, &
+             atheta, btheta, c6theta, norm6)
+      END IF
+      END SUBROUTINE k_test_dispersion_shared
+
+end module mterminodispersion

@@ -112,7 +112,7 @@ attributes(host, device) subroutine wavef_derwavefhe4(atom, wfhe4, d1wf, d2wf)
   type(vec3), intent (out) :: d1wf(nhe4)
   real(kind=r8), intent (out) :: d2wf(nhe4)
   type(vec3) :: rtemp
-  real(kind=r8) :: ujas,ujasp,ujass,rij
+  real(kind=r8) :: ujas,ujasp,ujass,rij,inv_rij
   real(kind=r8) :: rij_hi,rij_lo,rijp2,rijp2p1
   integer(kind=i4) :: iatom,jatom
 
@@ -126,6 +126,7 @@ attributes(host, device) subroutine wavef_derwavefhe4(atom, wfhe4, d1wf, d2wf)
     do jatom=iatom+1,nhe4
       rtemp%comp=atom(iatom)%comp-atom(jatom)%comp
       rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+      inv_rij=1.0_r8/rij
       call mypow_log(rij, rij_hi, rij_lo)
 
       ! ---- parte de wavefhe4 (valor) ----
@@ -136,8 +137,8 @@ attributes(host, device) subroutine wavef_derwavefhe4(atom, wfhe4, d1wf, d2wf)
       ! ---- parte de derwavefhe4 (derivada) ----
       rijp2p1=mypow_desde_log(rij_hi,rij_lo,phe4(2)+1.0_r8)
       ujasp=phe4(1)*phe4(2)/rijp2p1
-      ujass=-(phe4(2)+1)*ujasp/rij
-      ujasp=(ujasp-phe4(3))/rij
+      ujass=-(phe4(2)+1)*ujasp*inv_rij
+      ujasp=(ujasp-phe4(3))*inv_rij
       d1wf(iatom)%comp(:)=d1wf(iatom)%comp(:)+ujasp*rtemp%comp(:)
       d1wf(jatom)%comp(:)=d1wf(jatom)%comp(:)-ujasp*rtemp%comp(:)
       d2wf(iatom)=d2wf(iatom)+ujass

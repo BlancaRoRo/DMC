@@ -89,8 +89,14 @@ include 'param_atoms_bh_freeform.h'
     double precision, intent(out) :: v, vp
     double precision :: x, x2, x3, x6, x7, x8, x9, x10, x11
     double precision :: F, Fp, sum1, sum2, expbase, addin, Vap, Vbp
+    ! PRUEBA v3-cuda-optimizacion/mapa-sfu: req_HeHe/D_HeHe son PARAMETER
+    ! (constantes reales), y todas las divisiones de esta rutina son por
+    ! una potencia de x -- se cachea 1/x una vez y se construyen las
+    ! potencias reciprocas por multiplicacion, igual que en duhe4x.
+    double precision, parameter :: inv_req_HeHe = 1.d0/req_HeHe
+    double precision :: inv_x, inv_x2, inv_x6, inv_x7, inv_x8, inv_x9, inv_x10, inv_x11
 
-    x  = r/req_HeHe
+    x  = r*inv_req_HeHe
     x2 = x*x
     x3 = x2*x
     x6 = x3*x3
@@ -100,17 +106,26 @@ include 'param_atoms_bh_freeform.h'
     x10= x8*x2
     x11= x10*x
 
+    inv_x  = 1.d0/x
+    inv_x2 = inv_x*inv_x
+    inv_x6 = inv_x2*inv_x2*inv_x2
+    inv_x7 = inv_x6*inv_x
+    inv_x8 = inv_x6*inv_x2
+    inv_x9 = inv_x8*inv_x
+    inv_x10= inv_x8*inv_x2
+    inv_x11= inv_x10*inv_x
+
     F  = 1.d0
     Fp = 0.d0
     if(x < D_HeHe) then
-        F =myexp(-(D_HeHe/x-1.d0)**2)
-        Fp=2.d0*(D_HeHe/x-1.d0)*(D_HeHe/x2) * F
+        F =myexp(-(D_HeHe*inv_x-1.d0)**2)
+        Fp=2.d0*(D_HeHe*inv_x-1.d0)*(D_HeHe*inv_x2) * F
     end if
 
     expbase = myexp(-alpha_HeHe*x + beta_HeHe*x2)
 
     ! ---- V_hehe ----
-    sum1 = c6_HeHe/x6 + c8_HeHe/x8 + c10_HeHe/x10
+    sum1 = c6_HeHe*inv_x6 + c8_HeHe*inv_x8 + c10_HeHe*inv_x10
     v = A_HeHe*expbase - F*sum1
     addin=0.d0
     if (x >= xx1_HeHe .and. x <=xx2_HeHe) then
@@ -120,7 +135,7 @@ include 'param_atoms_bh_freeform.h'
     v = eps_HeHe * v
 
     ! ---- Vp_hehe ----
-    sum2 = 6.d0*c6_HeHe/x7 + 8.d0*c8_HeHe/x9 + 10.d0*c10_HeHe/x11
+    sum2 = 6.d0*c6_HeHe*inv_x7 + 8.d0*c8_HeHe*inv_x9 + 10.d0*c10_HeHe*inv_x11
     Vbp = A_HeHe*(-alpha_HeHe+2.d0*beta_HeHe*x) &
         *expbase - Fp*sum1 + F*sum2
     Vap = 0.d0

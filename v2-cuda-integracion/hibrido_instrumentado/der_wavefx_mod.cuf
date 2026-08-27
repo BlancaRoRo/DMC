@@ -88,7 +88,7 @@ attributes(host, device) subroutine duhe3x(rivec, smol, d1ux, d2ux, d1zux, d2zux
      rijp2=mypow_desde_log(rij_hi,rij_lo,pxhe3(2,il))
      rijp4=mypow_desde_log(rij_hi,rij_lo,pxhe3(4,il))
      ulx=  -pxhe3(1,il)/rijp2                                   &
- &         -pxhe3(3,il)*rijp4-pxhe3(5,il)*log(rij)
+ &         -pxhe3(3,il)*rijp4-pxhe3(5,il)*rij_hi
      ulxp=( pxhe3(1,il)*pxhe3(2,il)/rijp2                       &
  &         -pxhe3(3,il)*pxhe3(4,il)*rijp4-pxhe3(5,il))/rij
      ulxs=(-pxhe3(1,il)*pxhe3(2,il)*(pxhe3(2,il)+1.0_r8)/rijp2  &
@@ -126,7 +126,7 @@ attributes(host, device) function uhe3x(rij, cth)
    uhe3x=0.0_r8
    do il=0,lxhe3
      ul=-pxhe3(1,il)/mypow_desde_log(rij_hi,rij_lo,pxhe3(2,il))-pxhe3(3,il)*mypow_desde_log(rij_hi,rij_lo,pxhe3(4,il))  &
- &      -pxhe3(5,il)*log(rij)
+ &      -pxhe3(5,il)*rij_hi
      uhe3x=uhe3x+ul*pl(il)
    enddo
 
@@ -182,7 +182,7 @@ attributes(host, device) subroutine derwavefx(atom, sprop, d1wf, d2wf, d1zwf, d2
   real(kind=r8) :: d2ux
   real(kind=r8) :: d1zux(2),d2zux
   type(vec3) :: rtemp,smol(3)
-  real(kind=r8) :: dnor
+  real(kind=r8) :: dnor, inv_dnor
   integer(kind=i4) :: iatom,jatom,jhe3
   integer(kind=i4) :: ic
 
@@ -197,7 +197,8 @@ attributes(host, device) subroutine derwavefx(atom, sprop, d1wf, d2wf, d1zwf, d2
    if(impurmol) then
      do ic=1,3
        dnor=sqrt(dot_product(sprop(ic)%comp,sprop(ic)%comp))
-       smol(ic)%comp(:)=sprop(ic)%comp(:)/dnor
+       inv_dnor=1.0_r8/dnor
+       smol(ic)%comp(:)=sprop(ic)%comp(:)*inv_dnor
      enddo
    endif
 
