@@ -151,8 +151,18 @@ attributes(host, device) subroutine derananum(atom, sprop, hb2m, b, &
   type(vec3), intent (out) :: dwf(natom)
   real(kind=r8), intent (out) :: dphi(2)
 
-  type(vec3) :: d1wfhe4(nhe4), d1wfhe3(nhe3), d1wfm(ngatom), d1wfx(natom)
-  real(kind=r8) :: d2wfhe4(nhe4), d2wfhe3(nhe3), d2wfm(ngatom), d2wfx(natom)
+  ! v3-cuda-optimizacion/derananum.md Parte 9: tamano FIJO (64, misma
+  ! cota ya usada en derananum_split_mod.cuf) en vez de nhe4/nhe3/
+  ! ngatom/natom (variables device, valor solo conocido en tiempo de
+  ! ejecucion) -- evita que estos locales de tamano dinamico tiren del
+  ! heap de malloc de device (compartido por TODA la GPU, se agotaba a
+  ! partir de ~3000-3500 walkers concurrentes). Con tamano fijo, cada
+  ! hilo reserva su propio hueco en memoria local automatica, sin pedir
+  ! nada a ningun heap compartido. Los usos de mas abajo (paso a
+  ! subrutina de forma explicita, indexado 1..nhe4/nhe3/ngatom/natom)
+  ! siguen siendo validos con cualquier tamano declarado >= el real.
+  type(vec3) :: d1wfhe4(64), d1wfhe3(64), d1wfm(64), d1wfx(64)
+  real(kind=r8) :: d2wfhe4(64), d2wfhe3(64), d2wfm(64), d2wfx(64)
   real(kind=r8) :: d1zwfx(2), d2zwfx
   real(kind=r8) :: der2
   integer(kind=i4) :: ihe3, iatom

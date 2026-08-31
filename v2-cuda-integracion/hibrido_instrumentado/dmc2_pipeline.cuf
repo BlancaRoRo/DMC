@@ -249,10 +249,8 @@ attributes(host) subroutine inicializa_pipeline(nmax)
    istat = cudaEventRecord(ev_join1, stream_b)
    istat = cudaStreamWaitEvent(stream_a, ev_join1, 0)
 
-   call k_fase_c<<<blocks,threads,0,stream_a>>>(nmax, wf_p, wfold_p, kin_p, pot_p, ene_p, activo_p)
-
-   call k_fase_d<<<blocks,threads,0,stream_a>>>(nmax, atom_p, sprop_p, hb2m_p, b_p, &
-                  dwf_p, dphi_p, activo_p)
+   call k_fase_cd<<<blocks,threads,0,stream_a>>>(nmax, wf_p, wfold_p, kin_p, pot_p, ene_p, &
+                  atom_p, sprop_p, hb2m_p, b_p, dwf_p, dphi_p, activo_p)
 
    ! horquilla 2 (fase E = 2a hpsi): igual que la horquilla 1
    istat = cudaEventRecord(ev_fork2, stream_a)
@@ -273,14 +271,8 @@ attributes(host) subroutine inicializa_pipeline(nmax)
    istat = cudaEventRecord(ev_join2, stream_b)
    istat = cudaStreamWaitEvent(stream_a, ev_join2, 0)
 
-   call k_fase_f<<<blocks,threads,0,stream_a>>>(nmax, wf_p, wfold_p, kin_p, pot_p, ene_p, activo_p)
-
-   call k_fase_g<<<blocks,threads,0,stream_a>>>(nmax, eold_p, ene_p, irn_p, activo_p, nsons_p)
-
-   ! Fase H (v3-cuda-optimizacion/fase3): denssumapaso fusionada, usa
-   ! las posiciones/nsons ya finales de esta misma fase, sin reparto ni
-   ! copia H2D adicional -- ver cabecera del kernel mas abajo.
-   call k_fase_h<<<blocks,threads,0,stream_a>>>(nmax, atom_p, sprop_p, nsons_p, &
+   call k_fase_fgh<<<blocks,threads,0,stream_a>>>(nmax, wf_p, wfold_p, kin_p, pot_p, ene_p, activo_p, &
+                  eold_p, irn_p, nsons_p, atom_p, sprop_p, &
                   h44_p, h33_p, h43_p, hi4_p, hi3_p, hia_p, &
                   hbhe4_p, hbhe3_p, hbhe_p, hybhe4_p, hybhe3_p, hybhe_p)
 
@@ -634,6 +626,73 @@ attributes(global) subroutine k_fase_d(nmax, atom, sprop, hb2m, b, dwf, dphi, ac
 end subroutine k_fase_d
 
 ! =====================================================================
+! ---- v3-cuda-optimizacion/arquitectura-lanzamiento/fusion-fases-cd-fgh:
+! PRUEBA -- k_fase_c + k_fase_d fusionadas en un solo kernel/nodo del
+! grafo. Mismo cuerpo exacto de ambas, en el mismo orden, sin cambiar
+! ninguna formula. Unico cambio real: "activo" se queda en un registro
+! local (activo_l) para la parte D en vez de escribirse en activo(i) y
+! releerse en el kernel siguiente -- activo(i) SI se sigue escribiendo
+! al final (k_fase_f, en otro nodo del grafo, todavia lo necesita como
+! entrada). k_fase_c/k_fase_d se dejan intactas, sin usar, como
+! referencia -- mismo criterio que el resto del arbol. ----
+! =====================================================================
+attributes(global) subroutine k_fase_cd(nmax, wf, wfold, kin, pot, ene, &
+                                         atom, sprop, hb2m, b, dwf, dphi, activo)
+  integer(kind=i4), value :: nmax
+  real(kind=r8), device, intent (in) :: wf(nmax), wfold(nmax), kin(nmax), pot(nmax)
+  real(kind=r8), device, intent (out) :: ene(nmax)
+  type(vec3), device, intent (inout) :: atom(nmax,natom)
+  type(vec3), device, intent (inout) :: sprop(nmax,3)
+  real(kind=r8), device, intent (in) :: hb2m(nmax,natom)
+  real(kind=r8), device, intent (in) :: b(nmax)
+  type(vec3), device, intent (in) :: dwf(nmax,natom)
+  real(kind=r8), device, intent (in) :: dphi(nmax,2)
+  logical, device, intent (out) :: activo(nmax)
+
+  real(kind=r8) :: wftest
+  logical :: activo_l
+  type(vec3) :: sprop_l(3)
+  real(kind=r8) :: sigma2_l, sig2rot_l, sig2hrot_l
+  real(kind=r8) :: phix1, phiy, phix2
+  integer(kind=i4) :: i, iatom
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= nw_actual) then
+     ! ---- fase C ----
+     ene(i) = kin(i) + pot(i)
+     wftest = (wf(i)/wfold(i))**2
+     activo_l = (wftest .ge. ratio)
+     activo(i) = activo_l
+
+     ! ---- fase D (activo_l en registro, no relee activo(i) de global) ----
+     if (activo_l) then
+       do iatom = 1, ncmtras
+         sigma2_l = 2.0_r8*hb2m(i,iatom)*dtau
+         atom(i,iatom)%comp(:) = atom(i,iatom)%comp(:) + 0.50_r8*sigma2_l*dwf(i,iatom)%comp(:)
+       enddo
+       if (rotamol) then
+         sprop_l(1) = sprop(i,1)
+         sprop_l(2) = sprop(i,2)
+         sprop_l(3) = sprop(i,3)
+
+         sig2rot_l  = 2.0_r8*b(i)*dtau
+         sig2hrot_l = b(i)*dtau
+         phix1 = 0.50_r8*sig2hrot_l*dphi(i,1)
+         phiy  = 0.50_r8*sig2rot_l *dphi(i,2)
+         phix2 = 0.50_r8*sig2hrot_l*dphi(i,1)
+         call rota(1, phix1, sprop_l)
+         call rota(2, phiy,  sprop_l)
+         call rota(1, phix2, sprop_l)
+
+         sprop(i,1) = sprop_l(1)
+         sprop(i,2) = sprop_l(2)
+         sprop(i,3) = sprop_l(3)
+       endif
+     endif
+   endif
+end subroutine k_fase_cd
+
+! =====================================================================
 ! ---- Fase F: dmc2.cuf:135-136 -- wftest tras la 2a hpsi, actualiza
 ! activo (si ya estaba inactivo, se queda inactivo; si seguia activo,
 ! se comprueba el 2o test). Combina ene=kin+pot otra vez (2a hpsi). ----
@@ -712,7 +771,7 @@ attributes(global) subroutine k_fase_h(nmax, atom, sprop, nsons, &
 
   type(vec3) :: atom_l(64), sprop_l(3), rtemp
   real(kind=r8) :: rhe(3*64)
-  real(kind=r8) :: rij, cth, sth, dnor, inv_dnor, cval, sval, w, dummy
+  real(kind=r8) :: rij, cth, sth, inv_sth, dnor, inv_dnor, cval, sval, w, dummy
   integer(kind=i4) :: i, iatom, jatom, izatom, ihr, ihc, ihs
 
    i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
@@ -769,19 +828,20 @@ attributes(global) subroutine k_fase_h(nmax, atom, sprop, nsons, &
            if (impurmol) then
              cval = dot_product(rtemp%comp, sprop_l(3)%comp)*inv_dnor
              cth = cval/rij; sth = sqrt(1.0_r8-cth**2); sval = rij*sth
+             inv_sth = 1.0_r8/sth
              if (cval.gt.0.0_r8) then
                ihc = int(cval*inv_dhc_h)+1; ihc = min(ihc,nhc_h)
              else
                ihc = int(cval*inv_dhc_h)-1; ihc = max(ihc,-nhc_h)
              endif
              ihs = int(sval*inv_dhs_h)+1; ihs = min(ihs,nhs_h)
-             dummy = atomicadd(hbhe4(ihc,ihs), w/sth)
-             dummy = atomicadd(hbhe(ihc,ihs), w/sth)
+             dummy = atomicadd(hbhe4(ihc,ihs), w*inv_sth)
+             dummy = atomicadd(hbhe(ihc,ihs), w*inv_sth)
              if (rhe(izatom-1).lt.0.0_r8) then
                ihs = int(-sval*inv_dhs_h)-1; ihs = max(ihs,-nhs_h)
              endif
-             dummy = atomicadd(hybhe4(ihc,ihs), w/sth)
-             dummy = atomicadd(hybhe(ihc,ihs), w/sth)
+             dummy = atomicadd(hybhe4(ihc,ihs), w*inv_sth)
+             dummy = atomicadd(hybhe(ihc,ihs), w*inv_sth)
              izatom = izatom+3
            endif
          enddo
@@ -795,19 +855,20 @@ attributes(global) subroutine k_fase_h(nmax, atom, sprop, nsons, &
            if (impurmol) then
              cval = dot_product(rtemp%comp, sprop_l(3)%comp)*inv_dnor
              cth = cval/rij; sth = sqrt(1.0_r8-cth**2); sval = rij*sth
+             inv_sth = 1.0_r8/sth
              if (cval.gt.0.0_r8) then
                ihc = int(cval*inv_dhc_h)+1; ihc = min(ihc,nhc_h)
              else
                ihc = int(cval*inv_dhc_h)-1; ihc = max(ihc,-nhc_h)
              endif
              ihs = int(sval*inv_dhs_h)+1; ihs = min(ihs,nhs_h)
-             dummy = atomicadd(hbhe3(ihc,ihs), w/sth)
-             dummy = atomicadd(hbhe(ihc,ihs), w/sth)
+             dummy = atomicadd(hbhe3(ihc,ihs), w*inv_sth)
+             dummy = atomicadd(hbhe(ihc,ihs), w*inv_sth)
              if (rhe(izatom-1).lt.0.0_r8) then
                ihs = int(-sval*inv_dhs_h)-1; ihs = max(ihs,-nhs_h)
              endif
-             dummy = atomicadd(hybhe3(ihc,ihs), w/sth)
-             dummy = atomicadd(hybhe(ihc,ihs), w/sth)
+             dummy = atomicadd(hybhe3(ihc,ihs), w*inv_sth)
+             dummy = atomicadd(hybhe(ihc,ihs), w*inv_sth)
              izatom = izatom+3
            endif
          enddo
@@ -815,5 +876,169 @@ attributes(global) subroutine k_fase_h(nmax, atom, sprop, nsons, &
      endif
    endif
 end subroutine k_fase_h
+
+! =====================================================================
+! ---- v3-cuda-optimizacion/arquitectura-lanzamiento/fusion-fases-cd-fgh:
+! PRUEBA -- k_fase_f + k_fase_g + k_fase_h fusionadas en un solo kernel.
+! Mismo cuerpo exacto de las 3, mismo orden. "activo" ya NO necesita
+! escribirse/leerse en activo(i) en absoluto (nada despues de esta
+! fase la vuelve a usar) -- se queda entera en registro (activo_l).
+! "nsons" SI se sigue escribiendo en nsons(i) al final (la CPU lo lee
+! de vuelta para el reparto de poblacion), pero la lectura que antes
+! hacia k_fase_h por separado se sustituye por el registro local
+! (nsons_l) recien calculado. k_fase_f/g/h se dejan intactas, sin usar,
+! como referencia. ----
+! =====================================================================
+attributes(global) subroutine k_fase_fgh(nmax, wf, wfold, kin, pot, ene, activo, &
+                    eold, irn, nsons, atom, sprop, &
+                    h44, h33, h43, hi4, hi3, hia, &
+                    hbhe4, hbhe3, hbhe, hybhe4, hybhe3, hybhe)
+  integer(kind=i4), value :: nmax
+  real(kind=r8), device, intent (in) :: wf(nmax), wfold(nmax), kin(nmax), pot(nmax)
+  real(kind=r8), device, intent (out) :: ene(nmax)
+  logical, device, intent (in) :: activo(nmax)
+  real(kind=r8), device, intent (in) :: eold(nmax)
+  integer(kind=i8), device, intent (inout) :: irn(nmax)
+  integer(kind=i4), device, intent (inout) :: nsons(nmax)
+  type(vec3), device, intent (in) :: atom(nmax,natom)
+  type(vec3), device, intent (in) :: sprop(nmax,3)
+  real(kind=r8), device :: h44(nhr_h), h33(nhr_h), h43(nhr_h)
+  real(kind=r8), device :: hi4(nhr_h), hi3(nhr_h), hia(nhr_h)
+  real(kind=r8), device :: hbhe4(-nhc_h:nhc_h,nhs_h), hbhe3(-nhc_h:nhc_h,nhs_h), hbhe(-nhc_h:nhc_h,nhs_h)
+  real(kind=r8), device :: hybhe4(-nhc_h:nhc_h,-nhs_h:nhs_h), hybhe3(-nhc_h:nhc_h,-nhs_h:nhs_h), hybhe(-nhc_h:nhc_h,-nhs_h:nhs_h)
+
+  real(kind=r8) :: wftest, gb, rn
+  logical :: activo_l
+  integer(kind=i8) :: irn_l
+  integer(kind=i4) :: nsons_l
+  type(vec3) :: atom_l(64), sprop_l(3), rtemp
+  real(kind=r8) :: rhe(3*64)
+  real(kind=r8) :: rij, cth, sth, inv_sth, dnor, inv_dnor, cval, sval, w, dummy
+  integer(kind=i4) :: i, iatom, jatom, izatom, ihr, ihc, ihs
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= nw_actual) then
+     ! ---- fase F ----
+     ene(i) = kin(i) + pot(i)
+     activo_l = activo(i)
+     if (activo_l) then
+       wftest = (wf(i)/wfold(i))**2
+       activo_l = (wftest .ge. ratio)
+     endif
+
+     ! ---- fase G (activo_l en registro; nsons_l parte del valor ya
+     ! puesto por fase A si no esta activo, igual que el original) ----
+     nsons_l = nsons(i)
+     if (activo_l) then
+       gb = myexp(-(0.50_r8*(eold(i)+ene(i))-etrial)*dtau)
+       irn_l = irn(i)
+       call rand1_gpu(rn, irn_l)
+       irn(i) = irn_l
+       nsons_l = int(gb+rn)
+       if (nsons_l .gt. 10) nsons_l = 0
+     endif
+     nsons(i) = nsons_l
+
+     ! ---- fase H (usa nsons_l en vez de releer nsons(i)) ----
+     if (nsons_l > 0) then
+       w = real(nsons_l, r8)
+
+       do iatom = 1, natom
+         atom_l(iatom) = atom(i,iatom)
+       enddo
+       sprop_l(1) = sprop(i,1); sprop_l(2) = sprop(i,2); sprop_l(3) = sprop(i,3)
+
+       do iatom=1,nhe4-1
+         do jatom=iatom+1,nhe4
+           rtemp%comp = atom_l(iatom)%comp - atom_l(jatom)%comp
+           rij = sqrt(dot_product(rtemp%comp,rtemp%comp))
+           ihr = int(rij*inv_dhr_h)+1; ihr = min(ihr,nhr_h)
+           dummy = atomicadd(h44(ihr), w)
+         enddo
+       enddo
+
+       do iatom=nhe4+1,nhe4+nhe3
+         do jatom=iatom+1,nhe4+nhe3
+           rtemp%comp = atom_l(iatom)%comp - atom_l(jatom)%comp
+           rij = sqrt(dot_product(rtemp%comp,rtemp%comp))
+           ihr = int(rij*inv_dhr_h)+1; ihr = min(ihr,nhr_h)
+           dummy = atomicadd(h33(ihr), w)
+         enddo
+       enddo
+
+       do iatom=1,nhe4
+         do jatom=nhe4+1,nhe4+nhe3
+           rtemp%comp = atom_l(iatom)%comp - atom_l(jatom)%comp
+           rij = sqrt(dot_product(rtemp%comp,rtemp%comp))
+           ihr = int(rij*inv_dhr_h)+1; ihr = min(ihr,nhr_h)
+           dummy = atomicadd(h43(ihr), w)
+         enddo
+       enddo
+
+       if (impureza) then
+         if (impurmol) then
+           dnor = sqrt(dot_product(sprop_l(3)%comp, sprop_l(3)%comp))
+           inv_dnor = 1.0_r8/dnor
+           call ccuerpo(atom_l(1:natom), sprop_l, rhe(1:3*ngatom))
+           izatom = 3
+         endif
+
+         do iatom=1,nhe4
+           rtemp%comp = atom_l(iatom)%comp - atom_l(natom)%comp
+           rij = sqrt(dot_product(rtemp%comp,rtemp%comp))
+           ihr = int(rij*inv_dhr_h)+1; ihr = min(ihr,nhr_h)
+           dummy = atomicadd(hi4(ihr), w)
+           dummy = atomicadd(hia(ihr), w)
+           if (impurmol) then
+             cval = dot_product(rtemp%comp, sprop_l(3)%comp)*inv_dnor
+             cth = cval/rij; sth = sqrt(1.0_r8-cth**2); sval = rij*sth
+             inv_sth = 1.0_r8/sth
+             if (cval.gt.0.0_r8) then
+               ihc = int(cval*inv_dhc_h)+1; ihc = min(ihc,nhc_h)
+             else
+               ihc = int(cval*inv_dhc_h)-1; ihc = max(ihc,-nhc_h)
+             endif
+             ihs = int(sval*inv_dhs_h)+1; ihs = min(ihs,nhs_h)
+             dummy = atomicadd(hbhe4(ihc,ihs), w*inv_sth)
+             dummy = atomicadd(hbhe(ihc,ihs), w*inv_sth)
+             if (rhe(izatom-1).lt.0.0_r8) then
+               ihs = int(-sval*inv_dhs_h)-1; ihs = max(ihs,-nhs_h)
+             endif
+             dummy = atomicadd(hybhe4(ihc,ihs), w*inv_sth)
+             dummy = atomicadd(hybhe(ihc,ihs), w*inv_sth)
+             izatom = izatom+3
+           endif
+         enddo
+
+         do iatom=nhe4+1,nhe4+nhe3
+           rtemp%comp = atom_l(iatom)%comp - atom_l(natom)%comp
+           rij = sqrt(dot_product(rtemp%comp,rtemp%comp))
+           ihr = int(rij*inv_dhr_h)+1; ihr = min(ihr,nhr_h)
+           dummy = atomicadd(hi3(ihr), w)
+           dummy = atomicadd(hia(ihr), w)
+           if (impurmol) then
+             cval = dot_product(rtemp%comp, sprop_l(3)%comp)*inv_dnor
+             cth = cval/rij; sth = sqrt(1.0_r8-cth**2); sval = rij*sth
+             inv_sth = 1.0_r8/sth
+             if (cval.gt.0.0_r8) then
+               ihc = int(cval*inv_dhc_h)+1; ihc = min(ihc,nhc_h)
+             else
+               ihc = int(cval*inv_dhc_h)-1; ihc = max(ihc,-nhc_h)
+             endif
+             ihs = int(sval*inv_dhs_h)+1; ihs = min(ihs,nhs_h)
+             dummy = atomicadd(hbhe3(ihc,ihs), w*inv_sth)
+             dummy = atomicadd(hbhe(ihc,ihs), w*inv_sth)
+             if (rhe(izatom-1).lt.0.0_r8) then
+               ihs = int(-sval*inv_dhs_h)-1; ihs = max(ihs,-nhs_h)
+             endif
+             dummy = atomicadd(hybhe3(ihc,ihs), w*inv_sth)
+             dummy = atomicadd(hybhe(ihc,ihs), w*inv_sth)
+             izatom = izatom+3
+           endif
+         enddo
+       endif
+     endif
+   endif
+end subroutine k_fase_fgh
 
 end module mdmc2_pipeline

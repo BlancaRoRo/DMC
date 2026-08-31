@@ -415,8 +415,14 @@ contains
    call tiempos_tic(tt0)
    atom_p(1:nwpaso,:) = atom_h; sprop_p(1:nwpaso,:) = sprop_h
    wf_p(1:nwpaso) = wf_h
-   kin_p(1:nwpaso) = kin_h
-   pot_p(1:nwpaso) = pot_h; ene_p(1:nwpaso) = ene_h
+   ! kin_p/pot_p: NO se copian a device (ver stall-.../aos-to-soa.md,
+   ! mismo caso ya resuelto para eimp/erot) -- ni k_fase_a ni k_fase_d
+   ! los reciben como argumento, y k_derananum_join_t/k_vpot_3warp_t
+   ! los sobrescriben con el valor fresco de ESTE paso antes de que
+   ! nadie los lea. kin_h/pot_h se mantienen empaquetados (arriba) solo
+   ! para el volcado forense de mas abajo, que si necesita el valor de
+   ! ENTRADA real.
+   ene_p(1:nwpaso) = ene_h
    dwf_p(1:nwpaso,:) = dwf_h; dphi_p(1:nwpaso,:) = dphi_h
    irn_p(1:nwpaso) = irn_walkers(1:nwpaso)
    t_h2d7=t_h2d7+tiempos_toc(tt0)

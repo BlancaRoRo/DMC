@@ -75,6 +75,27 @@ Total medido (11,36 ms/paso) extrapolado a los 1.180 pasos de `test-walker`: **1
 
 Verificado: recompila limpio, corridas de humo (250w) y batería completa (250-3.000w) sin errores/NaN, mismas poblaciones finales.
 
+## Adenda: `kin`/`pot` tenían el mismo caso que `erot`/`eimp`, sin cerrar
+
+La cuantificación de arriba metía `kin`/`pot` en el grupo "necesaria" (línea de referencia) sin comprobar, como sí se hizo con `erot`/`eimp`, si su **ida** (H2D) hacía falta de verdad. Revisando las firmas reales de `k_fase_a`/`k_fase_d` (`dmc2_pipeline.cuf`) resulta que ninguna de las dos las recibe como argumento — `kin_p`/`pot_p` llegan a la GPU y, antes de que nada los lea, ya los ha sobrescrito el propio fork de este mismo paso (`k_derananum_join_t`/`k_vpot_3warp_t`). Exactamente el mismo caso que `erot`/`eimp`, pero sin el mismo arreglo aplicado.
+
+```fortran
+! msteps.f90, pasodmc_gpu_pipeline -- ANTES:
+atom_p(1:nwpaso,:) = atom_h; sprop_p(1:nwpaso,:) = sprop_h
+wf_p(1:nwpaso) = wf_h
+kin_p(1:nwpaso) = kin_h
+pot_p(1:nwpaso) = pot_h; ene_p(1:nwpaso) = ene_h
+
+! DESPUES -- se quita solo la ida de kin/pot (mismo criterio que erot/eimp):
+atom_p(1:nwpaso,:) = atom_h; sprop_p(1:nwpaso,:) = sprop_h
+wf_p(1:nwpaso) = wf_h
+ene_p(1:nwpaso) = ene_h
+```
+
+`kin_h`/`pot_h` se mantienen empaquetados desde `wsim` (no se toca esa parte) porque el volcado forense pre-colapso (`driver_replay.f90`) sí necesita una copia real del valor de entrada; solo se quita la copia H2D hacia `kin_p`/`pot_p`, que nadie llegaba a leer.
+
+Verificado bit a bit contra la versión sin el cambio, configuración real (1000 walkers/100 bloques/100 pasos = 10.000 pasos): `-615.5737694990`, 1000/1000 walkers finales, idéntico.
+
 ## Medición real (3.000 walkers, misma configuración, antes/después)
 
 Comparando `tiempos_opcion7.dat` de una corrida antes de este cambio contra una después, ambas a 3.000 walkers/1.180 pasos:

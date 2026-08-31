@@ -260,10 +260,24 @@ istat = cudaDeviceSetLimit(cudaLimitMallocHeapSize, 512_8*1024_8*1024_8)
 
 Verificado: 4.000 walkers, que antes fallaba siempre, corre limpio tras el cambio (`EXIT=0`, `numero de walkers que tengo finales 4000`). Caso normal (1.000 walkers) sin cambios de comportamiento.
 
-### Solución alternativa (explicada, NO implementada): arrays de tamaño fijo
+### Solución de raíz (aplicada): arrays de tamaño fijo
 
-Subir el límite mueve el techo más arriba, pero no lo elimina — con walkers suficientes, volvería a fallar. La solución de raíz es la que ya usa `k_dmc2` (`dmc2.cuf`) para su propio buffer local (`atom_l(64)`, recortado con `(1:natom)` al usarlo): declarar estos 8 arrays con un tamaño **fijo, conocido en compilación** (p.ej. `64`, con margen de sobra sobre `nhe4=20`/`natom=21` reales) en vez de con la variable runtime, y recortarlos `(1:nhe4)`/`(1:natom)`/etc. en las 4 llamadas donde se usan.
+Subir el límite mueve el techo más arriba, pero no lo elimina — con walkers suficientes, volvería a fallar. La solución de raíz, aplicada más adelante, es la misma que ya usaba `k_dmc2` (`dmc2.cuf`) y los kernels de `derananum_split_mod.cuf` para sus propios buffers locales (`atom_l(64)`, recortado con `(1:natom)`/`(1:nhe4)` al usarlo): declarar estos 8 arrays con un tamaño **fijo, conocido en compilación** (`64`, con margen de sobra sobre `nhe4=20`/`natom=21` reales) en vez de con la variable runtime.
 
-Con tamaño fijo, cada array pasa a vivir en **memoria local del hilo** (privada, reservada de antemano por hilo, sin pedir nada a ningún heap compartido) en vez de en el heap de `device`: no hay ya ningún almacén común del que tirar, así que no hay nada que agotar por muchos hilos que corran a la vez. El coste es que cada hilo reserva más espacio del que usa en la práctica (`64` en vez de `~20` elementos por array, unos 8 KB extra por hilo en total) — lo que en teoría podría reducir cuántos hilos caben a la vez en cada núcleo de la GPU (menor ocupación, no un fallo, como mucho algo más lento), el mismo compromiso ya aceptado conscientemente en `k_dmc2`.
+```fortran
+! ANTES -- tamaño = variable device, valor solo conocido en ejecución:
+type(vec3) :: d1wfhe4(nhe4), d1wfhe3(nhe3), d1wfm(ngatom), d1wfx(natom)
+real(kind=r8) :: d2wfhe4(nhe4), d2wfhe3(nhe3), d2wfm(ngatom), d2wfx(natom)
 
-No implementada en esta sesión — queda como mejora de raíz pendiente si el límite de 512 MB llegara a no ser suficiente en el futuro.
+! DESPUES -- tamaño = literal fijo, mismo criterio que derananum_split_mod.cuf:
+type(vec3) :: d1wfhe4(64), d1wfhe3(64), d1wfm(64), d1wfx(64)
+real(kind=r8) :: d2wfhe4(64), d2wfhe3(64), d2wfm(64), d2wfx(64)
+```
+
+Con tamaño fijo, cada array pasa a vivir en **memoria local del hilo** (privada, reservada automáticamente por hilo según lo que el compilador ya sabe que hace falta) en vez de en el heap de `device`: no hay ya ningún almacén común del que tirar, así que no hay nada que agotar por muchos hilos que corran a la vez. El coste es que cada hilo reserva más espacio del que usa en la práctica (`64` en vez de `~20` elementos por array, unos 8 KB extra por hilo en total) — el mismo compromiso ya aceptado conscientemente en `k_dmc2` y en los kernels ya partidos.
+
+Las 4 llamadas que usan estos arrays (`wavef_derwavefhe4`, `derwavefm`, `derwavefx`, `derwavefhe3`) siguen pasándolos tal cual (asociación de secuencia de Fortran sobre argumento de forma explícita) — no hace falta recortarlos `(1:nhe4)` porque cada subrutina ya declara su propio dummy con el tamaño real que necesita.
+
+**Verificado bit a bit** (opción 5, `k_derananum_t`, la única vía de producción que sigue llamando a esta subrutina) contra la versión sin el cambio, 500 walkers/20 bloques/50 pasos: `-615.5737694990`, 500/500 walkers finales, idéntico en ambas versiones.
+
+El límite de heap de `cudaDeviceSetLimit` (512 MB) se deja tal cual — ya no lo necesita `derananum()`, pero no molesta mantenerlo por si algún día se recupera algún otro uso genuino de memoria dinámica de `device`.
