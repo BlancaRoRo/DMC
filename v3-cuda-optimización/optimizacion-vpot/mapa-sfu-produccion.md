@@ -67,7 +67,7 @@ Trazando la cadena completa de la misma manera para el resto de funciones con SF
 
 | Estado | Método | Cadena real hasta el kernel | RCP64H | RSQ64H |
 |---|---|---|---|---|
-| Visto — **arreglado** (`reciprocos-k-fase-h.md`) | `k_fase_h` | lanzado directo (`dmc2_pipeline.cuf`) | 33 | 26 |
+| Visto — **arreglado** (`reciprocos-k-fase-h.md`; +`reciprocos-k-fase-h-sth.md`) | `k_fase_h` | lanzado directo (`dmc2_pipeline.cuf`) | 33 | 26 |
 | Visto — **arreglado** (`reciprocos-ex0-duhe4x.md` §2-6.1; +`log-rij-redundante.md`) | `duhe4x` | `wavefx`/`derwavefx` ← `k_derananum_resto_t` | 16 | 1 |
 | Visto — **arreglado** (`reciprocos-derwavefx.md`) | `derwavefx` | `k_derananum_resto_t` | 9 | 3 |
 | Visto — **arreglado** (`reciprocos-ex0-duhe4x.md` §2) | `He_dihydrogen_induccion` | `k_vpot_3warp_t` | 9 | 3 |
@@ -125,6 +125,60 @@ De los dos tipos de instrucción SFU encontrados, **la división es el candidato
 **b) Un error en la raíz se propaga peor que un error en la división.** `rh1`/`rh2`/`r0` son la distancia física entre átomos, y esa distancia alimenta lo que viene después para ese par: entra dentro de `FN2(btheta*rh1)`, que llama a `myexp(-x)`. Un error relativo pequeño en `rh1` se amplifica dentro de una exponencial (el error relativo en `exp(-α·r)` es del orden de `α` veces el error en `r`, no 1:1). El resultado de `/rh1**3` en `Ex0=q*FN2(...)*Δx/rh1**3`, en cambio, entra como un factor multiplicativo **lineal** dentro de una suma de energía -- un error ahí se queda proporcional y aislado a ese término, sin amplificarse.
 
 **Conclusión**: la línea de trabajo que sigue (`funciones-nativas-cuda.md` §7 en adelante, o un documento nuevo) ataca las **18 divisiones vivas de `Ex0`/`Ey0`/`Ez0`** (sección 5), cacheando `1.0d0/rh1` una vez y reutilizándolo por multiplicación en vez de dividir 3 veces por `rh1`, `rh2` y `r0` respectivamente -- con una prueba unitaria aislada para medir si el resultado sigue siendo bit a bit idéntico o cuánto diverge, antes de decidir si compensa.
+
+**Nota (tras completar la línea de división)**: con las divisiones ya prácticamente agotadas (mapa §4.1 sin ningún "No visto"), §7 revisa la raíz cuadrada con el mismo nivel de detalle -- confirma en general que no hay redundancia real (razón (a) de arriba se sostiene función por función), con **una excepción real encontrada**: `wavefx`/`derwavefx` calculan el mismo `dnor` por separado (§7b).
+
+## 7. Mapa dedicado de raíces cuadradas (`RSQ64H`): dónde atacar primero
+
+Cerrada casi toda la línea de trabajo de divisiones (mapa §4.1 sin ningún método "No visto"), toca revisar la raíz cuadrada con el mismo rigor -- no basta con el veredicto general de §6 ("no hay redundancia real que explotar"), hay que comprobarlo función por función igual que se hizo con `RCP64H`.
+
+| Estado | Método | Cadena real hasta el kernel | `RSQ64H` |
+|---|---|---|---|
+| Visto — **sin solución barata para la raíz en sí** (§7a); **pero sí se arregló la división que la consume** (`w/sth`, `reciprocos-k-fase-h-sth.md`) | `k_fase_h` (`rij` He4-He4/He4-impureza, `sth`, `dnor` propio) | lanzado directo | 26 |
+| Visto — **sin solución viable** (raíz sin redundancia que cachear, cada par O(N²) es una distancia física distinta) | `He_dihydrogen_hehe` | `k_vpot_3warp_t` | 7 |
+| Visto — **candidato real, no aplicado** (§7b) | `wavefx` + `derwavefx` (`dnor` duplicado) | `k_derananum_resto_t` | 4 + 3 = 7 |
+| Visto — **sin solución viable, no por precisión sino por impacto** (`mapa-sfu-produccion.md` nota de §4.1, `k_fase_a` mide 0,6% del tiempo total) | `k_fase_a` (`sigma1_l`/`sig1rot_l`/`sig1hrot_l`) | lanzado directo | 5 |
+| Visto — **arreglado** (`reciprocos-ex0-duhe4x.md` §2, `DSQRT(rh1)`/`DSQRT(rh2)`/`DSQRT(r0)` únicas, no cacheables, pero el resto del bloque sí) | `He_dihydrogen_induccion` | `k_vpot_3warp_t` | 3 |
+| Visto — **sin solución viable** (sin división explícita ni raíz explícita en el código -- 2 `RSQ64H` dentro de las implementaciones nativas de `log()`/`sqrt()`, `xl=sqrt(-2·log(rn))`, cada llamada con un `rn` distinto) | `gauss3_gpu` | `k_fase_a` | 2 |
+| Visto — **sin solución viable** (divisor/valor distinto en cada iteración del bucle) | `derwavefx` (bloque `impurmol`, ya contado arriba junto a `wavefx`) | `k_derananum_resto_t` | — |
+| Visto — **arreglado, resto sin redundancia** (`reciprocos-wavef-derwavefhe4.md`; el propio `rij=sqrt(dot_product(...))` del bucle es una distancia distinta por par, sin repetición) | `wavef_derwavefhe4` | `k_derananum_he4_t` | 1 |
+| Visto — **arreglado, resto sin redundancia** (`reciprocos-ex0-duhe4x.md`; `rij=sqrt(...)` del bucle, distancia distinta por par) | `duhe4x` | `k_derananum_resto_t` | 1 |
+| | **Total** | | **≈49** |
+
+### 7a. `k_fase_h`: 26 `RSQ64H`, sin redundancia real que explotar (comprobado línea a línea)
+
+Desglosando el cuerpo real (`dmc2_pipeline.cuf`, función `k_fase_h`):
+
+- **He4-He4** (`rij=sqrt(...)`, línea 731): 190 pares distintos por walker (`C(20,2)` con `nhe4=20`) -- un único sitio estático en el SASS, pero cada `rij` es una distancia física distinta, sin repetición.
+- **He3-He3** (línea 740) y **He4-He3** (línea 749): código muerto -- los bucles ya están reescritos en términos de `nhe4+nhe3` (`reciprocos-k-fase-h.md`), con `nhe3=0` el compilador prueba 0 iteraciones. Compilado pero nunca ejecutado.
+- **He4-impureza** (`rij` línea 765, `sth=sqrt(1-cth**2)` línea 771): 20 pares distintos por walker, cada `rij`/`sth` es una combinación radio/ángulo distinta -- sin repetición.
+- **He3-impureza** (líneas 791, 797): código muerto, mismo motivo que He3-He3.
+- **`dnor`** (línea 757, `sqrt(dot_product(sprop_l(3),sprop_l(3)))`): calculado **una sola vez por walker**, ya no cacheable dentro de esta función porque no se repite -- ya es óptimo aquí.
+
+Ningún sitio dentro de `k_fase_h` tiene una raíz repetida con el mismo argumento -- cada `rij`/`sth`/`dnor` es una cantidad física distinta. **Confirma, con el código delante y no por intuición, la misma conclusión de §6a**: no hay margen dentro de esta función sin sacrificar precisión de verdad, **para la raíz en sí**.
+
+Revisando este mismo bloque, el usuario encontró algo distinto pero relacionado: `sth` (ya calculada, sin margen para reducir su propia `RSQ64H`) se usaba en **4 divisiones** (`w/sth`) sin ningún cacheo -- ese sí es un caso de división clásico, arreglado en `reciprocos-k-fase-h-sth.md` (−1,3% ciclos, −3,9% FMA; primer caso donde las instrucciones XU no bajan porque el compilador ya compartía la semilla de la división por CSE, solo el refinamiento de precisión posterior no estaba compartido).
+
+### 7b. `wavefx` + `derwavefx`: el mismo `dnor` calculado dos veces, en dos subrutinas distintas
+
+`k_derananum_resto_t` llama `wavefx(atom_l, sprop_l(3), wfx_l)` y, unas líneas después, `derwavefx(atom_l, sprop_l, ...)` -- **para el mismo walker, en el mismo hilo**. Cada una calcula su propio `dnor`:
+
+```fortran
+! wavefx (der_wavefx_mod.cuf:151)
+if(impurmol) dnor=sqrt(dot_product(sprop3%comp,sprop3%comp))
+! sprop3 = sprop_l(3) en la llamada real
+
+! derwavefx (der_wavefx_mod.cuf:197-203)
+do ic=1,3
+  dnor=sqrt(dot_product(sprop(ic)%comp,sprop(ic)%comp))
+  ...
+enddo
+! sprop(3) = el MISMO sprop_l(3) cuando ic=3
+```
+
+**`wavefx`'s `dnor` y la iteración `ic=3` de `derwavefx` calculan exactamente el mismo valor** -- mismo argumento (`sprop_l(3)`), misma operación, sin ninguna diferencia. A diferencia de las 190 distancias `rij` de `k_fase_h` (cada una física y genuinamente distinta), esto **sí es una redundancia real de tipo CSE** (misma categoría que `log(rij)`≡`rij_hi` en `log-rij-redundante.md`): no es una reformulación algebraica con riesgo de precisión, es literalmente el mismo cálculo hecho dos veces por dos subrutinas separadas.
+
+**No aplicado todavía** -- a diferencia de `log(rij)`, aquí las dos llamadoras son subrutinas separadas (`wavefx` se llama *antes* que `derwavefx` en `k_derananum_resto_t`), así que compartir el valor exige o bien reordenar las llamadas (`derwavefx` primero, pasarle `smol(3)` ya normalizado a `wavefx` en vez de `sprop3` crudo) o fusionar ambas en una sola subrutina (mismo patrón que `wavef_derwavefhe4`). Cambio de alcance moderado (toca la firma de `wavefx` y el orden de llamada en `k_derananum_resto_t`), con un beneficio acotado (1 `RSQ64H` de 7 entre las dos funciones, ~14%) -- candidato real para una próxima iteración, no urgente.
 
 ## Ficheros
 

@@ -64,6 +64,85 @@ Para escribir `driver_verifica_prereparto.f90` se intentó inicializar los pará
 
 `mmontecarlo.f90` (`dmc_gpu_pipeline`, `opcion=7`): ya no llama a `denssumapaso` paso a paso — solo lleva la cuenta de `denb` (walkers procesados) en el host, trivial. `denssumapaso`, `mdensidades.f90`, y las vías `opcion=4/5/6` no se tocan.
 
+### Aclaración: la doble función de `denssumapaso`, y de dónde sale `denb`
+
+`denssumapaso` (la rutina original, CPU) en realidad hacía **dos cosas** a la vez, cada paso:
+
+1. **Acumular los histogramas de densidad** (`drb44`, `drb33`, ...) — la parte cara (~310 incrementos/walker), la que se migró a `k_fase_h` en el pipeline GPU.
+2. **Contar cuántos walkers se han procesado en total** (`denb`, incrementado `+1.0` por walker) — trivial en coste, pero necesario más tarde: `denb` es el **divisor** que usa `denssumablo` (fin de bloque) para normalizar esos histogramas (`mdensidades.f90:231-272`, p.ej. `drb44=drb44/denb`) — convierte "suma bruta acumulada" en "densidad de verdad".
+
+Al quitar la llamada a `denssumapaso` del bucle por paso (porque ya no hace falta para los histogramas), la tarea (2) se quedó sin quien la hiciera — así que `mmontecarlo.f90` la sustituye por una línea suelta y trivial en el propio bucle:
+
+```fortran
+do ipaso=1,npasosblo
+   call pasodmc_gpu_pipeline(nwpaso,egrow,wsim)
+   ...
+   denb_local=denb_local+real(nwpaso,r8)   ! sustituye la funcion (2) de denssumapaso
+enddo
+...
+call densputdenb(denb_local)   ! al final del bloque, fija "denb" en mdensidades.f90
+```
+
+**¿De dónde sale `nwpaso` en cada vuelta, hace falta bajarlo de la GPU aquí?** No —
+`nwpaso` es una variable normal de la CPU durante todo el bucle (`integer, intent(inout)`
+en `pasodmc_gpu_pipeline`, `msteps.f90`). La bajada de datos GPU→CPU real ocurre
+**dentro** de `pasodmc_gpu_pipeline`, por un motivo completamente distinto: ese paso
+DMC necesita saber qué walkers han muerto o se han clonado (`nsons`) para poder seguir
+el bloque siguiente, así que ya baja esa información de todas formas. Con esos datos en
+CPU, cuenta cuántos walkers quedan (`nwfin`) y, justo antes de devolver el control,
+hace `nwpaso=nwfin` (`msteps.f90:586`). Cuando `denb_local=denb_local+real(nwpaso,r8)`
+se ejecuta, `nwpaso` ya viene actualizado como efecto colateral de esa bajada —
+**no dispara ninguna transferencia GPU→CPU adicional**, solo lee una variable de host
+que ya estaba puesta al día.
+
+### Por qué `resetea_histogramas_gpu` está donde está (por bloque, no por paso ni una sola vez)
+
+`resetea_histogramas_gpu` se llama en `mmontecarlo.f90:230`, **dentro** del bucle
+`do iblock=1,nblockeq+nblock`, junto a toda una familia de reseteos hermanos
+(`dmcceroblo`, `densceroblo`, `denb_local=0.0_r8`, `difusceroblo`) — todos con el mismo
+patrón: una vez por bloque, no una vez por paso ni una sola vez en toda la corrida.
+
+La razón es **metodológica, no técnica**: en Monte Carlo el resultado se divide en
+bloques independientes precisamente para poder estimar el error estadístico (mirando
+cuánto varía la media de un bloque a otro). Para que eso funcione, cada bloque tiene
+que acumular sus histogramas **desde cero** — si no se resetearan, el histograma del
+bloque 45 arrastraría datos de los 44 bloques anteriores, y se perdería la posibilidad
+de comparar bloques entre sí. No es comparable al bloque `.not.iniciado` de
+`pasodmc_gpu_pipeline` (constantes físicas como `hb2m`/`b`, que de verdad no cambian
+nunca durante la corrida) — los histogramas, por diseño, tienen que vivir y morir
+dentro de un solo bloque.
+
+**¿Se podría resetear desde dentro del grafo (un contador de pasos en `device`, sin
+volver a la CPU para llamarlo)?** Técnicamente sí — se podría sincronizar `npasosblo`
+una vez por bloque (igual que `etrial` cada paso) y añadir un kernel más al grafo que
+compare un contador interno y resetee cuando toque. Pero no compensaría: su coste ya
+medido es prácticamente nulo (ver más abajo, "Medición en producción" y el hallazgo de
+`prueba_reset_histogramas.md` sobre el arranque perezoso de CUDA), y la vuelta a la CPU
+en cada paso sigue haciendo falta de todas formas por el control de población
+(`nsons`, ver la aclaración de `nwpaso` arriba) — moverlo al `device` no eliminaría
+ningún viaje CPU↔GPU, solo una llamada que ya casi no cuesta nada.
+
+### Por qué `vuelca_histogramas_gpu` está donde está (fin de bloque, simétrico al reseteo)
+
+`vuelca_histogramas_gpu` se llama en `mmontecarlo.f90:252`, justo **después** de que
+termine el bucle `do ipaso=1,npasosblo` (línea 250, `enddo`) — el cierre exacto del
+bloque que `resetea_histogramas_gpu` abrió. Mismo patrón, en espejo: reset al empezar,
+volcado al terminar, los dos exactamente una vez por bloque.
+
+Por dentro (`dmc2_pipeline.cuf:308-324`) hace dos cosas: (1) copia D2H los 12
+histogramas de `device` a arrays de host, y (2) los inyecta en los acumuladores reales
+de `mdensidades.f90` con 3 setters nuevos (`densputblo_r/_c/_y`) — para que
+`denssumablo`/`denssumafin` (las rutinas que ya existían, sin tocar) sigan funcionando
+exactamente igual, sin saber si el dato vino de la CPU o de la GPU.
+
+**La ganancia está precisamente en la frecuencia**: la vía CPU original copiaba/sumaba
+estos histogramas paso a paso (dentro de `denssumapaso`); aquí se copian **una sola
+vez por bloque**, después de que `k_fase_h` los haya ido acumulando en `device` a lo
+largo de todos los pasos del bloque sin salir nunca de la GPU. Es la razón de ser de
+toda esta investigación (ver "Medición en producción" más abajo: 0,382s → 0,004s) — y
+depende de que el volcado NO se haga más a menudo de lo necesario, así que tampoco
+tendría sentido volcarlo paso a paso ni portar esa decisión al `device`.
+
 ### Medición en producción
 
 `qmccluster_pipeline`, 250 walkers, mismo `in.mcv` (semilla 11, 5 bloques de cálculo):

@@ -181,6 +181,50 @@ Con `B` bloques repartiendo las parejas de un mismo walker, todos escriben con `
 
 **Confirma y refuerza la conclusión general de la Fase 1**: ninguna variante de "repartir el bucle de parejas entre más unidades de ejecución paralelas" (hilos dentro de un bloque, o ahora bloques enteros) mejora sobre `k_solo_parejas`/la arquitectura actual -- el coste de combinar los resultados parciales (reducción en memoria compartida, o ahora contención de `atomicAdd` en memoria global) supera siempre la ganancia de paralelismo, y en el caso de `atomicAdd` global, empeora cuanto más se reparte, no al revés. El `Waves Per SM=0,33` del pipeline real sigue sin una vía de mejora encontrada dentro de esta familia de técnicas.
 
+## Quinto intento (Fase 1.6): bucle de parejas en CUADRADO completo, sin escritura cruzada
+
+Idea del usuario: en vez de repartir el bucle triangular O(n²/2) (que obliga a escritura cruzada entre átomos y por tanto a la reducción cara de 84 valores), calcular el CUADRADO completo O(n²) -- para cada átomo `iatom` que un hilo posee, evaluar su interacción con **todos** los demás átomos por separado (sin compartir el resultado con la pareja recíproca). El doble de evaluaciones de pareja, pero cada hilo escribe **solo en sus propios átomos** -- sin escritura cruzada, sin reducción de array, sin atómicas.
+
+**Equivalencia física verificada antes de implementar**: para el par (i,j), `rtemp_ij=-rtemp_ji`, y `rij`/`ujasp`/`ujass` dependen solo de `|rtemp|` (mismo valor en ambos sentidos) -- evaluar (i,j) aporta a `d1(i)` exactamente lo mismo que aportaba el término cruzado del bucle triangular, y evaluar (j,i) por separado aporta a `d1(j)` lo mismo que el `d1(jatom) -= ...` del original.
+
+**Implementación**: `pieza_parejas_full` + `k_multiwalker_parejas_full` en `test_parejas.cuf` -- mismo reparto W/T que las variantes anteriores, pero el hilo reduce su propio trozo directamente a **un escalar** (`d2(iatom)+|d1(iatom)|²` sumado sobre sus átomos), igual que el caso de átomos independientes que sí ganó al principio de esta fase -- no de 84 valores como `_parejas`/`_parejas_atomic`.
+
+**Corrección verificada** (tolerancia numérica) en las 6 configuraciones de `walkers_por_bloque`.
+
+### Resultado: mejora sobre las otras 2 variantes de reparto, pero sigue sin ganar a `k_solo_parejas`
+
+| `walkers_por_bloque` | `k_solo_parejas` | reducción (array) | atómico | **cuadrado completo** |
+|---|---|---|---|---|
+| 1 | 918 μs | 2,97x más lento | 2,51x más lento | **2,39x más lento** |
+| 2 | 918 μs | 2,57x más lento | 2,41x más lento | **2,38x más lento** |
+| 4 | 918 μs | 1,81x más lento | 1,74x más lento (mejor) | **1,79x más lento** |
+| 8 | 919 μs | 1,39x más lento | 1,56x más lento | **1,78x más lento** |
+| 16 | 917 μs | 1,17x más lento (mejor) | 1,22x más lento | **1,64x más lento** |
+| 32 | 869 μs | 1,06x más lento | 1,11x más lento | **1,92x más lento** |
+
+Mejora sobre la reducción de array cuando hay **muchos hilos por walker** (ahí la reducción de 84 valores era más cara, evitarla compensa parte del doble de cómputo), pero es **peor que las otras 2 variantes cuando hay pocos hilos** (ahí la reducción ya era barata, así que pagar el doble de trabajo sale caro sin nada que lo compense). En ningún punto del barrido le gana a `k_solo_parejas`.
+
+### Barrido adicional: más hilos por walker (T>32) y más walkers (N)
+
+Generalizado `test_parejas.cuf` para soportar bloques >32 hilos (`threads_por_bloque` como argumento nuevo, `blockDim%x` en vez de `32` hardcodeado dentro de los kernels) -- así se puede probar T=64 y T=128 hilos por walker (más allá del máximo de 32 que permite un bloque de 1 solo warp), y N=3000 walkers además de los 1.500 habituales.
+
+**Aviso de medición**: generalizar `k_multiwalker_parejas` (reducción de array) obligó a doblar su memoria compartida estática reservada (de `(natom,32)` a `(natom,64)`, indexada directamente por `tid`) para que T=64 no escriba fuera de rango -- esto reduce la ocupación **incluso en T=32**, donde la mitad extra nunca se usa. Los valores de T=32 de esta tabla no son comparables en absoluto a los de la tabla anterior (2,97x); la comparación **dentro de esta serie** (T=32 vs 64 vs 128, mismo array reservado en los tres) sigue siendo válida. Por encima de T=64, la propia reducción de array escribiría fuera de rango (`illegal memory access`, confirmado) -- se salta su lanzamiento en T=128, con aviso.
+
+| N | T | reducción array | atómica | cuadrado completo | `k_solo_parejas` |
+|---|---|---|---|---|---|
+| 1500 | 32 | 4,43x | 2,52x | 2,11x | 919 μs |
+| 1500 | **64** | 4,65x | **2,21x** | **1,87x** (mejor de toda la fase) | 909 μs |
+| 1500 | 128 | (saltada, T>64) | 2,53x | 2,34x | 918 μs |
+| 3000 | 32 | 5,27x | 2,50x | 2,38x | 1.419 μs |
+| 3000 | 64 | 5,92x | 2,64x | 2,35x | 1.420 μs |
+| 3000 | 128 | (saltada, T>64) | 3,24x | 3,06x | 1.420 μs |
+
+**Hallazgos**: T=64 es un óptimo local para `atómica` y `cuadrado completo` a N=1500 (mejora sobre T=32 y T=128), pero esa mejora se diluye o desaparece a N=3000. T=128 siempre empeora en las 3 variantes y las 2 escalas -- coherente con la física: `natom_real=21`, así que con 128 hilos/walker la mayoría (107 de 128) no tiene ningún átomo asignado, puro desperdicio de carriles del warp. La reducción de array empeora monótonamente con T en ambas escalas (más pasos de reducción sobre el array de 84 valores). **En ninguna de las 18 combinaciones probadas (3 variantes × 3 T × 2 N) ninguna variante le gana a `k_solo_parejas`** -- el mejor caso general (cuadrado completo, T=64, N=1500) sigue siendo 1,87x más lento.
+
+### Conclusión de la Fase 1.6
+
+Confirma, con dos ejes más explorados (granularidad del bucle de parejas, y número de hilos/walkers), la conclusión ya establecida de toda la Fase 1: repartir el bucle de parejas entre hilos de un bloque -- sea con reducción de array, con atómicas, o evitando la escritura cruzada con el doble de cómputo -- pierde siempre contra la arquitectura actual (`k_solo_parejas`), en las 24 configuraciones distintas probadas en total entre las 3 variantes.
+
 ## Ficheros
 
 - `prueba_aislada/test_bloque_walker.cuf`: las 5 versiones de kernel (`k_solo`, `k_bloque`, `k_bloque_arbol`, `k_bloque_grupo`, `k_multiwalker`) + programa de prueba con verificación de corrección integrada (bit a bit o con tolerancia numérica según el caso).
@@ -196,3 +240,6 @@ Con `B` bloques repartiendo las parejas de un mismo walker, todos escriben con `
 - `prueba_aislada/nsys_atomic_wpb{1,2,4,8,16,32}.nsys-rep`: medición de la variante con suma atómica directa — mejora sobre la reducción a T alto, pero tampoco le gana a `k_solo_parejas` en ningún caso.
 - `prueba_aislada/test_multiblock_parejas.cuf`: `B` bloques por walker + `atomicAdd` a memoria global (en vez de varios hilos/walkers por bloque + memoria compartida) — `k_multiblock_parejas_atomic` (acumulación) + `k_zera_global` (inicialización) + `k_cierre_multiblock` (combinación final, kernel aparte por no poder `syncthreads()` entre bloques). **Resultado negativo, empeora de forma monótona según sube B** (2,45x más lento en B=1, hasta 4,45x en B=32).
 - `prueba_aislada/multiblock/nsys_multiblock_B{1,2,4,8,16,32}.nsys-rep`: medición del barrido de B — confirma la contención de `atomicAdd` en memoria global como efecto dominante, sin que la ganancia de más bloques la compense en ningún punto.
+- `prueba_aislada/test_parejas.cuf` (ampliado, Fase 1.6): añadida `pieza_parejas_full`/`k_multiwalker_parejas_full` (bucle en cuadrado completo, sin escritura cruzada, reducción a escalar) + `threads_por_bloque` como argumento nuevo (generaliza `k_multiwalker_parejas`/`_atomic`/`_full` a bloques >32 hilos vía `blockDim%x`).
+- `prueba_aislada/nsys_full_wpb{1,2,4,8,16,32}.nsys-rep`: medición del barrido de `walkers_por_bloque` con la variante en cuadrado completo (T=32 fijo) -- mejora sobre `_parejas`/`_parejas_atomic` en T alto, pero no le gana a `k_solo_parejas` en ningún caso.
+- `prueba_aislada/nsys_sweep_n{1500,3000}_T{32,64,128}.nsys-rep`: barrido de hilos/walker (T) y escala de walkers (N) sobre las 3 variantes -- T=64 es óptimo local a N=1500 (no se sostiene a N=3000), T=128 siempre peor, ninguna variante le gana nunca a `k_solo_parejas`.

@@ -123,14 +123,14 @@ attributes(global) subroutine k_multiwalker_parejas(n, natomv, walkers_por_bloqu
   real(kind=r8), device, intent(in) :: x(natomv,n), y(natomv,n), z(natomv,n)
   real(kind=r8), value :: coef
   real(kind=r8), device, intent(out) :: kin(n)
-  real(kind=r8), shared :: d1x_s(natom_real,32), d1y_s(natom_real,32), d1z_s(natom_real,32), d2_s(natom_real,32)
+  real(kind=r8), shared :: d1x_s(natom_real,64), d1y_s(natom_real,64), d1z_s(natom_real,64), d2_s(natom_real,64)
   type(vec3) :: atom_l(natom_real), d1(natom_real)
   real(kind=r8) :: d2(natom_real)
   integer(kind=i4) :: tid, hilos_por_walker, walker_local, sub, i
   integer(kind=i4) :: pares_por_hilo, ia_desde, ia_hasta, iatom, stride, otro
 
    tid = threadIdx%x
-   hilos_por_walker = 32 / walkers_por_bloque
+   hilos_por_walker = blockDim%x / walkers_por_bloque
    walker_local = (tid-1) / hilos_por_walker
    sub = mod(tid-1, hilos_por_walker)
    i = (blockIdx%x-1)*walkers_por_bloque + walker_local + 1
@@ -216,7 +216,7 @@ attributes(global) subroutine k_multiwalker_parejas_atomic(n, natomv, walkers_po
   real(kind=r8) :: ujasp, ujass, rij, dummy
 
    tid = threadIdx%x
-   hilos_por_walker = 32 / walkers_por_bloque
+   hilos_por_walker = blockDim%x / walkers_por_bloque
    walker_local = (tid-1) / hilos_por_walker
    sub = mod(tid-1, hilos_por_walker)
    i = (blockIdx%x-1)*walkers_por_bloque + walker_local + 1
@@ -280,6 +280,115 @@ attributes(global) subroutine k_multiwalker_parejas_atomic(n, natomv, walkers_po
    endif
 end subroutine k_multiwalker_parejas_atomic
 
+! =====================================================================
+! ---- pieza_parejas_full: Fase 1.6 -- en vez del bucle TRIANGULAR
+! (iatom<jatom, escritura cruzada en los dos atomos), calcula para
+! CADA iatom en [ia_desde,ia_hasta] su interaccion COMPLETA (cuadrado
+! N*(N-1), no triangulo N*(N-1)/2) con TODOS los demas atomos --
+! iatom NUNCA escribe en la posicion de jatom, solo en la suya propia.
+! El doble de evaluaciones de pareja (se recalcula (i,j) Y (j,i) por
+! separado, en vez de compartir el resultado entre los dos), pero sin
+! ninguna escritura cruzada -- cada hilo puede quedarse con un rango
+! de atomos disjunto del de los demas, sin reduccion de array ni
+! atomicas para d1/d2. Verificado que es fisicamente equivalente: para
+! el par (i,j), rtemp_ij=-rtemp_ji y rij/ujasp/ujass son identicos en
+! magnitud (dependen solo de |rtemp|), asi que evaluar (i,j) aporta a
+! d1(i) exactamente lo mismo que aportaba el termino cruzado del bucle
+! triangular, y evaluar (j,i) por separado aporta a d1(j) lo mismo que
+! el "d1(jatom) -= ..." del original. ----
+! =====================================================================
+attributes(host, device) subroutine pieza_parejas_full(natomv, atom, coef, ia_desde, ia_hasta, d1, d2)
+  integer(kind=i4), value :: natomv, ia_desde, ia_hasta
+  type(vec3), intent(in) :: atom(natomv)
+  real(kind=r8), value :: coef
+  type(vec3), intent(inout) :: d1(natomv)
+  real(kind=r8), intent(inout) :: d2(natomv)
+  type(vec3) :: rtemp
+  integer(kind=i4) :: iatom, jatom
+  real(kind=r8) :: ujasp, ujass, rij
+
+   do iatom=ia_desde,ia_hasta
+     d1(iatom)%comp(:) = 0.0_r8
+     d2(iatom) = 0.0_r8
+     do jatom=1,natomv
+       if (jatom==iatom) cycle
+       rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+       rij = sqrt(dot_product(rtemp%comp,rtemp%comp)) + 0.1_r8
+       ujasp = coef*1.3_r8/(rij**(coef+1.0_r8))
+       ujass = -(coef+1.0_r8)*ujasp/rij
+       ujasp = (ujasp-0.05_r8)/rij
+       d1(iatom)%comp(:) = d1(iatom)%comp(:) + ujasp*rtemp%comp(:)
+       d2(iatom) = d2(iatom) + ujass + 2.0_r8*ujasp
+     enddo
+   enddo
+
+end subroutine pieza_parejas_full
+
+! ---- k_multiwalker_parejas_full: mismo reparto W/T que las anteriores,
+! pero ahora el rango [ia_desde,ia_hasta] es el conjunto de atomos que
+! el hilo POSEE como salida (no un trozo del bucle exterior triangular)
+! -- disjunto entre hilos del mismo walker, sin solape. Cada hilo reduce
+! su propio trozo directamente a UN ESCALAR (d2(iatom)+|d1(iatom)|^2
+! sumado sobre sus atomos) -- la combinacion final vuelve a ser una
+! reduccion de 1 valor por hilo (como en test_bloque_walker.cuf, no de
+! 84 como en _parejas/_parejas_atomic). ----
+attributes(global) subroutine k_multiwalker_parejas_full(n, natomv, walkers_por_bloque, x, y, z, coef, kin)
+  integer(kind=i4), value :: n, natomv, walkers_por_bloque
+  real(kind=r8), device, intent(in) :: x(natomv,n), y(natomv,n), z(natomv,n)
+  real(kind=r8), value :: coef
+  real(kind=r8), device, intent(out) :: kin(n)
+  real(kind=r8), shared :: parcial_s(128)
+  type(vec3) :: atom_l(natom_real), d1(natom_real)
+  real(kind=r8) :: d2(natom_real)
+  integer(kind=i4) :: tid, hilos_por_walker, walker_local, sub, i
+  integer(kind=i4) :: atomos_por_hilo, ia_desde, ia_hasta, iatom, stride, otro
+  real(kind=r8) :: parcial
+
+   tid = threadIdx%x
+   hilos_por_walker = blockDim%x / walkers_por_bloque
+   walker_local = (tid-1) / hilos_por_walker
+   sub = mod(tid-1, hilos_por_walker)
+   i = (blockIdx%x-1)*walkers_por_bloque + walker_local + 1
+
+   ! reparto del rango de atomos PROPIOS (salida) en T trozos contiguos
+   ! disjuntos, uno por hilo del walker -- todo el rango 1..natomv, no
+   ! natomv-1 (aqui cada atomo tiene su propia salida, no hay atomo
+   ! "sobrante" como en el bucle triangular)
+   atomos_por_hilo = (natomv + hilos_por_walker - 1) / hilos_por_walker
+   ia_desde = sub*atomos_por_hilo + 1
+   ia_hasta = min((sub+1)*atomos_por_hilo, natomv)
+
+   parcial = 0.0_r8
+   if (i<=n .and. ia_desde<=ia_hasta) then
+     do iatom=1,natomv
+       atom_l(iatom)%comp(1) = x(iatom,i)
+       atom_l(iatom)%comp(2) = y(iatom,i)
+       atom_l(iatom)%comp(3) = z(iatom,i)
+     enddo
+     call pieza_parejas_full(natomv, atom_l(1:natomv), coef, ia_desde, ia_hasta, d1(1:natomv), d2(1:natomv))
+     do iatom=ia_desde,ia_hasta
+       parcial = parcial + d2(iatom) + dot_product(d1(iatom)%comp,d1(iatom)%comp)
+     enddo
+   endif
+
+   if (i<=n) parcial_s(tid) = parcial
+   call syncthreads()
+
+   stride = hilos_por_walker / 2
+   do while (stride >= 1)
+     if (i<=n .and. sub < stride) then
+       otro = tid + stride
+       parcial_s(tid) = parcial_s(tid) + parcial_s(otro)
+     endif
+     call syncthreads()
+     stride = stride / 2
+   enddo
+
+   if (i<=n .and. sub==0) then
+     kin(i) = parcial_s(tid)
+   endif
+end subroutine k_multiwalker_parejas_full
+
 end module mtest_parejas
 
 
@@ -292,15 +401,15 @@ program test_parejas
  integer(kind=i4) :: n
  integer(kind=i4), parameter :: natomv = natom_real
  real(kind=r8), allocatable :: x_h(:,:), y_h(:,:), z_h(:,:)
- real(kind=r8), allocatable :: kin_solo(:), kin_multi(:), kin_atomic(:)
+ real(kind=r8), allocatable :: kin_solo(:), kin_multi(:), kin_atomic(:), kin_full(:)
  real(kind=r8), device, allocatable :: x_d(:,:), y_d(:,:), z_d(:,:)
- real(kind=r8), device, allocatable :: kin_solo_d(:), kin_multi_d(:), kin_atomic_d(:)
+ real(kind=r8), device, allocatable :: kin_solo_d(:), kin_multi_d(:), kin_atomic_d(:), kin_full_d(:)
  real(kind=r8) :: coef_h
  integer(kind=i4) :: iatom, iw, threads, blocks
- logical :: todo_ok
+ logical :: todo_ok, skip_parejas_array
  real(kind=r8) :: seed
  character(len=32) :: arg
- integer(kind=i4) :: nrep, irep, walkers_por_bloque
+ integer(kind=i4) :: nrep, irep, walkers_por_bloque, threads_por_bloque
 
   n = 1500
   if (command_argument_count() >= 1) then
@@ -317,11 +426,16 @@ program test_parejas
     call get_command_argument(3, arg)
     read(arg,*) walkers_por_bloque
   endif
+  threads_por_bloque = 32
+  if (command_argument_count() >= 4) then
+    call get_command_argument(4, arg)
+    read(arg,*) threads_por_bloque
+  endif
 
   allocate(x_h(natomv,n), y_h(natomv,n), z_h(natomv,n))
-  allocate(kin_solo(n), kin_multi(n), kin_atomic(n))
+  allocate(kin_solo(n), kin_multi(n), kin_atomic(n), kin_full(n))
   allocate(x_d(natomv,n), y_d(natomv,n), z_d(natomv,n))
-  allocate(kin_solo_d(n), kin_multi_d(n), kin_atomic_d(n))
+  allocate(kin_solo_d(n), kin_multi_d(n), kin_atomic_d(n), kin_full_d(n))
 
   do iw=1,n
     do iatom=1,natomv
@@ -341,31 +455,54 @@ program test_parejas
     call k_solo_parejas<<<blocks,threads>>>(n, natomv, x_d, y_d, z_d, coef_h, kin_solo_d)
   enddo
 
-  threads = 32
-  blocks = (n + walkers_por_bloque - 1) / walkers_por_bloque
-  do irep=1,nrep
-    call k_multiwalker_parejas<<<blocks,threads>>>(n, natomv, walkers_por_bloque, x_d, y_d, z_d, coef_h, kin_multi_d)
-  enddo
+  ! d1x_s/d1y_s/d1z_s/d2_s de k_multiwalker_parejas estan indexadas por
+  ! tid directamente (no por walker), dimensionadas a 64 -- T>64
+  ! escribiria fuera de rango. Se salta el lanzamiento (y su chequeo de
+  ! correccion) en ese caso, kin_multi se deja a 0.
+  skip_parejas_array = (threads_por_bloque/walkers_por_bloque > 64)
+  if (.not. skip_parejas_array) then
+    threads = threads_por_bloque
+    blocks = (n + walkers_por_bloque - 1) / walkers_por_bloque
+    do irep=1,nrep
+      call k_multiwalker_parejas<<<blocks,threads>>>(n, natomv, walkers_por_bloque, x_d, y_d, z_d, coef_h, kin_multi_d)
+    enddo
+  else
+    kin_multi_d = 0.0_r8
+    write(*,*) 'AVISO: k_multiwalker_parejas saltada (T>64, fuera del rango seguro de su memoria compartida)'
+  endif
 
-  threads = 32
+  threads = threads_por_bloque
   blocks = (n + walkers_por_bloque - 1) / walkers_por_bloque
   do irep=1,nrep
     call k_multiwalker_parejas_atomic<<<blocks,threads>>>(n, natomv, walkers_por_bloque, x_d, y_d, z_d, coef_h, kin_atomic_d)
   enddo
 
+  threads = threads_por_bloque
+  blocks = (n + walkers_por_bloque - 1) / walkers_por_bloque
+  do irep=1,nrep
+    call k_multiwalker_parejas_full<<<blocks,threads>>>(n, natomv, walkers_por_bloque, x_d, y_d, z_d, coef_h, kin_full_d)
+  enddo
+
   kin_solo = kin_solo_d
   kin_multi = kin_multi_d
   kin_atomic = kin_atomic_d
+  kin_full = kin_full_d
 
   todo_ok = .true.
   do iw=1,n
     ! suma en orden distinto entre threads -> tolerancia, no bit a bit
+    if (.not. skip_parejas_array) then
     if (abs(kin_solo(iw)-kin_multi(iw)) > 1.0e-9_r8*abs(kin_solo(iw))) then
       write(*,'(a,i0,a,es24.17,a,es24.17)') 'DIFERENCIA walker ', iw, ': solo=', kin_solo(iw), ' multi=', kin_multi(iw)
       todo_ok = .false.
     endif
+    endif
     if (abs(kin_solo(iw)-kin_atomic(iw)) > 1.0e-9_r8*abs(kin_solo(iw))) then
       write(*,'(a,i0,a,es24.17,a,es24.17)') 'DIFERENCIA (atomic) walker ', iw, ': solo=', kin_solo(iw), ' atomic=', kin_atomic(iw)
+      todo_ok = .false.
+    endif
+    if (abs(kin_solo(iw)-kin_full(iw)) > 1.0e-9_r8*abs(kin_solo(iw))) then
+      write(*,'(a,i0,a,es24.17,a,es24.17)') 'DIFERENCIA (full) walker ', iw, ': solo=', kin_solo(iw), ' full=', kin_full(iw)
       todo_ok = .false.
     endif
   enddo
@@ -373,11 +510,14 @@ program test_parejas
   write(*,'(a,es24.17)') 'muestra kin_solo(1)   =', kin_solo(1)
   write(*,'(a,es24.17)') 'muestra kin_multi(1)  =', kin_multi(1)
   write(*,'(a,es24.17)') 'muestra kin_atomic(1) =', kin_atomic(1)
+  write(*,'(a,es24.17)') 'muestra kin_full(1)   =', kin_full(1)
   write(*,'(a,i0)') 'n walkers = ', n
   write(*,'(a,i0)') 'walkers_por_bloque = ', walkers_por_bloque
+  write(*,'(a,i0)') 'threads_por_bloque = ', threads_por_bloque
+  write(*,'(a,i0)') 'hilos_por_walker (T) = ', threads_por_bloque/walkers_por_bloque
 
   if (todo_ok) then
-    write(*,*) 'PASA: _solo_parejas, _multiwalker_parejas y _multiwalker_parejas_atomic dan los mismos resultados (con tolerancia numerica)'
+    write(*,*) 'PASA: _solo_parejas, _multiwalker_parejas, _multiwalker_parejas_atomic y _multiwalker_parejas_full dan los mismos resultados (con tolerancia numerica)'
   else
     write(*,*) 'FALLA: hay diferencias, ver arriba'
   endif
