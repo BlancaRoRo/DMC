@@ -1,0 +1,70 @@
+! test_native_exp_log.cuf
+!
+! Prueba minima, autocontenida, para comprobar si esta GPU tiene
+! hardware nativo (MUFU.EX2/MUFU.LG2) para exp()/log() en DOBLE
+! precision, o si el compilador lo emula por software -- la misma
+! pregunta que ya se respondio para la RTX 4060 Laptop (sm_89):
+! confirmado por SASS que alli NO existe ese hardware en doble, solo
+! en float (ver v3-cuda-optimizacion/optimizacion-vpot/
+! benchmark-float-vs-double.md). Esta prueba repite exactamente el
+! mismo chequeo para la Tesla V100 (sm_70, Volta) de fluid3.
+!
+! No ejecuta nada en la GPU -- solo compila y se vuelca el SASS
+! resultante, asi que la VRAM ocupada por otros procesos no afecta.
+!
+! Uso:
+!   nvfortran -cuda -gpu=cc70 -c test_native_exp_log.cuf
+!   cuobjdump --dump-sass test_native_exp_log.o > sass_v100.txt
+!   grep -n "k_test_double\|k_test_float\|MUFU" sass_v100.txt
+!
+! Lo que hay que mirar: dentro del bloque de k_test_double, ¿aparece
+! algun MUFU.EX2/MUFU.LG2? Si NO aparece ninguno (solo en k_test_float),
+! confirma que Volta tampoco tiene hardware nativo para exp/log en
+! doble -- igual que la RTX 4060. Si SI aparecen en el bloque double,
+! seria un hallazgo nuevo y relevante (cambiaria la respuesta a la
+! pregunta del usuario sobre si haria falta la sustitucion a float).
+
+module test_native_exp_log
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+contains
+
+! ---- doble precision: exp()/log() nativos del lenguaje, SIN pasar
+! por mypow_log/myexp (esos son la replica bit-exacta de glibc a mano,
+! construida precisamente PORQUE no hay hardware nativo en doble en la
+! RTX 4060 -- aqui interesa ver el exp()/log() nativo tal cual, para
+! saber si en V100 si lo tendria sentido usar directamente). ----
+attributes(global) subroutine k_test_double(x, y, n)
+  integer(kind=i4), value :: n
+  real(kind=r8), device, intent(in)  :: x(n)
+  real(kind=r8), device, intent(out) :: y(n)
+  integer(kind=i4) :: i
+  real(kind=r8) :: a, b
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= n) then
+     a = exp(x(i))
+     b = log(x(i) + 2.0_r8)
+     y(i) = a + b
+   endif
+end subroutine k_test_double
+
+! ---- float, mismo cuerpo, para comparar en el mismo volcado SASS ----
+attributes(global) subroutine k_test_float(x, y, n)
+  integer(kind=i4), value :: n
+  real(kind=4), device, intent(in)  :: x(n)
+  real(kind=4), device, intent(out) :: y(n)
+  integer(kind=i4) :: i
+  real(kind=4) :: a, b
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= n) then
+     a = exp(x(i))
+     b = log(x(i) + 2.0_4)
+     y(i) = a + b
+   endif
+end subroutine k_test_float
+
+end module test_native_exp_log

@@ -1,0 +1,23 @@
+[2026-08-29 08:43:14] ===== test-pasos: INICIO =====
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-pasos/test-100p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-29 08:43:14] INICIO test-100p [gpu] w=1000 bloq=100 pasos=100
+[2026-08-29 08:44:06] FIN    test-100p [gpu] wall=52.201037555s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-pasos/test-100p/in.mcv-cpu (etrial verificado = -631.8)
+[2026-08-29 08:44:06] INICIO test-100p [cpu] w=1000 bloq=100 pasos=100
+[2026-08-29 08:54:18] FIN    test-100p [cpu] wall=612.160534218s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-pasos/test-1000p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-29 08:54:18] INICIO test-1000p [gpu] w=1000 bloq=100 pasos=1000
+[2026-08-29 09:02:40] FIN    test-1000p [gpu] wall=501.983153569s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-pasos/test-1000p/in.mcv-cpu (etrial verificado = -631.8)
+[2026-08-29 09:02:41] INICIO test-1000p [cpu] w=1000 bloq=100 pasos=1000
+[2026-08-29 10:41:26] FIN    test-1000p [cpu] wall=5925.405128601s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-pasos/test-10000p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-29 10:41:26] INICIO test-10000p [gpu] w=1000 bloq=100 pasos=10000
+[2026-08-29 12:03:24] FIN    test-10000p [gpu] wall=4918.330427877s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-pasos/test-50000p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-29 12:03:24] INICIO test-50000p [gpu] w=1000 bloq=100 pasos=50000
+[2026-08-29 12:07:12] ===== test-pasos (reanudado): test-50000p =====
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-pasos/test-50000p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-29 12:07:12] INICIO test-50000p [gpu] w=1000 bloq=100 pasos=50000
+[2026-08-29 18:59:17] FIN    test-50000p [gpu] wall=24725.581489876s
+[2026-08-29 18:59:17] ===== test-pasos: TERMINADO =====

@@ -1,0 +1,140 @@
+! msync_gpu.cuf
+!
+! En cada kernel portado por separado, sus variables `device` de modulo
+! (natom, pxhe4, phe4, dhcm, opot, libre, etrial, ...) se fijaban a
+! mano, una vez, al principio de CADA programa de prueba -- porque
+! cada test era autonomo, sin la orquestacion real delante. Al integrar
+! con la orquestacion real (opcion=5, ver docs-kernels/hibrido.md Paso
+! 5), esa copia hay que hacerla de verdad, desde los valores que
+! `mentradatos.f90`/`escribedatos` ya calculan a partir de in.mcv --
+! nunca se hacia sola, y su ausencia dejaba TODAS las variables device
+! con su valor por defecto (ceros), dando fisica trivial en vez de la
+! real (confirmado: sin esto, kin/pot salian identicos paso a paso,
+! como si la interaccion real no existiera).
+!
+! `etrial` es un caso aparte: cambia durante la simulacion (pasodmc_gpu
+! lo actualiza en el host, en mparametros, igual que hace pasodmc
+! original) -- por eso esta sincronizacion se llama en CADA paso, no
+! solo una vez al principio (el coste es un puñado de copias
+! escalares/arrays pequeños, insignificante frente al propio kernel).
+
+module msync_gpu
+ use mparametros, only: natom_real => natom, ngatom_real => ngatom, &
+                         nhe4_real => nhe4, nhe3_real => nhe3, &
+                         impureza_real => impureza, &
+                         lxhe4_real => lxhe4, pxhe4_real => pxhe4, &
+                         impurmol_real => impurmol, &
+                         lxhe3_real => lxhe3, pxhe3_real => pxhe3, &
+                         phe4_real => phe4, &
+                         pmix_real => pmix, phe3_real => phe3, &
+                         nhe3up_real => nhe3up, nhe3dw_real => nhe3dw, &
+                         mhe4_real => mhe4, mhe3_real => mhe3, mx_real => mx, &
+                         impurfija_real => impurfija, rotamol_real => rotamol, &
+                         opot_real => opot, libre_real => libre, &
+                         ncmtras_real => ncmtras, dtau_real => dtau, etrial_real => etrial
+ use mcuda_globals, only: natom, ngatom, nhe4, nhe3, impureza
+ use d_uhex4, only: lxhe4, pxhe4, impurmol
+ use der_wavefx, only: lxhe3, pxhe3
+ use der_wavefhe4, only: phe4
+ use mwavef_gpu, only: pmix, phe3, nhe3up, nhe3dw, mhe4, mhe3, mx
+ use mderananum, only: impurfija, rotamol
+ use mpotenbh, only: dhcm
+ use mvpot, only: opot
+ use mhpsi, only: libre
+ use mdmc2, only: ncmtras, dtau, etrial
+
+ implicit none
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+contains
+
+! dhcm_cpu: COMMON /datosbh/, la rellena bh_leevheh2m (bh_heh2m.f,
+! llamada desde mentradatos.f90:524 al leer heh2m.pot) -- mismo patron
+! ya usado en potenbh.cuf/vpot.cuf/hpsi.cuf/dmc2.cuf.
+ subroutine sincroniza_globales_gpu
+  real(kind=r8) :: dhcm_cpu
+  common / datosbh / dhcm_cpu
+
+   natom    = natom_real
+   ngatom   = ngatom_real
+   nhe4     = nhe4_real
+   impureza = impureza_real
+   lxhe4    = lxhe4_real
+   pxhe4    = pxhe4_real
+   impurmol = impurmol_real
+   lxhe3    = lxhe3_real
+   pxhe3    = pxhe3_real
+   phe4     = phe4_real
+   pmix     = pmix_real
+   phe3     = phe3_real
+   nhe3up   = nhe3up_real
+   nhe3dw   = nhe3dw_real
+   mhe4     = mhe4_real
+   mhe3     = mhe3_real
+   mx       = mx_real
+   impurfija = impurfija_real
+   rotamol   = rotamol_real
+   opot      = opot_real
+   libre     = libre_real
+   ncmtras   = ncmtras_real
+   dtau      = dtau_real
+   etrial    = etrial_real
+   dhcm      = dhcm_cpu
+
+ end subroutine sincroniza_globales_gpu
+
+! ---- Fase 3 (v3-cuda-optimizacion): sincroniza_globales_gpu, medida
+! con tiempos_opcion7.dat, resulto costar 15,9%-19,6% del tiempo total
+! de opcion=7 -- de sus 25 asignaciones, 24 son constantes fisicas
+! fijadas una vez al leer in.mcv/heh2m.pot y NUNCA cambian durante la
+! simulacion; solo etrial se actualiza paso a paso de verdad (en
+! pasodmc_gpu_pipeline, cada ncetrial pasos). Aun asi, la version
+! original la sincroniza LAS 25, EN CADA PASO -- 24 copias redundantes
+! por paso, cada una una llamada a la API de CUDA independiente.
+!
+! Se separa en dos, SOLO para opcion=7 (pasodmc_gpu_pipeline) -- NO se
+! toca sincroniza_globales_gpu, que sigue usandola tal cual pasodmc_gpu
+! (opcion=5) y pasodmc_cpu_gpurand (opcion=6), ya validadas:
+!   sincroniza_constantes_gpu: las 24 fijas -- se llama UNA VEZ, dentro
+!     del mismo bloque "if (.not.iniciado)" que ya usa
+!     pasodmc_gpu_pipeline para el reparto de semillas/inicializacion
+!     del grafo -- ningun mecanismo nuevo, reutiliza el que ya existe.
+!   sincroniza_etrial_gpu: solo etrial -- se sigue llamando en cada
+!     paso, que es lo unico que hace falta.
+ subroutine sincroniza_constantes_gpu
+  real(kind=r8) :: dhcm_cpu
+  common / datosbh / dhcm_cpu
+
+   natom    = natom_real
+   ngatom   = ngatom_real
+   nhe4     = nhe4_real
+   impureza = impureza_real
+   lxhe4    = lxhe4_real
+   pxhe4    = pxhe4_real
+   impurmol = impurmol_real
+   lxhe3    = lxhe3_real
+   pxhe3    = pxhe3_real
+   phe4     = phe4_real
+   pmix     = pmix_real
+   phe3     = phe3_real
+   nhe3up   = nhe3up_real
+   nhe3dw   = nhe3dw_real
+   mhe4     = mhe4_real
+   mhe3     = mhe3_real
+   mx       = mx_real
+   impurfija = impurfija_real
+   rotamol   = rotamol_real
+   opot      = opot_real
+   libre     = libre_real
+   ncmtras   = ncmtras_real
+   dtau      = dtau_real
+   dhcm      = dhcm_cpu
+   ! etrial NO va aqui -- cambia paso a paso, ver sincroniza_etrial_gpu
+
+ end subroutine sincroniza_constantes_gpu
+
+ subroutine sincroniza_etrial_gpu
+   etrial = etrial_real
+ end subroutine sincroniza_etrial_gpu
+
+end module msync_gpu

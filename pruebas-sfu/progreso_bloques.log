@@ -1,0 +1,30 @@
+[2026-08-28 13:30:27] ===== test-bloques: INICIO =====
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-bloques/test-50b/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-28 13:30:27] INICIO test-50b [gpu] w=1000 bloq=50 pasos=100
+[2026-08-28 13:30:55] FIN    test-50b [gpu] wall=27.960234608s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-bloques/test-50b/in.mcv-cpu (etrial verificado = -631.8)
+[2026-08-28 13:30:55] INICIO test-50b [cpu] w=1000 bloq=50 pasos=100
+[2026-08-28 13:36:04] FIN    test-50b [cpu] wall=308.677887285s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-bloques/test-100b/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-28 13:36:04] INICIO test-100b [gpu] w=1000 bloq=100 pasos=100
+[2026-08-28 13:36:56] FIN    test-100b [gpu] wall=52.275671709s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-bloques/test-100b/in.mcv-cpu (etrial verificado = -631.8)
+[2026-08-28 13:36:56] INICIO test-100b [cpu] w=1000 bloq=100 pasos=100
+[2026-08-28 13:47:11] FIN    test-100b [cpu] wall=614.753607187s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-bloques/test-200b/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-28 13:47:11] INICIO test-200b [gpu] w=1000 bloq=200 pasos=100
+[2026-08-28 13:48:54] FIN    test-200b [gpu] wall=102.790321647s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-bloques/test-200b/in.mcv-cpu (etrial verificado = -631.8)
+[2026-08-28 13:48:54] INICIO test-200b [cpu] w=1000 bloq=200 pasos=100
+[2026-08-28 14:09:52] FIN    test-200b [cpu] wall=1257.979986990s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-bloques/test-300b/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-28 14:09:52] INICIO test-300b [gpu] w=1000 bloq=300 pasos=100
+[2026-08-28 14:15:23] FIN    test-300b [gpu] wall=331.716635298s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-bloques/test-300b/in.mcv-cpu (etrial verificado = -631.8)
+[2026-08-28 14:15:23] INICIO test-300b [cpu] w=1000 bloq=300 pasos=100
+[2026-08-28 14:45:16] FIN    test-300b [cpu] wall=1792.513167169s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-bloques/test-500b/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-28 14:45:16] INICIO test-500b [gpu] w=1000 bloq=500 pasos=100
+[2026-08-28 14:49:35] FIN    test-500b [gpu] wall=259.251600516s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-bloques/test-500b/in.mcv-cpu (etrial verificado = -631.8)
+[2026-08-28 14:49:35] INICIO test-500b [cpu] w=1000 bloq=500 pasos=100

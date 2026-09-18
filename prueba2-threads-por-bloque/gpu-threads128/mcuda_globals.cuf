@@ -1,0 +1,43 @@
+! mcuda_globals.cuf
+!
+! Variables de estado global de la simulacion (natom, ngatom, nhe4,
+! nhe3, impureza), consolidadas en UN unico modulo.
+!
+! Antes de este fichero, cada kernel se porto en su propia carpeta
+! aislada, sin tocar mas modulos de los estrictamente necesarios --
+! eso llevo a declarar la MISMA variable por separado en varios
+! sitios: der_wavefx y mccuerpo declaraban natom/ngatom cada uno por
+! su cuenta (cada test los fijaba a mano al mismo valor en los dos
+! sitios); der_wavefx y der_wavefhe4 hacian lo mismo con nhe4. No era
+! un error -- era la forma mas simple de portar cada kernel sin
+! arrastrar dependencias extra mientras se probaba aislado.
+!
+! Al ensamblar el programa hibrido (un unico binario, con todos los
+! modulos ya en el mismo sitio) esa duplicacion deja de tener sentido:
+! se consolida aqui, y der_wavefx/mccuerpo/der_wavefhe4 pasan a leer
+! estas variables via "use mcuda_globals", en vez de declarar su
+! propia copia -- ver docs-kernels/hibrido.md Paso 3.
+
+module mcuda_globals
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+
+ integer(kind=i4), device :: natom, ngatom, nhe4
+! v3-cuda-optimizacion/myexp-optimizacion: nhe3 fijo en compilacion
+! (PARAMETER=0) en vez de variable device sincronizada en tiempo de
+! ejecucion. Decision de ALCANCE, no solo de rendimiento: este TFG
+! esta disenado expresamente para gota pura de He4 (nhe3=0) -- en
+! ningun in.mcv de esta sesion se ha usado otro valor. Con nhe3
+! conocido en compilacion, el compilador demuestra y elimina los
+! caminos que dependen de el (duhe3x/uhe3x, wavefm/wavefhe3,
+! derwavefm/derwavefhe3 -- ver myexp-optimizacion.md seccion 10).
+! mentradatos.f90 SIGUE leyendo nhe3 de in.mcv sin cambios (lo sigue
+! necesitando mparametros para el lado CPU/opciones 1-4) -- solo se
+! fija el lado GPU. Para revertir: quitar el PARAMETER de aqui abajo,
+! devolver "integer(kind=i4), device :: nhe3" arriba, y devolver las
+! 2 lineas "nhe3 = nhe3_real" en msync_gpu.cuf (sincroniza_globales_gpu
+! y sincroniza_constantes_gpu) -- nada mas depende de este cambio.
+ integer(kind=i4), parameter :: nhe3 = 0
+ logical, device :: impureza
+
+end module mcuda_globals

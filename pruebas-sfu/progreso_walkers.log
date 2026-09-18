@@ -1,0 +1,32 @@
+[2026-08-28 10:26:52] ===== test-walkers: INICIO =====
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-walkers/test-500w/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-28 10:26:52] INICIO test-500w [gpu] w=500 bloq=100 pasos=100
+[2026-08-28 10:27:23] FIN    test-500w [gpu] wall=31.181847553s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-walkers/test-500w/in.mcv-cpu (etrial verificado = -631.8)
+[2026-08-28 10:27:23] INICIO test-500w [cpu] w=500 bloq=100 pasos=100
+[2026-08-28 10:32:29] FIN    test-500w [cpu] wall=306.301609026s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-walkers/test-1000w/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-28 10:32:29] INICIO test-1000w [gpu] w=1000 bloq=100 pasos=100
+[2026-08-28 10:33:21] FIN    test-1000w [gpu] wall=51.533686286s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-walkers/test-1000w/in.mcv-cpu (etrial verificado = -631.8)
+[2026-08-28 10:33:21] INICIO test-1000w [cpu] w=1000 bloq=100 pasos=100
+[2026-08-28 10:43:28] FIN    test-1000w [cpu] wall=607.145838079s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-walkers/test-1500w/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-28 10:43:28] INICIO test-1500w [gpu] w=1500 bloq=100 pasos=100
+[2026-08-28 10:44:52] FIN    test-1500w [gpu] wall=83.790698957s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-walkers/test-1500w/in.mcv-cpu (etrial verificado = -631.8)
+[2026-08-28 10:44:52] INICIO test-1500w [cpu] w=1500 bloq=100 pasos=100
+[2026-08-28 11:00:01] FIN    test-1500w [cpu] wall=909.345821243s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-walkers/test-2000w/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-28 11:00:01] INICIO test-2000w [gpu] w=2000 bloq=100 pasos=100
+[2026-08-28 11:01:38] FIN    test-2000w [gpu] wall=96.630957336s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-walkers/test-2000w/in.mcv-cpu (etrial verificado = -631.8)
+[2026-08-28 11:01:38] INICIO test-2000w [cpu] w=2000 bloq=100 pasos=100
+[2026-08-28 11:21:58] FIN    test-2000w [cpu] wall=1219.826869152s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-walkers/test-2500w/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-28 11:21:58] INICIO test-2500w [gpu] w=2500 bloq=100 pasos=100
+[2026-08-28 11:23:59] FIN    test-2500w [gpu] wall=121.740862662s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-walkers/test-2500w/in.mcv-cpu (etrial verificado = -631.8)
+[2026-08-28 11:23:59] INICIO test-2500w [cpu] w=2500 bloq=100 pasos=100
+[2026-08-28 11:49:25] FIN    test-2500w [cpu] wall=1525.503559261s
+[2026-08-28 11:49:25] ===== test-walkers: TERMINADO =====

@@ -1,0 +1,3 @@
+[2026-08-28 10:23:39] ===== BATERIA pruebas-sfu: INICIO =====
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/pruebas-sfu/test-walkers/test-500w/in.mcv-gpu (etrial verificado = -631.8)
+[2026-08-28 10:23:39] INICIO test-500w [gpu] w=500 bloq=100 pasos=100

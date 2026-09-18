@@ -1,0 +1,89 @@
+module angle_scalar_vec
+use glibc_acos_mod, only: myacos
+
+implicit none
+integer, private, parameter :: i4 = selected_int_kind(9)
+
+contains
+attributes(host, device) subroutine angle(vec1, vec2, ang)
+    double precision, intent(in)  :: vec1(3), vec2(3)
+    double precision, intent(out) :: ang
+    integer :: id
+    double precision :: x1,x2,sprod,norm1,norm2
+
+    sprod=0.d0
+    norm1=0.d0
+    norm2=0.d0
+    do id=1,3
+        x1=vec1(id)
+        x2=vec2(id)
+        sprod=sprod+x1*x2
+        norm1=norm1+x1*x1
+        norm2=norm2+x2*x2
+    end do
+    norm1=dsqrt(norm1)
+    norm2=dsqrt(norm2)
+    ang=myacos(sprod/(norm1*norm2))
+end subroutine angle
+
+attributes(host, device) subroutine scalar_product(vec1, vec2, sprod)
+    double precision, intent(in)  :: vec1(3), vec2(3)
+    double precision, intent(out) :: sprod
+    integer :: id
+    sprod=0.d0
+    do id=1,3
+        sprod=sprod+vec1(id)*vec2(id)
+    end do
+end subroutine scalar_product
+
+attributes(host, device) subroutine vec_norm(vec, xnorm)
+    double precision, intent(in)  :: vec(3)
+    double precision, intent(out) :: xnorm
+    integer :: id
+    xnorm=0.d0
+    do id=1,3
+        xnorm=xnorm+vec(id)*vec(id)
+    end do
+    xnorm=dsqrt(xnorm)
+end subroutine vec_norm
+
+! un hilo = un par de vectores = un angulo
+attributes(global) subroutine k_angle(n, vec1, vec2, ang_out)
+ integer(kind=i4), value :: n
+ double precision, device, intent(in)  :: vec1(3,n), vec2(3,n)
+ double precision, device, intent(out) :: ang_out(n)
+ integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call angle(vec1(:,i), vec2(:,i), ang_out(i))
+  endif
+end subroutine k_angle
+
+! un hilo = un par de vectores = un producto escalar
+attributes(global) subroutine k_scalar_product(n, vec1, vec2, sprod_out)
+ integer(kind=i4), value :: n
+ double precision, device, intent(in)  :: vec1(3,n), vec2(3,n)
+ double precision, device, intent(out) :: sprod_out(n)
+ integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call scalar_product(vec1(:,i), vec2(:,i), sprod_out(i))
+  endif
+end subroutine k_scalar_product
+
+! un hilo = un vector = una norma
+attributes(global) subroutine k_vec_norm(n, vec, xnorm_out)
+ integer(kind=i4), value :: n
+ double precision, device, intent(in)  :: vec(3,n)
+ double precision, device, intent(out) :: xnorm_out(n)
+ integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call vec_norm(vec(:,i), xnorm_out(i))
+  endif
+end subroutine k_vec_norm
+
+end module angle_scalar_vec

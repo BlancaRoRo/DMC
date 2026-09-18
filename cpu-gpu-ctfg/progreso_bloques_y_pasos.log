@@ -1,0 +1,136 @@
+[2026-09-04 09:58:13] ===== test-bloques-pequenos: INICIO =====
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-1b/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 09:58:13] INICIO test-1b [gpu] w=1000 bloq=1 pasos=100
+[2026-09-04 09:58:16] FIN    test-1b [gpu] wall=3.307022231s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-1b/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 09:58:16] INICIO test-1b [cpu] w=1000 bloq=1 pasos=100
+[2026-09-04 09:58:24] FIN    test-1b [cpu] wall=7.674024325s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-2b/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 09:58:24] INICIO test-2b [gpu] w=1000 bloq=2 pasos=100
+[2026-09-04 09:58:26] FIN    test-2b [gpu] wall=1.616433151s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-2b/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 09:58:26] INICIO test-2b [cpu] w=1000 bloq=2 pasos=100
+[2026-09-04 09:58:40] FIN    test-2b [cpu] wall=14.512957730s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-5b/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 09:58:40] INICIO test-5b [gpu] w=1000 bloq=5 pasos=100
+[2026-09-04 09:58:45] FIN    test-5b [gpu] wall=4.948117349s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-5b/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 09:58:45] INICIO test-5b [cpu] w=1000 bloq=5 pasos=100
+[2026-09-04 09:59:19] FIN    test-5b [cpu] wall=34.249257312s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-10b/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 09:59:19] INICIO test-10b [gpu] w=1000 bloq=10 pasos=100
+[2026-09-04 09:59:27] FIN    test-10b [gpu] wall=7.386165071s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-10b/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 09:59:27] INICIO test-10b [cpu] w=1000 bloq=10 pasos=100
+[2026-09-04 10:00:34] FIN    test-10b [cpu] wall=66.845737533s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-15b/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:00:34] INICIO test-15b [gpu] w=1000 bloq=15 pasos=100
+[2026-09-04 10:00:44] FIN    test-15b [gpu] wall=9.822320165s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-15b/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:00:44] INICIO test-15b [cpu] w=1000 bloq=15 pasos=100
+[2026-09-04 10:02:22] FIN    test-15b [cpu] wall=98.354067279s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-20b/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:02:22] INICIO test-20b [gpu] w=1000 bloq=20 pasos=100
+[2026-09-04 10:02:34] FIN    test-20b [gpu] wall=12.241167022s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-20b/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:02:34] INICIO test-20b [cpu] w=1000 bloq=20 pasos=100
+[2026-09-04 10:04:44] FIN    test-20b [cpu] wall=129.350146177s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-25b/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:04:44] INICIO test-25b [gpu] w=1000 bloq=25 pasos=100
+[2026-09-04 10:04:58] FIN    test-25b [gpu] wall=14.777618207s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-25b/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:04:58] INICIO test-25b [cpu] w=1000 bloq=25 pasos=100
+[2026-09-04 10:07:38] FIN    test-25b [cpu] wall=159.710795865s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-30b/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:07:38] INICIO test-30b [gpu] w=1000 bloq=30 pasos=100
+[2026-09-04 10:07:55] FIN    test-30b [gpu] wall=17.080663227s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-30b/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:07:55] INICIO test-30b [cpu] w=1000 bloq=30 pasos=100
+[2026-09-04 10:11:06] FIN    test-30b [cpu] wall=190.398134384s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-40b/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:11:06] INICIO test-40b [gpu] w=1000 bloq=40 pasos=100
+[2026-09-04 10:11:28] FIN    test-40b [gpu] wall=21.763547117s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-40b/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:11:28] INICIO test-40b [cpu] w=1000 bloq=40 pasos=100
+[2026-09-04 10:15:41] FIN    test-40b [cpu] wall=252.976716239s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-50b/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:15:41] INICIO test-50b [gpu] w=1000 bloq=50 pasos=100
+[2026-09-04 10:16:09] FIN    test-50b [gpu] wall=28.050582185s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-bloques-pequenos/test-50b/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:16:09] INICIO test-50b [cpu] w=1000 bloq=50 pasos=100
+[2026-09-04 10:21:22] FIN    test-50b [cpu] wall=312.951814856s
+[2026-09-04 10:21:22] ===== test-bloques-pequenos: TERMINADO =====
+[2026-09-04 10:21:22] ===== test-pasos-pequenos: INICIO =====
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-1p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:21:22] INICIO test-1p [gpu] w=1000 bloq=100 pasos=1
+[2026-09-04 10:21:25] FIN    test-1p [gpu] wall=3.151747802s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-1p/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:21:25] INICIO test-1p [cpu] w=1000 bloq=100 pasos=1
+[2026-09-04 10:21:31] FIN    test-1p [cpu] wall=6.522293097s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-2p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:21:31] INICIO test-2p [gpu] w=1000 bloq=100 pasos=2
+[2026-09-04 10:21:33] FIN    test-2p [gpu] wall=1.675530628s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-2p/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:21:33] INICIO test-2p [cpu] w=1000 bloq=100 pasos=2
+[2026-09-04 10:21:46] FIN    test-2p [cpu] wall=13.157795343s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-5p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:21:46] INICIO test-5p [gpu] w=1000 bloq=100 pasos=5
+[2026-09-04 10:21:51] FIN    test-5p [gpu] wall=5.078754640s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-5p/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:21:51] INICIO test-5p [cpu] w=1000 bloq=100 pasos=5
+[2026-09-04 10:22:25] FIN    test-5p [cpu] wall=33.567758119s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-10p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:22:25] INICIO test-10p [gpu] w=1000 bloq=100 pasos=10
+[2026-09-04 10:22:33] FIN    test-10p [gpu] wall=7.716378401s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-10p/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:22:33] INICIO test-10p [cpu] w=1000 bloq=100 pasos=10
+[2026-09-04 10:23:39] FIN    test-10p [cpu] wall=66.205647954s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-15p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:23:39] INICIO test-15p [gpu] w=1000 bloq=100 pasos=15
+[2026-09-04 10:23:49] FIN    test-15p [gpu] wall=10.279381036s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-15p/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:23:49] INICIO test-15p [cpu] w=1000 bloq=100 pasos=15
+[2026-09-04 10:25:28] FIN    test-15p [cpu] wall=99.130256671s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-20p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:25:29] INICIO test-20p [gpu] w=1000 bloq=100 pasos=20
+[2026-09-04 10:25:41] FIN    test-20p [gpu] wall=12.866417102s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-20p/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:25:41] INICIO test-20p [cpu] w=1000 bloq=100 pasos=20
+[2026-09-04 10:27:53] FIN    test-20p [cpu] wall=131.399978200s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-25p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:27:53] INICIO test-25p [gpu] w=1000 bloq=100 pasos=25
+[2026-09-04 10:28:08] FIN    test-25p [gpu] wall=15.184320516s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-25p/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:28:08] INICIO test-25p [cpu] w=1000 bloq=100 pasos=25
+[2026-09-04 10:30:49] FIN    test-25p [cpu] wall=161.200356157s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-30p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:30:49] INICIO test-30p [gpu] w=1000 bloq=100 pasos=30
+[2026-09-04 10:31:06] FIN    test-30p [gpu] wall=17.059715476s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-30p/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:31:06] INICIO test-30p [cpu] w=1000 bloq=100 pasos=30
+[2026-09-04 10:34:15] FIN    test-30p [cpu] wall=188.248039492s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-40p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:34:15] INICIO test-40p [gpu] w=1000 bloq=100 pasos=40
+[2026-09-04 10:34:39] FIN    test-40p [gpu] wall=23.834880264s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-40p/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:34:39] INICIO test-40p [cpu] w=1000 bloq=100 pasos=40
+[2026-09-04 10:38:50] FIN    test-40p [cpu] wall=251.554546486s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-50p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:38:50] INICIO test-50p [gpu] w=1000 bloq=100 pasos=50
+[2026-09-04 10:39:17] FIN    test-50p [gpu] wall=26.761869300s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-50p/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:39:17] INICIO test-50p [cpu] w=1000 bloq=100 pasos=50
+[2026-09-04 10:44:34] FIN    test-50p [cpu] wall=317.407987087s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-75p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:44:34] INICIO test-75p [gpu] w=1000 bloq=100 pasos=75
+[2026-09-04 10:45:16] FIN    test-75p [gpu] wall=41.446770269s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-75p/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:45:16] INICIO test-75p [cpu] w=1000 bloq=100 pasos=75
+[2026-09-04 10:53:04] FIN    test-75p [cpu] wall=467.699363045s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-100p/in.mcv-gpu (etrial verificado = -631.8)
+[2026-09-04 10:53:04] INICIO test-100p [gpu] w=1000 bloq=100 pasos=100
+[2026-09-04 10:53:55] FIN    test-100p [gpu] wall=51.847565330s
+OK: /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v4-cuda-pruebas/cpu-vs-gpu/test-pasos-pequenos/test-100p/in.mcv-cpu (etrial verificado = -631.8)
+[2026-09-04 10:53:56] INICIO test-100p [cpu] w=1000 bloq=100 pasos=100
+[2026-09-04 11:04:14] FIN    test-100p [cpu] wall=618.971770615s
+[2026-09-04 11:04:14] ===== test-pasos-pequenos: TERMINADO =====
