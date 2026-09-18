@@ -62,12 +62,13 @@ exactamente con la que daba el binario original (`hibrido_instrumentado`) con
 `opcion=7` antes de tocar nada (`-622.9201974824`).
 
 **Para compilarlo hace falta el compilador `nvfortran`**, distribuido dentro del
-**NVIDIA HPC SDK** (no viene con GCC, hay que instalar el SDK de NVIDIA aparte). A
-diferencia de `dmc-cpu`, aquí **no se usa Makefile** -- la compilación es un script que
-invoca `nvfortran` directamente, fichero a fichero:
+**NVIDIA HPC SDK** (no viene con GCC, hay que instalar el SDK de NVIDIA aparte). Igual
+que `dmc-cpu`, se compila con `make` -- el [`Makefile`](dmc-hibrido/Makefile) refleja
+la dependencia real entre módulos (cada `.o` depende de los módulos que su fichero
+`use`), así que soporta compilación en paralelo (`make -j`):
 
 ```bash
-./compilar_pipeline.sh
+make
 ./qmccluster_pipeline < in.mcv
 ```
 
