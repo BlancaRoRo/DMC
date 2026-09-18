@@ -1,0 +1,396 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1"><style>:root{color-scheme:light}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found]){display:none!important}</style></head><body>
+<title>Pipeline CPU↔GPU</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f3f6f8; --surface:#ffffff; --surface-2:#e9eef2; --border:#c9d4dc; --border-soft:#dde5ea;
+  --ink:#101c26; --ink-muted:#54677a; --ink-faint:#8b9aa8;
+  --k-const:#1f6fb5; --k-const-soft:#dbeafc;
+  --k-round:#b5691f; --k-round-soft:#f8e6d2;
+  --k-d2h:#7c5cbf; --k-d2h-soft:#eae3f7;
+  --k-local:#46545f; --k-local-soft:#e6ebee;
+  --font-display:"STIX Two Text","Iowan Old Style",serif;
+  --font-body:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,sans-serif;
+  --font-mono:"IBM Plex Mono","SFMono-Regular",Consolas,monospace;
+  --shadow: 0 1px 2px rgba(16,28,38,0.05), 0 8px 20px -14px rgba(16,28,38,0.2);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0b1218; --surface:#111c25; --surface-2:#16232d; --border:#2a3b47; --border-soft:#1e2c35;
+    --ink:#e7edf1; --ink-muted:#93a5b4; --ink-faint:#5d7182;
+    --k-const:#5fa8e6; --k-const-soft:#122236;
+    --k-round:#d69a5e; --k-round-soft:#2c2116;
+    --k-d2h:#b79bea; --k-d2h-soft:#241c33;
+    --k-local:#aab8c4; --k-local-soft:#1a2229;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -16px rgba(0,0,0,0.6);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0b1218; --surface:#111c25; --surface-2:#16232d; --border:#2a3b47; --border-soft:#1e2c35;
+  --ink:#e7edf1; --ink-muted:#93a5b4; --ink-faint:#5d7182;
+  --k-const:#5fa8e6; --k-const-soft:#122236;
+  --k-round:#d69a5e; --k-round-soft:#2c2116;
+  --k-d2h:#b79bea; --k-d2h-soft:#241c33;
+  --k-local:#aab8c4; --k-local-soft:#1a2229;
+  --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -16px rgba(0,0,0,0.6);
+}
+*{box-sizing:border-box;}
+body{ margin:0; background:var(--bg); color:var(--ink); font-family:var(--font-body); -webkit-font-smoothing:antialiased; }
+h1,h2{ font-family:var(--font-display); margin:0; text-wrap:balance; }
+.mono{ font-family:var(--font-mono); }
+a{ color:var(--k-const); }
+.wrap{ max-width:1240px; margin:0 auto; padding:2.4rem 1.6rem 5rem; }
+.back{ display:inline-flex; align-items:center; gap:0.4rem; font-family:var(--font-mono); font-size:0.78rem; color:var(--ink-muted); text-decoration:none; margin-bottom:1.6rem; }
+.back:hover{ color:var(--ink); }
+.eyebrow{ font-family:var(--font-mono); font-size:0.72rem; letter-spacing:0.08em; text-transform:uppercase; color:var(--ink-faint); margin-bottom:0.6rem; }
+h1{ font-size:1.9rem; font-weight:500; line-height:1.2; color:var(--ink); }
+.lede{ font-size:0.95rem; color:var(--ink-muted); line-height:1.65; max-width:50rem; margin-top:0.9rem; }
+.lede b{ color:var(--ink); font-weight:600; }
+
+.legend{ display:flex; flex-wrap:wrap; gap:0.6rem 1.4rem; margin:1.8rem 0 0.4rem; padding:0.9rem 1.1rem; background:var(--surface); border:1px solid var(--border); border-radius:8px; box-shadow:var(--shadow); }
+.legend .item{ display:flex; align-items:center; gap:0.5rem; font-size:0.8rem; color:var(--ink-muted); }
+.legend .sw{ width:13px; height:13px; border-radius:3px; flex:none; }
+.legend .sw.k-const{ background:var(--k-const); } .legend .sw.k-round{ background:var(--k-round); }
+.legend .sw.k-d2h{ background:var(--k-d2h); } .legend .sw.k-local{ background:var(--k-local); }
+
+figure{ margin:2rem 0 0; }
+.diagram-frame{ background:var(--surface); border:1px solid var(--border); border-radius:10px; box-shadow:var(--shadow); overflow:auto; padding:1.2rem 0.6rem; }
+.zoombar{ display:flex; align-items:center; gap:0.5rem; margin-top:1.4rem; }
+.zoombar button{ font-family:var(--font-mono); font-size:0.85rem; font-weight:600; width:34px; height:34px; border-radius:7px; border:1px solid var(--border); background:var(--surface); color:var(--ink); cursor:pointer; display:flex; align-items:center; justify-content:center; }
+.zoombar button:hover{ background:var(--surface-2); border-color:var(--ink-faint); }
+.zoombar button:focus-visible{ outline:2px solid var(--k-const); outline-offset:1px; }
+.zoombar #zoom-pct{ font-family:var(--font-mono); font-size:0.8rem; color:var(--ink-muted); min-width:3.6em; text-align:center; }
+.zoombar .zreset, .zoombar .zfull{ width:auto; padding:0 0.7rem; font-size:0.76rem; gap:0.35rem; }
+.zoombar .zfull{ margin-left:auto; background:var(--k-const-soft); border-color:var(--k-const); color:var(--k-const); }
+.zoombar .zfull:hover{ filter:brightness(1.05); }
+
+.diagram-shell.is-fullscreen{
+  position:fixed; inset:0; z-index:2000; background:var(--bg);
+  padding:0.8rem 1rem 1rem; display:flex; flex-direction:column;
+}
+.diagram-shell.is-fullscreen .zoombar{ margin-top:0; flex:none; }
+.diagram-shell.is-fullscreen .diagram-frame{ flex:1; margin-top:0.7rem; min-height:0; }
+.diagram-shell.is-fullscreen svg{ margin:0 auto; }
+body:has(.diagram-shell.is-fullscreen){ overflow:hidden; }
+svg{ display:block; margin:0 auto; height:auto; transition:width 0.12s ease; }
+.fig-caption{ font-size:0.8rem; color:var(--ink-faint); text-align:center; margin-top:0.9rem; line-height:1.5; }
+
+.boxtitle{ font-family:var(--font-body); font-weight:700; fill:var(--ink); }
+.boxsub{ font-family:var(--font-body); font-weight:400; font-size:10.6px; fill:var(--ink-muted); }
+.arrlabel{ font-family:var(--font-mono); font-size:10.6px; fill:var(--ink-muted); }
+.arrlabel.strong{ font-weight:600; fill:var(--ink); }
+.vbtitle{ font-family:var(--font-mono); font-size:10px; font-weight:700; letter-spacing:0.02em; }
+.vblist{ font-family:var(--font-mono); font-size:10.3px; fill:var(--ink); }
+
+footer{ max-width:44rem; margin-top:2.6rem; padding-top:1.2rem; border-top:1px solid var(--border-soft); color:var(--ink-faint); font-size:0.78rem; line-height:1.7; }
+</style>
+
+<div class="wrap">
+  <div class="eyebrow">DMC · CUDA Fortran</div>
+  <h1>Un paso DMC, de la CPU a la GPU y de vuelta</h1>
+  <p class="lede">El recorrido real de <span class="mono">pasodmc_gpu_pipeline</span> (opción 7, la vía de producción) — qué hace cada fase del grafo, y sobre todo <b>qué variables suben para quedarse, cuáles hacen el viaje completo en cada paso, cuáles solo vuelven, y cuáles nunca salen de la GPU.</b> Lectura izquierda→derecha = orden de ejecución; las bifurcaciones salen hacia arriba porque esas 3 llamadas corren <em>a la vez</em>, no en secuencia. Abajo del todo solo hay código de CPU — el resto de la fila central es GPU. No entra en el cálculo interno de <span class="mono">derananum</span>/<span class="mono">vpot</span> — eso ya tiene su propio mapa aparte.</p>
+
+  <div class="legend">
+    <div class="item"><span class="sw k-const"></span>constante — sube <b>una sola vez</b>, se queda para siempre</div>
+    <div class="item"><span class="sw k-round"></span>va y vuelve <b>cada paso</b> (estado real del walker)</div>
+    <div class="item"><span class="sw k-d2h"></span>solo <b>vuelve</b> (D2H) — nunca sube, la sobrescribe el propio paso</div>
+    <div class="item"><span class="sw k-local"></span><b>nunca sale</b> de la GPU (auxiliar de grafo, o local por hilo)</div>
+  </div>
+
+  <div class="diagram-shell" id="diagram-shell">
+    <div class="zoombar">
+      <button type="button" id="zoom-out" aria-label="Alejar">&minus;</button>
+      <span id="zoom-pct">55%</span>
+      <button type="button" id="zoom-in" aria-label="Acercar">&plus;</button>
+      <button type="button" id="zoom-reset" class="zreset">100%</button>
+      <button type="button" id="zoom-full" class="zfull">&#9974; Pantalla completa</button>
+    </div>
+    <div class="diagram-frame">
+<svg id="pipe-svg" viewBox="0 0 2600 900" width="2600" height="900" role="img" aria-label="Diagrama horizontal de un paso DMC: la CPU, en una sola fila inferior, dispara el pipeline de GPU (fila central) que corre de izquierda a derecha por las fases k_fase_a, k_fase_cd y k_fase_fgh (fusiones de las fases c+d y f+g+h), con dos bifurcaciones hacia arriba donde derananum y vpot corren en paralelo, y vuelve a la CPU al final para el reparto de población, en un bucle que se cierra por debajo hacia el siguiente paso.">
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+
+  <!-- ===================== GPU main spine + forks ===================== -->
+  <g stroke="currentColor" fill="none">
+
+    <!-- local-note strip above FORK1 -->
+    <rect x="480" y="4" width="230" height="26" rx="5" fill="var(--k-local-soft)" stroke="var(--k-local)"/>
+  </g>
+  <text x="595" y="21" text-anchor="middle" class="vbtitle" fill="var(--k-local)">LOCAL POR HILO — NUNCA PERSISTENTE</text>
+
+  <g stroke="currentColor" fill="none">
+    <!-- FORK1 boxes -->
+    <rect x="480" y="40" width="230" height="90" rx="8" fill="var(--surface)" stroke="var(--border)"/>
+    <rect x="480" y="150" width="230" height="90" rx="8" fill="var(--surface)" stroke="var(--border)"/>
+    <rect x="480" y="260" width="230" height="90" rx="8" fill="var(--surface)" stroke="var(--border)"/>
+  </g>
+  <text x="595" y="66" text-anchor="middle" class="boxtitle" font-size="12.5">k_derananum_he4_t</text>
+  <text x="595" y="86" text-anchor="middle" class="boxsub">función de onda He4-He4</text>
+  <text x="595" y="102" text-anchor="middle" class="boxsub">(stream a)</text>
+
+  <text x="595" y="176" text-anchor="middle" class="boxtitle" font-size="12.5">k_derananum_resto_t</text>
+  <text x="595" y="196" text-anchor="middle" class="boxsub">He3 + mezcla + impureza</text>
+  <text x="595" y="212" text-anchor="middle" class="boxsub">(stream c)</text>
+
+  <text x="595" y="286" text-anchor="middle" class="boxtitle" font-size="12.5">k_vpot_3warp_t</text>
+  <text x="595" y="306" text-anchor="middle" class="boxsub">energía potencial, 3 warps</text>
+  <text x="595" y="322" text-anchor="middle" class="boxsub">(stream b)</text>
+
+  <g stroke="currentColor" fill="none">
+    <!-- trunk out of fase_a into the 3 boxes -->
+    <line x1="450" y1="485" x2="472" y2="485"/>
+    <line x1="472" y1="485" x2="472" y2="85"/>
+    <line x1="472" y1="85" x2="480" y2="85" marker-end="url(#arw)"/>
+    <line x1="472" y1="195" x2="480" y2="195" marker-end="url(#arw)"/>
+    <line x1="472" y1="305" x2="480" y2="305" marker-end="url(#arw)"/>
+    <!-- trunk into join1 -->
+    <line x1="710" y1="85" x2="718" y2="85"/>
+    <line x1="710" y1="195" x2="718" y2="195"/>
+    <line x1="710" y1="305" x2="718" y2="305"/>
+    <line x1="718" y1="85" x2="718" y2="485"/>
+    <line x1="718" y1="485" x2="740" y2="485" marker-end="url(#arw)"/>
+  </g>
+  <text x="405" y="470" text-anchor="middle" class="arrlabel strong">horquilla 1</text>
+  <text x="405" y="483" text-anchor="middle" class="arrlabel">3 vías a la vez</text>
+
+  <!-- lanza_pipeline -->
+  <g stroke="currentColor" fill="none"><rect x="40" y="430" width="190" height="110" rx="8" fill="var(--surface)" stroke="var(--border)"/></g>
+  <text x="135" y="456" text-anchor="middle" class="boxtitle" font-size="13">lanza_pipeline</text>
+  <text x="135" y="476" text-anchor="middle" class="boxsub">nw_actual = nwpaso</text>
+  <text x="135" y="492" text-anchor="middle" class="boxsub">cudaGraphLaunch</text>
+  <text x="135" y="508" text-anchor="middle" class="boxsub">+ StreamSynchronize</text>
+
+  <g stroke="currentColor" fill="none"><line x1="230" y1="485" x2="258" y2="485" marker-end="url(#arw)"/></g>
+
+  <!-- fase_a -->
+  <g stroke="currentColor" fill="none"><rect x="260" y="430" width="190" height="110" rx="8" fill="var(--surface)" stroke="var(--border)"/></g>
+  <text x="355" y="456" text-anchor="middle" class="boxtitle" font-size="13">k_fase_a</text>
+  <text x="355" y="476" text-anchor="middle" class="boxsub">difusión 1 (dwf VIEJO)</text>
+  <text x="355" y="492" text-anchor="middle" class="boxsub">+ rotación + sorteo</text>
+  <text x="355" y="508" text-anchor="middle" class="boxsub">nsons=0 · eold/wfold</text>
+
+  <!-- join1 -->
+  <g stroke="currentColor" fill="none"><rect x="740" y="430" width="190" height="110" rx="8" fill="var(--surface)" stroke="var(--border)"/></g>
+  <text x="835" y="460" text-anchor="middle" class="boxtitle" font-size="12.5">k_derananum_join_t</text>
+  <text x="835" y="480" text-anchor="middle" class="boxsub">combina he4+resto</text>
+  <text x="835" y="496" text-anchor="middle" class="boxsub">+ espera a vpot</text>
+
+  <g stroke="currentColor" fill="none"><line x1="930" y1="485" x2="958" y2="485" marker-end="url(#arw)"/></g>
+
+  <!-- fase_cd (fusionadas, fusion-fases-cd-fgh.md) -->
+  <g stroke="currentColor" fill="none"><rect x="960" y="430" width="410" height="110" rx="8" fill="var(--surface)" stroke="var(--border)"/></g>
+  <text x="1165" y="454" text-anchor="middle" class="boxtitle" font-size="13.5">k_fase_cd</text>
+  <text x="1165" y="472" text-anchor="middle" class="boxsub">ene=kin+pot · wftest 1ª hpsi → activo(i) (registro)</text>
+  <text x="1165" y="488" text-anchor="middle" class="boxsub">difusión 2 (dwf NUEVO) + rotación, solo si activo(i)</text>
+  <text x="1165" y="504" text-anchor="middle" class="boxsub" fill="var(--ink-faint)">fusión de k_fase_c+k_fase_d — mismo stream, sin horquilla entre medias</text>
+
+  <!-- FORK2 (compact) -->
+  <g stroke="currentColor" fill="none">
+    <line x1="1370" y1="485" x2="1392" y2="485"/>
+    <line x1="1392" y1="485" x2="1392" y2="130"/>
+    <line x1="1392" y1="130" x2="1400" y2="130" marker-end="url(#arw)"/>
+    <line x1="1392" y1="240" x2="1400" y2="240" marker-end="url(#arw)"/>
+    <line x1="1392" y1="350" x2="1400" y2="350" marker-end="url(#arw)"/>
+    <rect x="1400" y="100" width="230" height="60" rx="8" fill="var(--surface-2)" stroke="var(--border)"/>
+    <rect x="1400" y="210" width="230" height="60" rx="8" fill="var(--surface-2)" stroke="var(--border)"/>
+    <rect x="1400" y="320" width="230" height="60" rx="8" fill="var(--surface-2)" stroke="var(--border)"/>
+    <line x1="1630" y1="130" x2="1638" y2="130"/>
+    <line x1="1630" y1="240" x2="1638" y2="240"/>
+    <line x1="1630" y1="350" x2="1638" y2="350"/>
+    <line x1="1638" y1="130" x2="1638" y2="485"/>
+    <line x1="1638" y1="485" x2="1660" y2="485" marker-end="url(#arw)"/>
+  </g>
+  <text x="1515" y="123" text-anchor="middle" class="boxtitle" font-size="11.5">k_derananum_he4_t</text>
+  <text x="1515" y="140" text-anchor="middle" class="boxsub">(igual que arriba)</text>
+  <text x="1515" y="233" text-anchor="middle" class="boxtitle" font-size="11.5">k_derananum_resto_t</text>
+  <text x="1515" y="250" text-anchor="middle" class="boxsub">(igual que arriba)</text>
+  <text x="1515" y="343" text-anchor="middle" class="boxtitle" font-size="11.5">k_vpot_3warp_t</text>
+  <text x="1515" y="360" text-anchor="middle" class="boxsub">(igual que arriba)</text>
+  <text x="1325" y="470" text-anchor="middle" class="arrlabel strong">horquilla 2</text>
+  <text x="1325" y="483" text-anchor="middle" class="arrlabel">2ª hpsi, misma forma</text>
+
+  <!-- join2 -->
+  <g stroke="currentColor" fill="none"><rect x="1660" y="430" width="190" height="110" rx="8" fill="var(--surface)" stroke="var(--border)"/></g>
+  <text x="1755" y="470" text-anchor="middle" class="boxtitle" font-size="12.5">k_derananum_join_t</text>
+  <text x="1755" y="490" text-anchor="middle" class="boxsub">(igual que arriba)</text>
+
+  <g stroke="currentColor" fill="none"><line x1="1850" y1="485" x2="1878" y2="485" marker-end="url(#arw)"/></g>
+
+  <!-- fase_fgh (fusionadas, fusion-fases-cd-fgh.md) -->
+  <g stroke="currentColor" fill="none"><rect x="1880" y="430" width="630" height="110" rx="8" fill="var(--surface)" stroke="var(--border)"/></g>
+  <text x="2195" y="454" text-anchor="middle" class="boxtitle" font-size="13.5">k_fase_fgh</text>
+  <text x="2195" y="472" text-anchor="middle" class="boxsub">wftest 2ª hpsi → activo(i) (registro) · ene=kin+pot otra vez</text>
+  <text x="2195" y="488" text-anchor="middle" class="boxsub">sorteo final → nsons(i) · histogramas pesados por nsons (población PRE-reparto)</text>
+  <text x="2195" y="504" text-anchor="middle" class="boxsub" fill="var(--ink-faint)">fusión de k_fase_f+k_fase_g+k_fase_h — activo ya no toca memoria global</text>
+
+  <!-- "nunca sale de GPU" note, centered under join1/fase_c gap -->
+  <g stroke="currentColor" fill="none">
+    <rect x="740" y="560" width="410" height="46" rx="7" fill="var(--k-local-soft)" stroke="var(--k-local)"/>
+  </g>
+  <text x="945" y="578" text-anchor="middle" class="vbtitle" fill="var(--k-local)">NUNCA SALEN DE LA GPU</text>
+  <text x="945" y="595" text-anchor="middle" class="vblist" fill="var(--k-local)">eold · wfold · activo(i) · nw_actual</text>
+
+  <!-- ===================== left arrow + variable boxes (sube a GPU) ===================== -->
+  <g stroke="currentColor" fill="none">
+    <line x1="392" y1="700" x2="150" y2="542" marker-end="url(#arw)"/>
+  </g>
+  <text x="360" y="670" text-anchor="middle" class="arrlabel strong">sube a GPU (H2D)</text>
+
+  <g stroke="currentColor" fill="none">
+    <rect x="180" y="555" width="270" height="44" rx="7" fill="var(--k-const-soft)" stroke="var(--k-const)"/>
+  </g>
+  <text x="315" y="571" text-anchor="middle" class="vbtitle" fill="var(--k-const)">CONSTANTE · 1 SOLA VEZ</text>
+  <text x="315" y="587" text-anchor="middle" class="vblist" fill="var(--k-const)">phe4,dtau,natom,nhe4,hb2m,b</text>
+
+  <g stroke="currentColor" fill="none">
+    <rect x="180" y="605" width="270" height="44" rx="7" fill="var(--k-round-soft)" stroke="var(--k-round)"/>
+  </g>
+  <text x="315" y="621" text-anchor="middle" class="vbtitle" fill="var(--k-round)">CADA PASO (sube)</text>
+  <text x="315" y="637" text-anchor="middle" class="vblist" fill="var(--k-round)">atom,sprop,dwf,dphi,wf,ene,irn</text>
+
+  <!-- ===================== right arrow + variable boxes (vuelve a CPU) ===================== -->
+  <g stroke="currentColor" fill="none">
+    <line x1="2415" y1="542" x2="2121" y2="700" marker-end="url(#arw)"/>
+  </g>
+  <text x="2290" y="670" text-anchor="middle" class="arrlabel strong">vuelve a CPU (D2H)</text>
+
+  <g stroke="currentColor" fill="none">
+    <rect x="2150" y="555" width="280" height="44" rx="7" fill="var(--k-round-soft)" stroke="var(--k-round)"/>
+  </g>
+  <text x="2290" y="571" text-anchor="middle" class="vbtitle" fill="var(--k-round)">VUELVEN (ya habían subido)</text>
+  <text x="2290" y="587" text-anchor="middle" class="vblist" fill="var(--k-round)">atom,sprop,dwf,dphi,wf,ene,irn</text>
+
+  <g stroke="currentColor" fill="none">
+    <rect x="2150" y="605" width="280" height="44" rx="7" fill="var(--k-d2h-soft)" stroke="var(--k-d2h)"/>
+  </g>
+  <text x="2290" y="621" text-anchor="middle" class="vbtitle" fill="var(--k-d2h)">SOLO VUELVEN (D2H)</text>
+  <text x="2290" y="637" text-anchor="middle" class="vblist" fill="var(--k-d2h)">kin,pot,eimp,erot,nsons</text>
+
+  <!-- ===================== CPU band (bottom, only CPU) — etapas separadas ===================== -->
+  <text x="248" y="690" text-anchor="middle" class="vbtitle" fill="var(--ink-faint)">CPU · pasodmc_gpu_pipeline — ENTRADA</text>
+  <text x="2292" y="690" text-anchor="middle" class="vbtitle" fill="var(--ink-faint)">CPU · pasodmc_gpu_pipeline — SALIDA</text>
+
+  <!-- entrada: 3 etapas -->
+  <g stroke="currentColor" fill="none">
+    <rect x="40" y="700" width="125" height="90" rx="8" fill="var(--surface-2)" stroke="var(--border)"/>
+    <rect x="185" y="700" width="125" height="90" rx="8" fill="var(--surface-2)" stroke="var(--border)"/>
+    <rect x="330" y="700" width="125" height="90" rx="8" fill="var(--surface-2)" stroke="var(--border)"/>
+    <line x1="165" y1="745" x2="183" y2="745" marker-end="url(#arw)"/>
+    <line x1="310" y1="745" x2="328" y2="745" marker-end="url(#arw)"/>
+  </g>
+  <text x="102" y="730" text-anchor="middle" class="boxtitle" font-size="10.3">sincroniza_etrial_gpu</text>
+  <text x="102" y="748" text-anchor="middle" class="boxsub">actualiza etrial</text>
+  <text x="102" y="764" text-anchor="middle" class="boxsub" fill="var(--ink-faint)">(cada paso)</text>
+
+  <text x="247" y="730" text-anchor="middle" class="boxtitle" font-size="11">empaqueta</text>
+  <text x="247" y="748" text-anchor="middle" class="boxsub">wsim(AoS) → SoA</text>
+  <text x="247" y="764" text-anchor="middle" class="boxsub" fill="var(--ink-faint)">(host)</text>
+
+  <text x="392" y="730" text-anchor="middle" class="boxtitle" font-size="11.5">copia H2D</text>
+  <text x="392" y="748" text-anchor="middle" class="boxsub">sube a GPU</text>
+  <text x="392" y="764" text-anchor="middle" class="boxsub" fill="var(--ink-faint)">llama a lanza_pipeline</text>
+
+  <!-- salida: 4 etapas -->
+  <g stroke="currentColor" fill="none">
+    <rect x="2074" y="700" width="94" height="90" rx="8" fill="var(--surface-2)" stroke="var(--border)"/>
+    <rect x="2188" y="700" width="94" height="90" rx="8" fill="var(--surface-2)" stroke="var(--border)"/>
+    <rect x="2302" y="700" width="94" height="90" rx="8" fill="var(--surface-2)" stroke="var(--border)"/>
+    <rect x="2416" y="700" width="94" height="90" rx="8" fill="var(--surface-2)" stroke="var(--border)"/>
+    <line x1="2168" y1="745" x2="2186" y2="745" marker-end="url(#arw)"/>
+    <line x1="2282" y1="745" x2="2300" y2="745" marker-end="url(#arw)"/>
+    <line x1="2396" y1="745" x2="2414" y2="745" marker-end="url(#arw)"/>
+  </g>
+  <text x="2121" y="730" text-anchor="middle" class="boxtitle" font-size="11">copia D2H</text>
+  <text x="2121" y="748" text-anchor="middle" class="boxsub">baja de GPU</text>
+
+  <text x="2235" y="730" text-anchor="middle" class="boxtitle" font-size="10.5">desempaqueta</text>
+  <text x="2235" y="748" text-anchor="middle" class="boxsub">SoA → wsim</text>
+  <text x="2235" y="764" text-anchor="middle" class="boxsub" fill="var(--ink-faint)">(AoS, host)</text>
+
+  <text x="2349" y="730" text-anchor="middle" class="boxtitle" font-size="11">reparto</text>
+  <text x="2349" y="748" text-anchor="middle" class="boxsub">compacta por</text>
+  <text x="2349" y="764" text-anchor="middle" class="boxsub">nsons(i)</text>
+
+  <text x="2463" y="726" text-anchor="middle" class="boxtitle" font-size="10">decorrelación</text>
+  <text x="2463" y="742" text-anchor="middle" class="boxsub">clones extra</text>
+  <text x="2463" y="758" text-anchor="middle" class="boxsub" fill="var(--ink-faint)">(rand1p_gpu)</text>
+
+  <!-- loop back -->
+  <g stroke="currentColor" fill="none">
+    <path d="M 2463 790 L 2463 830 L 102 830 L 102 790" marker-end="url(#arw)"/>
+  </g>
+  <text x="1280" y="824" text-anchor="middle" class="arrlabel strong">bucle: siguiente paso DMC (ipaso+1) — dmc_gpu_pipeline (mmontecarlo.f90)</text>
+
+</svg>
+    </div>
+  </div>
+  <p class="fig-caption">Un solo paso DMC del pipeline de producción (opción 7), leído de izquierda a derecha. Las dos horquillas (derananum + vpot en paralelo) son idénticas en estructura — la segunda corresponde a la 2ª hpsi, sobre la posición ya avanzada por <span class="mono">k_fase_cd</span>. <span class="mono">k_fase_cd</span> y <span class="mono">k_fase_fgh</span> son fusiones de fases antes separadas (<span class="mono">c+d</span>, <span class="mono">f+g+h</span>) — ver <span class="mono">fusion-fases-cd-fgh.md</span>. El color de cada recuadro de variables indica su categoría de tráfico CPU↔GPU, no su tipo de dato.</p>
+
+  <footer>
+    Fuentes: <span class="mono">msteps.f90</span> (<span class="mono">pasodmc_gpu_pipeline</span>, <span class="mono">lanza_pipeline</span>), <span class="mono">dmc2_pipeline.cuf</span> (las 7 fases + horquillas).
+  </footer>
+</div>
+<script>
+(function(){
+  var svg = document.getElementById('pipe-svg');
+  var pctEl = document.getElementById('zoom-pct');
+  var NATURAL_W = 2600;
+  var pct = 55;
+  function apply(){
+    svg.style.width = Math.round(NATURAL_W * pct / 100) + 'px';
+    pctEl.textContent = pct + '%';
+  }
+  document.getElementById('zoom-in').addEventListener('click', function(){
+    pct = Math.min(160, pct + 10); apply();
+  });
+  document.getElementById('zoom-out').addEventListener('click', function(){
+    pct = Math.max(20, pct - 10); apply();
+  });
+  document.getElementById('zoom-reset').addEventListener('click', function(){
+    pct = 100; apply();
+  });
+  apply();
+
+  // ---- pantalla completa (overlay CSS, no Fullscreen API -- funciona dentro de iframes) ----
+  var shell = document.getElementById('diagram-shell');
+  var frame = shell.querySelector('.diagram-frame');
+  var fullBtn = document.getElementById('zoom-full');
+  var pctBeforeFull = pct;
+  var isFull = false;
+
+  function fitToFrame(){
+    var avail = frame.clientWidth - 24;
+    if (avail > 100) {
+      pct = Math.max(20, Math.min(200, Math.round(avail / NATURAL_W * 100)));
+      apply();
+    }
+  }
+
+  function enterFull(){
+    if (isFull) return;
+    isFull = true;
+    pctBeforeFull = pct;
+    shell.classList.add('is-fullscreen');
+    document.body.style.overflow = 'hidden';
+    fullBtn.innerHTML = '&#10005; Salir de pantalla completa';
+    requestAnimationFrame(fitToFrame);
+  }
+  function exitFull(){
+    if (!isFull) return;
+    isFull = false;
+    shell.classList.remove('is-fullscreen');
+    document.body.style.overflow = '';
+    fullBtn.innerHTML = '&#9974; Pantalla completa';
+    pct = pctBeforeFull; apply();
+  }
+  fullBtn.addEventListener('click', function(){ isFull ? exitFull() : enterFull(); });
+  document.addEventListener('keydown', function(e){ if (e.key === 'Escape') exitFull(); });
+  window.addEventListener('resize', function(){ if (isFull) fitToFrame(); });
+})();
+</script>
+
+</body></html>

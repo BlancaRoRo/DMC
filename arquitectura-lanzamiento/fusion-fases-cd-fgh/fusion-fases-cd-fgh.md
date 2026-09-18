@@ -1,5 +1,9 @@
 # Fusionar fases secuenciales del grafo: `k_fase_c`+`k_fase_d` y `k_fase_f`+`k_fase_g`+`k_fase_h`
 
+Diagrama interactivo del pipeline completo ya con esta fusión aplicada, con el
+recorrido de cada variable entre CPU y GPU: [`pipeline-cpu-gpu.html`](pipeline-cpu-gpu.html)
+(ábrelo en el navegador).
+
 ## 1. Objetivo
 
 Pregunta del usuario: `k_fase_c`→`k_fase_d` y `k_fase_f`→`k_fase_g`→`k_fase_h` son ya secuenciales (sin ninguna horquilla entre medias) — ¿no sería más rápido fusionarlas en un único kernel/nodo del grafo, en vez de mantenerlas separadas?
