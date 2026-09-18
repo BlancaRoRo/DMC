@@ -55,31 +55,7 @@ argumento de línea de comandos (`./qmccluster in.mcv`, sin el `<`, no funciona)
 ## `dmc-hibrido/`
 
 El código híbrido final, con todas las optimizaciones GPU del proyecto ya integradas,
-recortado a solo las vías que de verdad hacen falta:
-
-- **El mismo fix de `Vap`** que `dmc-cpu`, aplicado aquí también (`hibrido_instrumentado`
-  real no lo tenía todavía -- se ha portado en esta limpieza).
-- **El código `dmc` original en CPU se mantiene integrado** en el mismo binario
-  (`opcion=4`) como referencia/comparación, junto al pipeline GPU -- no es un binario
-  aparte.
-- **El fix de colapso de población**: si en un paso DMC mueren *todos* los walkers a
-  la vez (`nwfin=0` -- se ha visto en la práctica arrancando con muy pocos walkers,
-  p. ej. 1), `log(nwnew/nwold)` da `log(0)`, que sin este chequeo se propagaría en
-  silencio como `NaN`/`Inf` en los pasos siguientes. El pipeline lo detecta, para la
-  ejecución con un mensaje explícito y escribe un volcado forense
-  (`snapshot_colapso.dat`) del estado justo antes del colapso, en vez de seguir
-  calculando sobre datos inválidos. No es un "tope" de población -- es una comprobación
-  defensiva ante el caso límite nwfin=0, que sí puede pasar de verdad (fluctuación
-  estadística normal del método DMC, más probable cuanto menor es la población).
-- **Las opciones antiguas 5 y 6** (`dmc_gpu`/`pasodmc_gpu` y
-  `dmc_cpu_gpurand`/`pasodmc_cpu_gpurand`) se han eliminado -- eran vías de
-  verificación intermedias, ya superadas por el pipeline y documentadas en
-  `hibrido.md` (rama `fase2-integración`). **La opción 7 (el pipeline de producción)
-  pasa a ser la opción 5.** Opciones finales: `0`=test der, `1`=mcv, `2`/`3`=optimiza,
-  `4`=dmc (CPU), `5`=dmc-gpu-pipeline.
-- Se conservan las 3 herramientas de diagnóstico forense (`driver_diagnostico.f90`,
-  `driver_replay.f90`, `driver_verifica_prereparto.f90`) -- no dependen de las opciones
-  eliminadas, sirven para depurar el propio pipeline.
+recortado a solo las vías que de verdad hacen falta.
 
 Verificado bit a bit tras la limpieza: con `opcion=5`, la energía final coincide
 exactamente con la que daba el binario original (`hibrido_instrumentado`) con
