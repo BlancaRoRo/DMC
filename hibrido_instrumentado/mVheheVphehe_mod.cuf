@@ -1,0 +1,178 @@
+module mVheheVphehe
+! dexp/dsin/dcos sustituidas por myexp/mysin/mycos (glibc_math/,
+! docs-kernels/glibc_math.md): reproducen bit a bit el algoritmo real
+! de la glibc de esta maquina, en vez de depender de que la
+! intrinseca de nvfortran (libnvcpumath/libdevice) coincida con la de
+! gfortran (libm) por casualidad -- ver docs-kernels/
+! gpu_vs_gfortran_arbol.md para el porque.
+use glibc_exp_mod, only: myexp
+use glibc_sincos_mod, only: mysin, mycos
+implicit none
+integer, private, parameter :: i4 = selected_int_kind(9)
+
+contains
+attributes(host, device) function V_hehe (r)
+include 'param_atoms_bh_freeform.h'
+double precision, intent(in) :: r
+double precision :: V_hehe
+double precision :: x, x2, x6, x8, x10, F, sum, addin
+    x  = r/req_HeHe
+    x2 = x*x
+    x6 = x2*x2*x2
+    x8 = x6*x2
+    x10= x8*x2
+    F = 1.d0
+    if(x < D_HeHe) F=myexp(-(D_HeHe/x-1.d0)**2)
+    sum = c6_HeHe/x6 + c8_HeHe/x8 + c10_HeHe/x10
+    sum = A_HeHe*myexp(-alpha_HeHe*x + beta_HeHe*x2) - F*sum
+    addin=0.d0
+    if (x >= xx1_HeHe .and. x <=xx2_HeHe) then
+        addin = Aa_HeHe*(mysin( Ba_HeHe*(x-xx1_HeHe)-pi12)+1.d0)
+    end if
+    V_hehe = sum + addin
+    V_hehe = eps_HeHe * V_hehe
+
+end function V_hehe
+
+attributes(host, device) function Vp_hehe (r)
+include 'param_atoms_bh_freeform.h'
+    double precision, intent(in) :: r
+    double precision :: x, x2, x3, x6, x7, x8, x9, x10, x11
+    double precision :: F, Fp, sum1, sum2
+    double precision :: Vap, Vbp, Vp_hehe
+
+    x  = r/req_HeHe
+    x2 = x*x
+    x3 = x2*x
+    x6 = x3*x3
+    x7 = x6*x
+    x8 = x6*x2
+    x9 = x8*x
+    x10= x8*x2
+    x11= x10*x
+    F  = 1.d0
+    Fp = 0.d0
+    if(x < D_HeHe) then
+        F =myexp(-(D_HeHe/x-1.d0)**2)
+        Fp=2.d0*(D_HeHe/x-1.d0)*(D_HeHe/x2) * F
+    end if
+
+    sum1 = c6_HeHe/x6 + c8_HeHe/x8 + c10_HeHe/x10
+    sum2 = 6.d0*c6_HeHe/x7 + 8.d0*c8_HeHe/x9 + 10.d0*c10_HeHe/x11
+    Vbp = A_HeHe*(-alpha_HeHe+2.d0*beta_HeHe*x) &
+        *myexp(-alpha_HeHe*x + beta_HeHe*x2) - Fp*sum1 + F*sum2
+
+    ! Vap solo se define dentro del rango [xx1_HeHe,xx2_HeHe] en el
+    ! original (bh_heh2m.f:505-534): fuera de ese rango se usaba sin
+    ! inicializar. Se corrige aqui recuperando la linea que estaba
+    ! comentada en el original (!Vap=0.d0).
+    Vap = 0.d0
+    if (x >= xx1_HeHe .and. x <=xx2_HeHe) then
+        Vap = Aa_HeHe * Ba_HeHe* mycos(Ba_HeHe*(x-xx1_HeHe)-pi12)
+    end if
+
+    Vp_hehe = (eps_HeHe/req_HeHe) * (Vap+Vbp)
+
+end function Vp_hehe
+
+! v3-cuda-optimizacion/optimizacion-vpot: V_hehe(r)/Vp_hehe(r) se
+! llaman siempre con el mismo r, dos lineas seguidas, en el bucle de
+! parejas He4-He4 de He_dihydrogen.f -- recalculan x/potencias de x, y
+! sobre todo los 2 myexp() (F y el termino principal) de forma
+! IDENTICA por separado. Esta version fusionada los calcula una sola
+! vez y devuelve ambos valores. Solo difieren en la parte final
+! (mysin vs mycos). Verificar bit a bit contra V_hehe/Vp_hehe por
+! separado antes de usarse en produccion -- ver optimizacion-vpot.md.
+attributes(host, device) subroutine V_and_Vp_hehe(r, v, vp)
+include 'param_atoms_bh_freeform.h'
+    double precision, intent(in) :: r
+    double precision, intent(out) :: v, vp
+    double precision :: x, x2, x3, x6, x7, x8, x9, x10, x11
+    double precision :: F, Fp, sum1, sum2, expbase, addin, Vap, Vbp
+    ! PRUEBA v3-cuda-optimizacion/mapa-sfu: req_HeHe/D_HeHe son PARAMETER
+    ! (constantes reales), y todas las divisiones de esta rutina son por
+    ! una potencia de x -- se cachea 1/x una vez y se construyen las
+    ! potencias reciprocas por multiplicacion, igual que en duhe4x.
+    double precision, parameter :: inv_req_HeHe = 1.d0/req_HeHe
+    double precision :: inv_x, inv_x2, inv_x6, inv_x7, inv_x8, inv_x9, inv_x10, inv_x11
+
+    x  = r*inv_req_HeHe
+    x2 = x*x
+    x3 = x2*x
+    x6 = x3*x3
+    x7 = x6*x
+    x8 = x6*x2
+    x9 = x8*x
+    x10= x8*x2
+    x11= x10*x
+
+    inv_x  = 1.d0/x
+    inv_x2 = inv_x*inv_x
+    inv_x6 = inv_x2*inv_x2*inv_x2
+    inv_x7 = inv_x6*inv_x
+    inv_x8 = inv_x6*inv_x2
+    inv_x9 = inv_x8*inv_x
+    inv_x10= inv_x8*inv_x2
+    inv_x11= inv_x10*inv_x
+
+    F  = 1.d0
+    Fp = 0.d0
+    if(x < D_HeHe) then
+        F =myexp(-(D_HeHe*inv_x-1.d0)**2)
+        Fp=2.d0*(D_HeHe*inv_x-1.d0)*(D_HeHe*inv_x2) * F
+    end if
+
+    expbase = myexp(-alpha_HeHe*x + beta_HeHe*x2)
+
+    ! ---- V_hehe ----
+    sum1 = c6_HeHe*inv_x6 + c8_HeHe*inv_x8 + c10_HeHe*inv_x10
+    v = A_HeHe*expbase - F*sum1
+    addin=0.d0
+    if (x >= xx1_HeHe .and. x <=xx2_HeHe) then
+        addin = Aa_HeHe*(mysin( Ba_HeHe*(x-xx1_HeHe)-pi12)+1.d0)
+    end if
+    v = v + addin
+    v = eps_HeHe * v
+
+    ! ---- Vp_hehe ----
+    sum2 = 6.d0*c6_HeHe*inv_x7 + 8.d0*c8_HeHe*inv_x9 + 10.d0*c10_HeHe*inv_x11
+    Vbp = A_HeHe*(-alpha_HeHe+2.d0*beta_HeHe*x) &
+        *expbase - Fp*sum1 + F*sum2
+    Vap = 0.d0
+    if (x >= xx1_HeHe .and. x <=xx2_HeHe) then
+        Vap = Aa_HeHe * Ba_HeHe* mycos(Ba_HeHe*(x-xx1_HeHe)-pi12)
+    end if
+    vp = (eps_HeHe/req_HeHe) * (Vap+Vbp)
+
+end subroutine V_and_Vp_hehe
+
+
+! un hilo = un valor de r = un V_hehe(r)
+attributes(global) subroutine k_V_hehe(n, r, v_out)
+integer(kind=i4), value :: n
+double precision, device, intent(in)  :: r(n)
+double precision, device, intent(out) :: v_out(n)
+integer(kind=i4) :: i
+
+ i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= n) then
+     v_out(i) = V_hehe(r(i))
+   endif
+
+end subroutine k_V_hehe
+
+! un hilo = un valor de r = un Vp_hehe(r)
+attributes(global) subroutine k_Vp_hehe(n, r, v_out)
+integer(kind=i4), value :: n
+double precision, device, intent(in)  :: r(n)
+double precision, device, intent(out) :: v_out(n)
+integer(kind=i4) :: i
+
+ i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= n) then
+     v_out(i) = Vp_hehe(r(i))
+   endif
+
+end subroutine k_Vp_hehe
+
+end module mVheheVphehe

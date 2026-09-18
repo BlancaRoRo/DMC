@@ -1,0 +1,328 @@
+module d_uhex4
+ ! vec3: se reutiliza la definicion real de mtipos.f90 (no se retipea).
+ ! Solo se usa a traves de %comp en todo duhe4x/uhe4x -- nunca se llama
+ ! a los operadores sobrecargados (+,-,*,=) que mtipos.f90 define para
+ ! vec3, asi que no hace falta preocuparse de si esos operadores (que
+ ! son solo host) se pueden usar en device: aqui no se usan en absoluto.
+ use mtipos, only: vec3
+ ! calpleg/calderpleg ya portados y probados en calpleg-calderpleg/ --
+ ! se reutilizan en vez de volver a escribirlos.
+ use mlegendre_gpu, only: calpleg => calplegd, calderpleg => calderplegd, lmax_dev, &
+     calpleg_f => calplegd_float, calderpleg_f => calderplegd_float
+ ! rij**pxhe4(2,il)/rij**pxhe4(4,il): exponente REAL (nu/p4 de in.mcv,
+ ! no enteros) -> pow(x,y), que tiene implementaciones independientes
+ ! en host (rapida/precisa segun -Kieee) y device (libdevice), sin
+ ! garantia de coincidir con gfortran -- ver docs-kernels/
+ ! He_dihydrogen.md Parte 5 y glibc_math.md Parte 4. mypow (glibc_pow.cuf)
+ ! cierra ese hueco, verificado con 30 casos (incluido este rij real).
+ use glibc_pow_mod, only: mypow, mypow_log, mypow_desde_log
+
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! lxhe4, impurmol y pxhe4 en el original (mparametros.f90) NO son
+ ! PARAMETER: son variables que mentradatos.f90 rellena una vez al leer
+ ! in.mcv y que se quedan fijas el resto de la simulacion. Al ser
+ ! variables de verdad (no constantes de compilacion), necesitan su
+ ! propia copia "device" y un copiado explicito desde el host -- pero
+ ! se declaran aqui, a nivel de modulo, con el MISMO nombre que usa el
+ ! cuerpo de duhe4x/uhe4x (sin cambiar ni una linea de esos cuerpos),
+ ! y una variable device a nivel de modulo se puede leer tanto desde
+ ! el host como desde el device de una subrutina host,device (comprobado).
+ integer(kind=i4), device :: lxhe4
+ logical, device :: impurmol
+ real(kind=r8), device :: pxhe4(5,0:lmax_dev)
+
+contains
+
+attributes(host, device) subroutine duhe4x(rivec, smol, d1ux, d2ux, d1zux, d2zux)
+  type(vec3), intent (in) :: rivec,smol(3)
+  type(vec3), intent (out) :: d1ux
+  real(kind=r8), intent (out) :: d2ux
+  real(kind=r8), intent (out) :: d1zux(2),d2zux
+  type(vec3) :: grz,grpl,grul
+  real(kind=r8) :: rij,cth,zpr,grz2,lapz
+  real(kind=r8) :: gpz(2),lpz,gpz2
+  real(kind=r8) :: ulx,ulxp,ulxs,lapl
+  real(kind=r8) :: rijp2,rijp4
+  real(kind=r8) :: pl(0:lmax_dev),d1pl(0:lmax_dev),d2pl(0:lmax_dev)
+  integer(kind=i4) :: il
+  ! v3-cuda-optimizacion/optimizacion-mypow: log(rij) no depende de il
+  ! (rij es fijo en toda esta subrutina) -- se calcula una vez, fuera
+  ! del bucle, en vez de que cada mypow(rij,...) lo recalcule por su
+  ! cuenta 2*(lxhe4+1) veces. Verificado bit a bit en prueba_split_mypow/.
+  real(kind=r8) :: rij_hi, rij_lo
+  ! PRUEBA v3-cuda-optimizacion/mapa-sfu: idem He_dihydrogen, factor
+  ! comun 1/rij y 1/rijp2 -- no bit a bit (ver test_duhe4x.cuf).
+  real(kind=r8) :: inv_rij, inv_rij2, inv_rijp2
+
+   rij=sqrt(dot_product(rivec%comp,rivec%comp))
+   inv_rij  = 1.0_r8/rij
+   inv_rij2 = inv_rij*inv_rij
+   call mypow_log(rij, rij_hi, rij_lo)
+   if(impurmol) then
+     cth=dot_product(rivec%comp,smol(3)%comp)*inv_rij
+     zpr=cth*inv_rij
+     grz%comp=(smol(3)%comp-zpr*rivec%comp)*inv_rij
+     grz2=dot_product(grz%comp,grz%comp)
+     lapz=-2.0_r8*zpr*inv_rij
+     gpz(1)=-dot_product(rivec%comp,smol(2)%comp)*inv_rij
+     gpz(2)= dot_product(rivec%comp,smol(1)%comp)*inv_rij
+     gpz2=dot_product(gpz,gpz)
+     lpz=-cth-cth
+   else
+     cth=0.0_r8
+     grz%comp=0.0_r8
+     grz2=0.0_r8
+     lapz=0.0_r8
+     gpz=0.0_r8
+     lpz=0.0_r8
+   endif
+   call calderpleg(lxhe4,cth,pl(0:lxhe4),d1pl(0:lxhe4),d2pl(0:lxhe4))
+   do il=1,lxhe4
+     pl(il)=1.0_r8-pl(il)
+     d1pl(il)=-d1pl(il)
+     d2pl(il)=-d2pl(il)
+   enddo
+
+   d1ux%comp=0.0_r8
+   d2ux=0.0_r8
+   d1zux=0.0_r8
+   d2zux=0.0_r8
+   do il=0,lxhe4
+     rijp2=mypow_desde_log(rij_hi,rij_lo,pxhe4(2,il))
+     rijp4=mypow_desde_log(rij_hi,rij_lo,pxhe4(4,il))
+     inv_rijp2 = 1.0_r8/rijp2
+     ulx=  -pxhe4(1,il)*inv_rijp2                                &
+ &         -pxhe4(3,il)*rijp4-pxhe4(5,il)*rij_hi
+     ulxp=( pxhe4(1,il)*pxhe4(2,il)*inv_rijp2                    &
+ &         -pxhe4(3,il)*pxhe4(4,il)*rijp4-pxhe4(5,il))*inv_rij
+     ulxs=(-pxhe4(1,il)*pxhe4(2,il)*(pxhe4(2,il)+1.0_r8)*inv_rijp2 &
+ &         -pxhe4(3,il)*pxhe4(4,il)*(pxhe4(4,il)-1.0_r8)*rijp4  &
+ &         +pxhe4(5,il))*inv_rij2
+     ulxs=ulxs+2.0_r8*ulxp*inv_rij
+     grul%comp=ulxp*inv_rij*rivec%comp
+     grpl%comp=d1pl(il)*grz%comp
+     lapl=lapz*d1pl(il)+grz2*d2pl(il)
+     d1ux%comp=d1ux%comp+pl(il)*grul%comp
+     d1ux%comp=d1ux%comp+ulx*grpl%comp
+     d2ux=d2ux+pl(il)*ulxs
+     d2ux=d2ux+ulx*lapl
+     d2ux=d2ux+2.0_r8*dot_product(grul%comp,grpl%comp)
+     d1zux(:)=d1zux(:)+ulx*d1pl(il)*gpz(:)
+     d2zux=d2zux+ulx*(d1pl(il)*lpz+d2pl(il)*gpz2)
+   enddo
+end subroutine duhe4x
+
+! ---- duhe4x_float: Opcion 2 (hibrido), ver candidatos-float-riesgo-
+! cancelacion.md 4b/6. La cadena que alimenta la resta que cancela
+! (rij, inv_rij, inv_rij2, mypow_log, rijp2/rijp4/inv_rijp2, ulx/ulxp/
+! ulxs) se queda IDENTICA en double -- ni una linea tocada. Todo lo
+! demas (geometria impurmol, Legendre, acumulacion final en las
+! salidas) pasa a float; los valores double "limpios" (ulx/ulxp/ulxs,
+! ya sin cancelacion segun la medicion de 4.1b) se convierten a float
+! solo en el ultimo paso, justo antes de multiplicarse por las
+! cantidades ya-float, y el producto se reconvierte a double solo al
+! sumarse en el acumulador de salida.
+attributes(host, device) subroutine duhe4x_float(rivec, smol, d1ux, d2ux, d1zux, d2zux)
+  type(vec3), intent (in) :: rivec,smol(3)
+  type(vec3), intent (out) :: d1ux
+  real(kind=r8), intent (out) :: d2ux
+  real(kind=r8), intent (out) :: d1zux(2),d2zux
+  ! -- cadena obligada a double: identica a duhe4x --
+  real(kind=r8) :: rij,zpr_d
+  real(kind=r8) :: ulx,ulxp,ulxs
+  real(kind=r8) :: rijp2,rijp4
+  real(kind=r8) :: rij_hi, rij_lo
+  real(kind=r8) :: inv_rij, inv_rij2, inv_rijp2
+  ! -- geometria y Legendre: float --
+  real(kind=4) :: rivec_f(3), smol_f(3,3)
+  real(kind=4) :: grz_f(3),grpl_f(3),grul_f(3)
+  real(kind=4) :: cth_f,zpr_f,grz2_f,lapz_f
+  real(kind=4) :: gpz_f(2),lpz_f,gpz2_f
+  real(kind=4) :: lapl_f
+  real(kind=4) :: pl_f(0:lmax_dev),d1pl_f(0:lmax_dev),d2pl_f(0:lmax_dev)
+  real(kind=4) :: ulx_f, ulxp_f, ulxs_f
+  integer(kind=i4) :: il, ic
+
+   rij=sqrt(dot_product(rivec%comp,rivec%comp))
+   inv_rij  = 1.0_r8/rij
+   inv_rij2 = inv_rij*inv_rij
+   call mypow_log(rij, rij_hi, rij_lo)
+
+   rivec_f = real(rivec%comp,4)
+   do ic=1,3
+     smol_f(:,ic) = real(smol(ic)%comp,4)
+   enddo
+
+   if(impurmol) then
+     zpr_d=dot_product(rivec%comp,smol(3)%comp)*inv_rij2
+     cth_f=real(zpr_d*rij,4)
+     zpr_f=real(zpr_d,4)
+     grz_f=(smol_f(:,3)-zpr_f*rivec_f)*real(inv_rij,4)
+     grz2_f=dot_product(grz_f,grz_f)
+     lapz_f=-2.0_4*zpr_f*real(inv_rij,4)
+     gpz_f(1)=-dot_product(rivec_f,smol_f(:,2))*real(inv_rij,4)
+     gpz_f(2)= dot_product(rivec_f,smol_f(:,1))*real(inv_rij,4)
+     gpz2_f=dot_product(gpz_f,gpz_f)
+     lpz_f=-cth_f-cth_f
+   else
+     cth_f=0.0_4
+     grz_f=0.0_4
+     grz2_f=0.0_4
+     lapz_f=0.0_4
+     gpz_f=0.0_4
+     lpz_f=0.0_4
+   endif
+   call calderpleg_f(lxhe4,cth_f,pl_f(0:lxhe4),d1pl_f(0:lxhe4),d2pl_f(0:lxhe4))
+   do il=1,lxhe4
+     pl_f(il)=1.0_4-pl_f(il)
+     d1pl_f(il)=-d1pl_f(il)
+     d2pl_f(il)=-d2pl_f(il)
+   enddo
+
+   d1ux%comp=0.0_r8
+   d2ux=0.0_r8
+   d1zux=0.0_r8
+   d2zux=0.0_r8
+   do il=0,lxhe4
+     rijp2=mypow_desde_log(rij_hi,rij_lo,pxhe4(2,il))
+     rijp4=mypow_desde_log(rij_hi,rij_lo,pxhe4(4,il))
+     inv_rijp2 = 1.0_r8/rijp2
+     ulx=  -pxhe4(1,il)*inv_rijp2                                &
+ &         -pxhe4(3,il)*rijp4-pxhe4(5,il)*rij_hi
+     ulxp=( pxhe4(1,il)*pxhe4(2,il)*inv_rijp2                    &
+ &         -pxhe4(3,il)*pxhe4(4,il)*rijp4-pxhe4(5,il))*inv_rij
+     ulxs=(-pxhe4(1,il)*pxhe4(2,il)*(pxhe4(2,il)+1.0_r8)*inv_rijp2 &
+ &         -pxhe4(3,il)*pxhe4(4,il)*(pxhe4(4,il)-1.0_r8)*rijp4  &
+ &         +pxhe4(5,il))*inv_rij2
+     ulxs=ulxs+2.0_r8*ulxp*inv_rij
+     ! conversion a float SOLO aqui, ya con ulx/ulxp/ulxs "limpios"
+     ! (sin cancelacion, ver 4.1b) -- el resto de la combinacion es float
+     ulx_f=real(ulx,4)
+     ulxp_f=real(ulxp,4)
+     ulxs_f=real(ulxs,4)
+     grul_f=ulxp_f*real(inv_rij,4)*rivec_f
+     grpl_f=d1pl_f(il)*grz_f
+     lapl_f=lapz_f*d1pl_f(il)+grz2_f*d2pl_f(il)
+     d1ux%comp=d1ux%comp+real(pl_f(il)*grul_f,r8)
+     d1ux%comp=d1ux%comp+real(ulx_f*grpl_f,r8)
+     d2ux=d2ux+real(pl_f(il)*ulxs_f,r8)
+     d2ux=d2ux+real(ulx_f*lapl_f,r8)
+     d2ux=d2ux+real(2.0_4*dot_product(grul_f,grpl_f),r8)
+     d1zux(:)=d1zux(:)+real(ulx_f*d1pl_f(il)*gpz_f(:),r8)
+     d2zux=d2zux+real(ulx_f*(d1pl_f(il)*lpz_f+d2pl_f(il)*gpz2_f),r8)
+   enddo
+end subroutine duhe4x_float
+
+attributes(host, device) function uhe4x(rij, cth)
+  real(kind=r8) :: uhe4x
+  real(kind=r8), intent (in) :: rij,cth
+  real(kind=r8) :: pl(0:lmax_dev)
+  real(kind=r8) :: ul
+  integer(kind=i4) :: il
+  real(kind=r8) :: rij_hi, rij_lo
+
+   call calpleg(lxhe4,cth,pl(0:lxhe4))
+   do il=1,lxhe4
+     pl(il)=1.0_r8-pl(il)
+   enddo
+
+   call mypow_log(rij, rij_hi, rij_lo)
+   uhe4x=0.0_r8
+   do il=0,lxhe4
+     ul=-pxhe4(1,il)/mypow_desde_log(rij_hi,rij_lo,pxhe4(2,il))-pxhe4(3,il)*mypow_desde_log(rij_hi,rij_lo,pxhe4(4,il))  &
+ &      -pxhe4(5,il)*rij_hi
+     uhe4x=uhe4x+ul*pl(il)
+   enddo
+end function uhe4x
+
+! ---- uhe4x_float: conversion completa (sin cancelacion, ver 4.1b) --
+! log/exp nativos en float, no mypow_log/mypow_desde_log (esas se
+! quedan tipadas en double, no engancharian el MUFU de float).
+attributes(host, device) function uhe4x_float(rij, cth)
+  real(kind=r8) :: uhe4x_float
+  real(kind=r8), intent (in) :: rij,cth
+  real(kind=4) :: pl_f(0:lmax_dev)
+  real(kind=4) :: ul_f, sum_f
+  real(kind=4) :: rij_f, cth_f, rij_hi_f
+  integer(kind=i4) :: il
+
+   rij_f = real(rij,4)
+   cth_f = real(cth,4)
+   call calpleg_f(lxhe4,cth_f,pl_f(0:lxhe4))
+   do il=1,lxhe4
+     pl_f(il)=1.0_4-pl_f(il)
+   enddo
+
+   rij_hi_f = log(rij_f)
+   sum_f=0.0_4
+   do il=0,lxhe4
+     ul_f=-real(pxhe4(1,il),4)/exp(real(pxhe4(2,il),4)*rij_hi_f)   &
+ &       -real(pxhe4(3,il),4)*exp(real(pxhe4(4,il),4)*rij_hi_f)    &
+ &       -real(pxhe4(5,il),4)*rij_hi_f
+     sum_f=sum_f+ul_f*pl_f(il)
+   enddo
+   uhe4x_float = real(sum_f, r8)
+end function uhe4x_float
+
+! ---- uhe4x_float2: identica a uhe4x_float, pero recibe rij/cth ya en
+! float -- para cuando el propio llamador (wavefx_float2) tambien
+! calcula rij/cth en float, evitando el sqrt/dot_product/division en
+! double que se tirarian nada mas calcularse (ver der_wavefx_mod.cuf).
+attributes(host, device) function uhe4x_float2(rij_f, cth_f)
+  real(kind=r8) :: uhe4x_float2
+  real(kind=4), intent (in) :: rij_f,cth_f
+  real(kind=4) :: pl_f(0:lmax_dev)
+  real(kind=4) :: ul_f, sum_f
+  real(kind=4) :: rij_hi_f
+  integer(kind=i4) :: il
+
+   call calpleg_f(lxhe4,cth_f,pl_f(0:lxhe4))
+   do il=1,lxhe4
+     pl_f(il)=1.0_4-pl_f(il)
+   enddo
+
+   rij_hi_f = log(rij_f)
+   sum_f=0.0_4
+   do il=0,lxhe4
+     ul_f=-real(pxhe4(1,il),4)/exp(real(pxhe4(2,il),4)*rij_hi_f)   &
+ &       -real(pxhe4(3,il),4)*exp(real(pxhe4(4,il),4)*rij_hi_f)    &
+ &       -real(pxhe4(5,il),4)*rij_hi_f
+     sum_f=sum_f+ul_f*pl_f(il)
+   enddo
+   uhe4x_float2 = real(sum_f, r8)
+end function uhe4x_float2
+
+! un hilo = un rivec (+ el marco smol compartido) = un duhe4x
+attributes(global) subroutine k_duhe4x(n, rivec, smol, d1ux, d2ux, d1zux, d2zux)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in)  :: rivec(n), smol(3)
+  type(vec3), device, intent (out) :: d1ux(n)
+  real(kind=r8), device, intent (out) :: d2ux(n)
+  real(kind=r8), device, intent (out) :: d1zux(2,n), d2zux(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call duhe4x(rivec(i), smol, d1ux(i), d2ux(i), d1zux(:,i), d2zux(i))
+  endif
+end subroutine k_duhe4x
+
+! un hilo = un (rij,cth) = un uhe4x
+attributes(global) subroutine k_uhe4x(n, rij, cth, uhe4x_out)
+  integer(kind=i4), value :: n
+  real(kind=r8), device, intent (in)  :: rij(n), cth(n)
+  real(kind=r8), device, intent (out) :: uhe4x_out(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    uhe4x_out(i) = uhe4x(rij(i), cth(i))
+  endif
+end subroutine k_uhe4x
+
+end module d_uhex4
+
+

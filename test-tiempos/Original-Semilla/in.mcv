@@ -1,0 +1,110 @@
+!----------------------                                                                   
+!#1: DATOS DEL SISTEMA                                                                    
+!----------------------                                                                   
+.F.                  !calculo libre                                                       
+ 4.00260             !masa helio 4                                                        
+ 3.01604             !masa helio 3                                                        
+20                   !numero de he4                                                       
+ 0                   !numero de he3                                                       
+ 2                   !numero de atomos en la impureza molecular                           
+H                    !atomo 1 de la impureza molecular                                    
+ 1.00782503210       !masa del atomo 1                                                    
+H                    !atomo 2 de la impureza molecular                                    
+ 1.00782503210       !masa del atomo 2                                                    
+ 1.0588710           !distancia del atomo 2 al atomo 1                                    
+ 0                   !1=distancias en ua, otro valor distancias en A                      
+!                                                                                         
+!opot=0 He-atomo   Potencial tipo Aziz                                                    
+!opot=1 He-OCS Paesani and Whaley, JCP 121, 4180 (2004)                                   
+!opot=2 He-OCS Howson and Hutson,  JCP 115, 5059 (2001)                                   
+!opot=3 He-CO Peterson and McBane,  JCP 123, 084314 (2005)                                
+!opot=4 He-H2+ Breton et al  Preprint 2023   energias en meV                              
+!                                                                                         
+4                    !opot: tipo de potencial impureza-Helio                              
+heh2m.pot                                                     
+.T.                  !la impureza se traslada                                             
+.T.                  !la impureza rota                                                    
+!----------------------                                                                   
+!#2: DATOS MONTE CARLO                                                                    
+!----------------------                                                                   
+0000000000000011      !semilla aleatoria                                                  
+8   !opcion  0=test der, 1=mcv, 2 optimiza, 3 optimiza correlated, 4=dmc, 5=dmc-gpu, 6=dmc-cpu-secuencial-con-semillas-gpu
+.T.                   !.T. se minimiza la energia ||  .F. se minimiza la varianza         
+  0.96                !delta pasos metropolis he4                                         
+  1.00                !delta pasos metropolis he3                                         
+  0.295               !delta pasos cm impureza                                            
+ 055.7                !delta angular rotaciones impureza en grados                        
+ -631.8               !etrial                                                             
+  0.000100            !dtau                                                               
+1   !bloques de equilibrio
+     10               !pasos de descorrelacion                                            
+98   !bloques de calculo
+20   !pasos por bloque
+1000   !numero de walkers
+   0010               !pasos para cambiar etrial en los bloques de equilibrio             
+!----------------------                                                                   
+!#3: DATOS FUNCION DE ONDA                                                                
+!----------------------                                                                   
+!                                                                                         
+! he-he: f(r)=exp(-0.5*(b/r)**nu-alfa*r)                                                  
+!                                                                                         
+  3.139383    0.1000000       !b he4
+  4.725025   -0.4000000       !nu he4 he4
+  0.009428   -0.0007000       !alfa he4
+  0.000000    0.0000000       !b he3
+  1.000000    0.0000000       !nu he3 he3
+  1.000000    0.0000000       !alfa he3
+  0.000000    0.0000000       !b backflow he3;   eta(r)=bb/r**3
+  0.000000    0.0000000       !b mezclas
+  1.000000    0.0000000       !nu mezclas
+  0.000000    0.0000000       !alfa mezclas
+!                                                                                         
+! X-he                                                                                    
+! f(r,theta)=exp(u(r,theta))                                                              
+! u(r,theta)=sum_{l=0}^lmax u_l(r) P_l(cos(theta))                                        
+! u_l(r)=-0.5*(b_l/r)**nu_l-alfa_l*r**p4_l-p5_l*ln(r)                                     
+!                                                                                         
+ 4                   !lmax polinomios de Legendre impureza-he4                            
+!l=0
+  1.680309   -0.1200000       !b he4 impureza
+  9.763290    0.8000000       !nu he4 impureza
+  0.643208   -0.0500000       !alfa he4 impureza
+  0.129298    0.0300000       !p4 he4 impureza
+ 13.568705   -0.7000000       !p5 he4 impureza
+!l=1
+  0.000000    0.0000000       !b he4 impureza
+  1.000000    0.0000000       !nu he4 impureza
+  0.000000    0.0000000       !alfa he4 impureza
+  0.000000    0.0000000       !p4 he4 impureza
+  0.000000    0.0000000       !p5 he4 impureza
+!l=2
+  3.033954   -0.1000000       !b he4 impureza
+  3.155952   -0.1500000       !nu he4 impureza
+  0.004908    0.0005000       !alfa he4 impureza
+  0.084248    0.0070000       !p4 he4 impureza
+  0.000706   -0.0000600       !p5 he4 impureza
+!l=3
+  0.000000    0.0000000       !b he4 impureza
+  1.000000    0.0000000       !nu he4 impureza
+  0.000000    0.0000000       !alfa he4 impureza
+  0.000000    0.0000000       !p4 he4 impureza
+  0.000000    0.0000000       !p5 he4 impureza
+!l=4
+  0.732198    0.0800000       !b he4 impureza
+ 11.036848   -0.9000000       !nu he4 impureza
+  0.078598    0.0080000       !alfa he4 impureza
+  0.096948    0.0040000       !p4 he4 impureza
+  0.020823    0.0020000       !p5 he4 impureza
+ 0                   !lmax polinomios de Legendre impureza-he3                            
+!l=0
+  0.000000    0.0000000       !b he3 impureza
+  0.000000    0.0000000       !nu he3 impureza
+  1.000000    0.0000000       !alfa he3 impureza
+  1.000000    0.0000000       !p4 he3 impureza
+  0.000000    0.0000000       !p5 he3 impureza
+!                                                                                         
+!----------------------                                                                   
+!#4 DATOS CALCULO PARALELO (solo si se usa PVM)                                           
+!----------------------                                                                   
+!                                                                                         
+2                ! ncadapvm numero de procesos en cada maquina                            

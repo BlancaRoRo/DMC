@@ -1,0 +1,78 @@
+module mpotenbh
+ ! He_dihydrogen: ya portado y probado en He_dihydrogen/He_dihydrogen.f
+ ! (modulo mHe_dihydrogen) -- se reutiliza tal cual, sin tocar ninguna
+ ! linea. No hace falta vec3/der_wavefx/der_wavefhe4/nfermax aqui: esos
+ ! los necesita wavef.cuf (otro kernel), pero potenbh no usa ningun
+ ! tipo vec3 ni llama a wavefx/wavefhe4 -- son solo arrays real*8
+ ! sueltos, igual que en el original.
+ use mHe_dihydrogen, only: He_dihydrogen
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! dhcm: en el original NO es una variable de modulo, sino un COMMON
+ ! block (/datosbh/), rellenado UNA VEZ por bh_leevheh2m al leer
+ ! heh2m.pot y fijo el resto de la simulacion (bh_leevheh2m,
+ ! sacabh/metebh son utilidades de entrada/salida de ese common, no se
+ ! ejecutan por walker -- se quedan en CPU, no hace falta portarlas).
+ ! Un COMMON no tiene una copia device automatica, asi que se
+ ! sustituye por una variable device de modulo -- mismo tratamiento
+ ! que nhe4/phe4/ngatom en kernels anteriores, solo que la fuente
+ ! original es un common en vez de un modulo real.
+ real(kind=r8), device :: dhcm
+
+contains
+
+! ---- potenbh: la interfaz cambia muy poco frente al original -- el
+! dummy se renombra de "nhe4" a "natoms" porque, pese al nombre, quien
+! llama a potenbh de verdad (vpot, con opot=4) le pasa ngatom, no el
+! nhe4 real de la simulacion: dejarlo como "nhe4" habria chocado
+! ademas con la variable device nhe4 de otros modulos si algun dia se
+! importa alguno aqui. ejemol(3) (dummy) y vtot/dcont/zav/zor/iHatom/
+! jHatom/icontHH (locales) estaban declaradas en el original pero no
+! se usan en ningun sitio del cuerpo -- se quitan aqui, no aportan nada. ----
+attributes(host, device) subroutine potenbh(natoms, xhe4, vpotbh)
+  integer(kind=i4), intent (in) :: natoms
+  real(kind=r8), intent (in) :: xhe4(3*natoms)
+  real(kind=r8), intent (out) :: vpotbh
+  integer(kind=i4), parameter :: ndih = 2, nHH = 1
+  real(kind=r8) :: r_dih(3,ndih), rHH(3,nHH), orHH(3,nHH)
+  real(kind=r8) :: vhe4(3*natoms)
+  real(kind=r8) :: energy1, energy2, energy3
+
+    r_dih = 0.0_r8
+    r_dih(3,1) =  dhcm
+    r_dih(3,2) = -dhcm
+    rHH = 0.0_r8
+    orHH = 0.0_r8
+    orHH(3,1) = -2.0_r8*dhcm
+
+    ! v3-cuda-optimizacion/myexp-optimizacion: GTEST ya no es
+    ! argumento de He_dihydrogen -- fijo como PARAMETER=.false. dentro
+    ! de la propia rutina (ver He_dihydrogen.f). vhe4 se sigue
+    ! pasando como V(:) por compatibilidad de interfaz, pero
+    ! He_dihydrogen ya nunca lo escribe (esa parte estaba detras de
+    ! IF(GTEST), igual que antes de este cambio).
+    call He_dihydrogen(natoms, r_dih, rHH, orHH, xhe4, vhe4, &
+                        energy1, energy2, energy3)
+    vpotbh = energy1 + energy2 + energy3
+
+end subroutine potenbh
+
+! ---- k_potenbh: un hilo por walker, mismo patron que siempre. El
+! borrador original no tenia dimension de walker por ningun lado
+! (xhe4/vpotbh sin "n", ademas de "value" puesto en un array, que no
+! es valido -- "value" es solo para escalares) -- se reescribe entera. ----
+attributes(global) subroutine k_potenbh(n, natoms, xhe4, vpotbh)
+  integer(kind=i4), value :: n, natoms
+  real(kind=r8), device, intent (in)  :: xhe4(3*natoms,n)
+  real(kind=r8), device, intent (out) :: vpotbh(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call potenbh(natoms, xhe4(:,i), vpotbh(i))
+  endif
+end subroutine k_potenbh
+
+end module mpotenbh

@@ -1,0 +1,484 @@
+! test_equipo.cuf
+!
+! Prueba aislada de la Estrategia 3 (docs-kernels/tiempo-ncu-resultado.md
+! Parte 10): compara la version ACTUAL (_solo, 1 hilo = 1 walker
+! completo, calcula las 3 "piezas" de fisica independientes -- A, B, C,
+! con el mismo patron de bucle de parejas que der_wavefhe4/derwavefm/
+! derwavefx -- una tras otra en arrays LOCALES) contra una version en
+! EQUIPO (_equipo, 3 hilos por walker: cada hilo calcula UNA pieza y la
+! deja en memoria compartida; barrera; un hilo del equipo lee las 3 y
+! hace la combinacion final -- exactamente el patron descrito por el
+! usuario).
+!
+! La formula de "pieza" y de "combina" es identica en ambas versiones
+! (misma subrutina host,device, reutilizada) -- lo unico que cambia es
+! QUIEN calcula cada pieza y DONDE se guarda el resultado intermedio
+! (array local del propio hilo vs. casillero de memoria compartida del
+! equipo). Se espera bit a bit identico.
+
+module mtest_equipo
+ use cudafor
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ type :: vec3
+   real(kind=r8) :: comp(3)
+ end type vec3
+
+ integer(kind=i4), parameter :: natom_max = 12
+ integer(kind=i4), parameter :: team = 3
+ integer(kind=i4), parameter :: walkers_por_bloque = 10   ! blockDim _equipo = 30
+ integer(kind=i4), parameter :: walkers_warp = 32         ! blockDim _equipo_warp = 96 (3 warps completos)
+ integer(kind=i4), parameter :: team2 = 2                 ! equipo selectivo: solo 2 hilos
+ integer(kind=i4), parameter :: natom_real = 21           ! tamano real (Parte 11: nhe4=20,ngatom=20,natom=21)
+
+contains
+
+! ---- pieza: mismo patron de bucle de parejas O(n^2/2) que
+! der_wavefhe4_mod.cuf/derananum_mod.cuf (derwavefm/derwavefx),
+! parametrizada por "coef" para poder generar 3 fisicas "independientes"
+! sin depender de mypow/myexp reales (no hace falta para esta prueba,
+! solo el patron de computo y el reparto entre hilos) ----
+attributes(host, device) subroutine pieza(natom, atom, coef, d1, d2)
+  integer(kind=i4), value :: natom
+  type(vec3), intent (in)  :: atom(natom)
+  real(kind=r8), intent (in) :: coef(3)
+  type(vec3), intent (out)   :: d1(natom)
+  real(kind=r8), intent (out) :: d2(natom)
+  type(vec3) :: rtemp
+  integer(kind=i4) :: iatom,jatom
+  real(kind=r8) :: ujasp,ujass,rij
+
+   do iatom=1,natom
+     d1(iatom)%comp(:)=0.0_r8
+     d2(iatom)=0.0_r8
+   enddo
+
+   do iatom=1,natom-1
+     do jatom=iatom+1,natom
+       rtemp%comp=atom(iatom)%comp-atom(jatom)%comp
+       rij=sqrt(dot_product(rtemp%comp,rtemp%comp))+0.1_r8
+       ujasp=coef(1)*coef(2)/(rij**(coef(2)+1.0_r8))
+       ujass=-(coef(2)+1.0_r8)*ujasp/rij
+       ujasp=(ujasp-coef(3))/rij
+       d1(iatom)%comp(:)=d1(iatom)%comp(:)+ujasp*rtemp%comp(:)
+       d1(jatom)%comp(:)=d1(jatom)%comp(:)-ujasp*rtemp%comp(:)
+       d2(iatom)=d2(iatom)+ujass
+       d2(iatom)=d2(iatom)+2.0_r8*ujasp
+       d2(jatom)=d2(jatom)+ujass
+       d2(jatom)=d2(jatom)+2.0_r8*ujasp
+     enddo
+   enddo
+   do iatom=1,natom
+     d2(iatom)=d2(iatom)+dot_product(d1(iatom)%comp,d1(iatom)%comp)
+   enddo
+
+end subroutine pieza
+
+! ---- pieza_barata: mimetiza derwavefm con nhe3=0 (Parte 6/11) -- su
+! bucle interior "do jhe3=1,nhe3" nunca ejecuta ninguna iteracion real,
+! asi que el coste de verdad es solo O(n) (poner a cero), no O(n^2)
+! como las piezas caras. No hace falta memoria compartida para esto:
+! el propio hilo que combina la calcula en local, sin compartirla. ----
+attributes(host, device) subroutine pieza_barata(natom, d1, d2)
+  integer(kind=i4), value :: natom
+  type(vec3), intent (out) :: d1(natom)
+  real(kind=r8), intent (out) :: d2(natom)
+  integer(kind=i4) :: iatom
+   do iatom=1,natom
+     d1(iatom)%comp(:)=0.0_r8
+     d2(iatom)=0.0_r8
+   enddo
+end subroutine pieza_barata
+
+! ---- combina: mismo patron de combinacion que derananum_mod.cuf:165-173
+! (suma de las 3 piezas + productos cruzados) ----
+attributes(host, device) subroutine combina(natom, d1A,d2A,d1B,d2B,d1C,d2C,hb2m,dwf,kin)
+  integer(kind=i4), value :: natom
+  type(vec3), intent(in) :: d1A(natom), d1B(natom), d1C(natom)
+  real(kind=r8), intent(in) :: d2A(natom), d2B(natom), d2C(natom)
+  real(kind=r8), intent(in) :: hb2m(natom)
+  type(vec3), intent(out) :: dwf(natom)
+  real(kind=r8), intent(out) :: kin
+  real(kind=r8) :: der2
+  integer(kind=i4) :: iatom
+
+   kin=0.0_r8
+   do iatom=1,natom
+     dwf(iatom)%comp=d1A(iatom)%comp+d1B(iatom)%comp+d1C(iatom)%comp
+     der2=d2A(iatom)+d2B(iatom)+d2C(iatom)                          &
+ &       +2.0_r8*dot_product(d1A(iatom)%comp,d1B(iatom)%comp)       &
+ &       +2.0_r8*dot_product(d1A(iatom)%comp,d1C(iatom)%comp)       &
+ &       +2.0_r8*dot_product(d1B(iatom)%comp,d1C(iatom)%comp)
+     kin=kin-hb2m(iatom)*der2
+   enddo
+
+end subroutine combina
+
+! =====================================================================
+! ---- VERSION ACTUAL (_solo): 1 hilo = 1 walker completo, arrays
+! locales propios del hilo para las 3 piezas ----
+! =====================================================================
+attributes(global) subroutine k_solo(n, natom, atom, hb2m, coefA, coefB, coefC, dwf, kin)
+  integer(kind=i4), value :: n, natom
+  type(vec3), device, intent(in)  :: atom(natom,n)
+  real(kind=r8), device, intent(in) :: hb2m(natom,n)
+  real(kind=r8), device, intent(in) :: coefA(3), coefB(3), coefC(3)
+  type(vec3), device, intent(out) :: dwf(natom,n)
+  real(kind=r8), device, intent(out) :: kin(n)
+  type(vec3) :: d1A(natom_max), d1B(natom_max), d1C(natom_max)
+  real(kind=r8) :: d2A(natom_max), d2B(natom_max), d2C(natom_max)
+  integer(kind=i4) :: i
+
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) then
+     call pieza(natom, atom(:,i), coefA, d1A(1:natom), d2A(1:natom))
+     call pieza(natom, atom(:,i), coefB, d1B(1:natom), d2B(1:natom))
+     call pieza(natom, atom(:,i), coefC, d1C(1:natom), d2C(1:natom))
+     call combina(natom, d1A(1:natom),d2A(1:natom), d1B(1:natom),d2B(1:natom), &
+                  d1C(1:natom),d2C(1:natom), hb2m(:,i), dwf(:,i), kin(i))
+   endif
+end subroutine k_solo
+
+! =====================================================================
+! ---- VERSION EN EQUIPO (_equipo): 3 hilos por walker. Cada hilo
+! calcula UNA pieza en memoria compartida; barrera; el hilo de rol 0
+! lee las 3 y combina ----
+! =====================================================================
+attributes(global) subroutine k_equipo(n, natom, atom, hb2m, coefA, coefB, coefC, dwf, kin)
+  integer(kind=i4), value :: n, natom
+  type(vec3), device, intent(in)  :: atom(natom,n)
+  real(kind=r8), device, intent(in) :: hb2m(natom,n)
+  real(kind=r8), device, intent(in) :: coefA(3), coefB(3), coefC(3)
+  type(vec3), device, intent(out) :: dwf(natom,n)
+  real(kind=r8), device, intent(out) :: kin(n)
+  type(vec3), shared :: d1A_s(natom_max,walkers_por_bloque)
+  type(vec3), shared :: d1B_s(natom_max,walkers_por_bloque)
+  type(vec3), shared :: d1C_s(natom_max,walkers_por_bloque)
+  real(kind=r8), shared :: d2A_s(natom_max,walkers_por_bloque)
+  real(kind=r8), shared :: d2B_s(natom_max,walkers_por_bloque)
+  real(kind=r8), shared :: d2C_s(natom_max,walkers_por_bloque)
+  integer(kind=i4) :: tid, walker_local, rol, i
+
+   tid = threadIdx%x - 1
+   walker_local = tid / team
+   rol = mod(tid, team)
+   i = (blockIdx%x-1)*walkers_por_bloque + walker_local + 1
+
+   if (i<=n) then
+     if (rol==0) call pieza(natom, atom(:,i), coefA, d1A_s(1:natom,walker_local+1), d2A_s(1:natom,walker_local+1))
+     if (rol==1) call pieza(natom, atom(:,i), coefB, d1B_s(1:natom,walker_local+1), d2B_s(1:natom,walker_local+1))
+     if (rol==2) call pieza(natom, atom(:,i), coefC, d1C_s(1:natom,walker_local+1), d2C_s(1:natom,walker_local+1))
+   endif
+
+   call syncthreads()
+
+   if (i<=n .and. rol==0) then
+     call combina(natom, d1A_s(1:natom,walker_local+1),d2A_s(1:natom,walker_local+1), &
+                  d1B_s(1:natom,walker_local+1),d2B_s(1:natom,walker_local+1),        &
+                  d1C_s(1:natom,walker_local+1),d2C_s(1:natom,walker_local+1),        &
+                  hb2m(:,i), dwf(:,i), kin(i))
+   endif
+end subroutine k_equipo
+
+! =====================================================================
+! ---- VERSION EN EQUIPO, ALINEADA A WARPS COMPLETOS (_equipo_warp):
+! en vez de intercalar los 3 roles dentro del mismo warp (que es lo que
+! diverge, medido en la Parte 10), el bloque se organiza en 3 TRAMOS de
+! walkers_warp (=32) hilos cada uno -- los primeros 32 hilos son TODOS
+! rol 0 (pieza A, de 32 walkers distintos), los siguientes 32 TODOS rol
+! 1 (pieza B), los siguientes 32 TODOS rol 2 (pieza C). Cada warp
+! ejecuta un unico rol, sin ninguna rama que lo divida. blockDim=96 =
+! exactamente 3 warps. ----
+! =====================================================================
+attributes(global) subroutine k_equipo_warp(n, natom, atom, hb2m, coefA, coefB, coefC, dwf, kin)
+  integer(kind=i4), value :: n, natom
+  type(vec3), device, intent(in)  :: atom(natom,n)
+  real(kind=r8), device, intent(in) :: hb2m(natom,n)
+  real(kind=r8), device, intent(in) :: coefA(3), coefB(3), coefC(3)
+  type(vec3), device, intent(out) :: dwf(natom,n)
+  real(kind=r8), device, intent(out) :: kin(n)
+  type(vec3), shared :: d1A_s(natom_max,walkers_warp)
+  type(vec3), shared :: d1B_s(natom_max,walkers_warp)
+  type(vec3), shared :: d1C_s(natom_max,walkers_warp)
+  real(kind=r8), shared :: d2A_s(natom_max,walkers_warp)
+  real(kind=r8), shared :: d2B_s(natom_max,walkers_warp)
+  real(kind=r8), shared :: d2C_s(natom_max,walkers_warp)
+  integer(kind=i4) :: tid, rol, walker_local, i
+
+   tid = threadIdx%x - 1
+   rol = tid / walkers_warp
+   walker_local = mod(tid, walkers_warp)
+   i = (blockIdx%x-1)*walkers_warp + walker_local + 1
+
+   if (i<=n) then
+     if (rol==0) call pieza(natom, atom(:,i), coefA, d1A_s(1:natom,walker_local+1), d2A_s(1:natom,walker_local+1))
+     if (rol==1) call pieza(natom, atom(:,i), coefB, d1B_s(1:natom,walker_local+1), d2B_s(1:natom,walker_local+1))
+     if (rol==2) call pieza(natom, atom(:,i), coefC, d1C_s(1:natom,walker_local+1), d2C_s(1:natom,walker_local+1))
+   endif
+
+   call syncthreads()
+
+   if (i<=n .and. rol==0) then
+     call combina(natom, d1A_s(1:natom,walker_local+1),d2A_s(1:natom,walker_local+1), &
+                  d1B_s(1:natom,walker_local+1),d2B_s(1:natom,walker_local+1),        &
+                  d1C_s(1:natom,walker_local+1),d2C_s(1:natom,walker_local+1),        &
+                  hb2m(:,i), dwf(:,i), kin(i))
+   endif
+end subroutine k_equipo_warp
+
+! =====================================================================
+! ---- VERSION EQUIPO SELECTIVO (_equipo_sel): solo 2 hilos por walker
+! (no 3+), y solo la pieza cara que NO calcula el hilo que combina pasa
+! por memoria compartida (docs-kernels/tiempo-ncu-resultado.md Parte
+! 12). Tamanos REALES del proyecto (nhe4=20, ngatom=20, natom=21,
+! mentradatos.f90:352-365), no los 12 de juguete de las Partes 10-11.
+!
+! Rol 0: calcula la pieza cara "A" (equivalente a derwavefhe4, tamano
+! nhe4=20) -- la deja en memoria compartida, es la UNICA que hace
+! falta compartir.
+! Rol 1: calcula la pieza cara "B" (equivalente a derwavefx, tamano
+! natom=21) EN LOCAL, y ademas la pieza barata "M" (equivalente a
+! derwavefm con nhe3=0 -- casi gratis, Parte 6/11) tambien EN LOCAL --
+! ninguna de las dos necesita memoria compartida, las calcula y las usa
+! el mismo hilo que combina. Tras la barrera, lee "A" del casillero y
+! combina las 3.
+! ----
+! natomv: pasado como argumento "value" en cada lanzamiento (NO el
+! parameter natom_real) -- desde el punto de vista del PROPIO kernel,
+! su tamano es un desconocido en tiempo de compilacion, igual que
+! nhe4/ngatom/natom (variables device) en el codigo real. Usar
+! natom_real directamente aqui habria dejado el compilador tratar los
+! arrays locales como de tamano constante (21 literal), dandole mucha
+! mas libertad de la que tiene con el codigo real -- ver Parte 12.
+attributes(global) subroutine k_equipo_sel(n, natomv, atom, hb2m, coefA, coefB, dwf, kin)
+  integer(kind=i4), value :: n, natomv
+  type(vec3), device, intent(in)  :: atom(natomv,n)
+  real(kind=r8), device, intent(in) :: hb2m(natomv,n)
+  real(kind=r8), device, intent(in) :: coefA(3), coefB(3)
+  type(vec3), device, intent(out) :: dwf(natomv,n)
+  real(kind=r8), device, intent(out) :: kin(n)
+  type(vec3), shared :: d1A_s(natom_real,walkers_warp)
+  real(kind=r8), shared :: d2A_s(natom_real,walkers_warp)
+  type(vec3) :: d1B(natom_real), d1M(natom_real)
+  real(kind=r8) :: d2B(natom_real), d2M(natom_real)
+  integer(kind=i4) :: tid, rol, walker_local, i
+
+   tid = threadIdx%x - 1
+   rol = tid / walkers_warp
+   walker_local = mod(tid, walkers_warp)
+   i = (blockIdx%x-1)*walkers_warp + walker_local + 1
+
+   if (i<=n) then
+     if (rol==0) then
+       call pieza(natomv, atom(:,i), coefA, d1A_s(1:natomv,walker_local+1), d2A_s(1:natomv,walker_local+1))
+     else
+       call pieza(natomv, atom(:,i), coefB, d1B(1:natomv), d2B(1:natomv))
+       call pieza_barata(natomv, d1M(1:natomv), d2M(1:natomv))
+     endif
+   endif
+
+   call syncthreads()
+
+   if (i<=n .and. rol==1) then
+     call combina(natomv, d1A_s(1:natomv,walker_local+1),d2A_s(1:natomv,walker_local+1), &
+                  d1B(1:natomv),d2B(1:natomv), d1M(1:natomv),d2M(1:natomv), hb2m(:,i), dwf(:,i), kin(i))
+   endif
+end subroutine k_equipo_sel
+
+! ---- VERSION ACTUAL, A TAMANO REAL (_solo_real): 1 hilo = 1 walker,
+! mismas 3 piezas (A cara, B cara, M barata) que _equipo_sel, para
+! comparar de forma justa con los tamanos reales del proyecto.
+! natomv: mismo motivo que en k_equipo_sel -- argumento value, no
+! parameter. ----
+attributes(global) subroutine k_solo_real(n, natomv, atom, hb2m, coefA, coefB, dwf, kin)
+  integer(kind=i4), value :: n, natomv
+  type(vec3), device, intent(in)  :: atom(natomv,n)
+  real(kind=r8), device, intent(in) :: hb2m(natomv,n)
+  real(kind=r8), device, intent(in) :: coefA(3), coefB(3)
+  type(vec3), device, intent(out) :: dwf(natomv,n)
+  real(kind=r8), device, intent(out) :: kin(n)
+  type(vec3) :: d1A(natom_real), d1B(natom_real), d1M(natom_real)
+  real(kind=r8) :: d2A(natom_real), d2B(natom_real), d2M(natom_real)
+  integer(kind=i4) :: i
+
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) then
+     call pieza(natomv, atom(:,i), coefA, d1A(1:natomv), d2A(1:natomv))
+     call pieza(natomv, atom(:,i), coefB, d1B(1:natomv), d2B(1:natomv))
+     call pieza_barata(natomv, d1M(1:natomv), d2M(1:natomv))
+     call combina(natomv, d1A(1:natomv),d2A(1:natomv), d1B(1:natomv),d2B(1:natomv), &
+                  d1M(1:natomv),d2M(1:natomv), hb2m(:,i), dwf(:,i), kin(i))
+   endif
+end subroutine k_solo_real
+
+end module mtest_equipo
+
+
+program test_equipo
+ use mtest_equipo
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ integer(kind=i4), parameter :: natom = 12, n = 300
+ type(vec3) :: atom_h(natom,n)
+ real(kind=r8) :: hb2m_h(natom,n)
+ real(kind=r8) :: coefA_h(3), coefB_h(3), coefC_h(3)
+ type(vec3) :: dwf_solo(natom,n), dwf_equipo(natom,n), dwf_warp(natom,n)
+ real(kind=r8) :: kin_solo(n), kin_equipo(n), kin_warp(n)
+ type(vec3), device :: atom_d(natom,n)
+ real(kind=r8), device :: hb2m_d(natom,n)
+ real(kind=r8), device :: coefA_d(3), coefB_d(3), coefC_d(3)
+ type(vec3), device :: dwf_solo_d(natom,n), dwf_equipo_d(natom,n), dwf_warp_d(natom,n)
+ real(kind=r8), device :: kin_solo_d(n), kin_equipo_d(n), kin_warp_d(n)
+ integer(kind=i4) :: iatom, iw, threads, blocks
+ logical :: todo_ok
+ real(kind=r8) :: seed
+
+  do iw=1,n
+    do iatom=1,natom
+      seed = real(iw,r8)*0.37_r8 + real(iatom,r8)*1.91_r8
+      atom_h(iatom,iw)%comp(1) = sin(seed)*3.0_r8
+      atom_h(iatom,iw)%comp(2) = cos(seed*1.3_r8)*3.0_r8
+      atom_h(iatom,iw)%comp(3) = sin(seed*0.7_r8)*3.0_r8
+      hb2m_h(iatom,iw) = 0.5_r8 + 0.01_r8*real(iatom,r8)
+    enddo
+  enddo
+  coefA_h = (/ 1.7_r8, 2.3_r8, 0.05_r8 /)
+  coefB_h = (/ 0.9_r8, 1.6_r8, 0.02_r8 /)
+  coefC_h = (/ 2.4_r8, 3.1_r8, 0.08_r8 /)
+
+  atom_d = atom_h
+  hb2m_d = hb2m_h
+  coefA_d = coefA_h
+  coefB_d = coefB_h
+  coefC_d = coefC_h
+
+  ! ---- _solo: 1 hilo = 1 walker ----
+  threads = 32
+  blocks = (n + threads - 1) / threads
+  call k_solo<<<blocks,threads>>>(n, natom, atom_d, hb2m_d, coefA_d, coefB_d, coefC_d, dwf_solo_d, kin_solo_d)
+
+  ! ---- _equipo: 3 hilos por walker, walkers_por_bloque walkers/bloque ----
+  threads = team*walkers_por_bloque
+  blocks = (n + walkers_por_bloque - 1) / walkers_por_bloque
+  call k_equipo<<<blocks,threads>>>(n, natom, atom_d, hb2m_d, coefA_d, coefB_d, coefC_d, dwf_equipo_d, kin_equipo_d)
+
+  ! ---- _equipo_warp: 3 hilos por walker, pero agrupados en 3 TRAMOS
+  ! de warp completo (96 hilos/bloque = 32 walkers/bloque) ----
+  threads = team*walkers_warp
+  blocks = (n + walkers_warp - 1) / walkers_warp
+  call k_equipo_warp<<<blocks,threads>>>(n, natom, atom_d, hb2m_d, coefA_d, coefB_d, coefC_d, dwf_warp_d, kin_warp_d)
+
+  dwf_solo = dwf_solo_d
+  kin_solo = kin_solo_d
+  dwf_equipo = dwf_equipo_d
+  kin_equipo = kin_equipo_d
+  dwf_warp = dwf_warp_d
+  kin_warp = kin_warp_d
+
+  todo_ok = .true.
+  do iw=1,n
+    do iatom=1,natom
+      if (any(dwf_solo(iatom,iw)%comp /= dwf_equipo(iatom,iw)%comp)) then
+        write(*,'(a,i0,a,i0)') 'DIFERENCIA dwf (_equipo) en walker ', iw, ' atomo ', iatom
+        todo_ok = .false.
+      endif
+      if (any(dwf_solo(iatom,iw)%comp /= dwf_warp(iatom,iw)%comp)) then
+        write(*,'(a,i0,a,i0)') 'DIFERENCIA dwf (_equipo_warp) en walker ', iw, ' atomo ', iatom
+        todo_ok = .false.
+      endif
+    enddo
+    if (kin_solo(iw) /= kin_equipo(iw)) then
+      write(*,'(a,i0)') 'DIFERENCIA kin (_equipo) en walker ', iw
+      todo_ok = .false.
+    endif
+    if (kin_solo(iw) /= kin_warp(iw)) then
+      write(*,'(a,i0)') 'DIFERENCIA kin (_equipo_warp) en walker ', iw
+      todo_ok = .false.
+    endif
+  enddo
+
+  write(*,'(a,es24.17)') 'muestra kin_solo(1)   =', kin_solo(1)
+  write(*,'(a,es24.17)') 'muestra kin_equipo(1) =', kin_equipo(1)
+  write(*,'(a,es24.17)') 'muestra kin_warp(1)   =', kin_warp(1)
+  write(*,'(a,es24.17)') 'muestra dwf_solo(3,7)%comp(1)   =', dwf_solo(3,7)%comp(1)
+  write(*,'(a,es24.17)') 'muestra dwf_equipo(3,7)%comp(1) =', dwf_equipo(3,7)%comp(1)
+  write(*,'(a,es24.17)') 'muestra dwf_warp(3,7)%comp(1)   =', dwf_warp(3,7)%comp(1)
+
+  if (todo_ok) then
+    write(*,*) 'PASA: las 3 versiones dan EXACTAMENTE los mismos resultados'
+  else
+    write(*,*) 'FALLA: hay diferencias, ver arriba'
+  endif
+
+  ! =====================================================================
+  ! ---- Parte 12: equipo SELECTIVO (2 hilos, 1 solo casillero
+  ! compartido) a TAMANO REAL del proyecto (natom_real=21) ----
+  ! =====================================================================
+  block
+    integer(kind=i4), parameter :: nr = natom_real
+    type(vec3) :: atomr_h(nr,n)
+    real(kind=r8) :: hb2mr_h(nr,n)
+    type(vec3) :: dwf_solor(nr,n), dwf_selr(nr,n)
+    real(kind=r8) :: kin_solor(n), kin_selr(n)
+    type(vec3), device :: atomr_d(nr,n)
+    real(kind=r8), device :: hb2mr_d(nr,n)
+    type(vec3), device :: dwf_solor_d(nr,n), dwf_selr_d(nr,n)
+    real(kind=r8), device :: kin_solor_d(n), kin_selr_d(n)
+    integer(kind=i4) :: ja, jw
+    logical :: ok_real
+    real(kind=r8) :: s2
+
+     do jw=1,n
+       do ja=1,nr
+         s2 = real(jw,r8)*0.41_r8 + real(ja,r8)*1.77_r8
+         atomr_h(ja,jw)%comp(1) = sin(s2)*3.0_r8
+         atomr_h(ja,jw)%comp(2) = cos(s2*1.3_r8)*3.0_r8
+         atomr_h(ja,jw)%comp(3) = sin(s2*0.7_r8)*3.0_r8
+         hb2mr_h(ja,jw) = 0.5_r8 + 0.01_r8*real(ja,r8)
+       enddo
+     enddo
+     atomr_d = atomr_h
+     hb2mr_d = hb2mr_h
+
+     threads = 32
+     blocks = (n + threads - 1) / threads
+     call k_solo_real<<<blocks,threads>>>(n, nr, atomr_d, hb2mr_d, coefA_d, coefB_d, dwf_solor_d, kin_solor_d)
+
+     threads = team2*walkers_warp
+     blocks = (n + walkers_warp - 1) / walkers_warp
+     call k_equipo_sel<<<blocks,threads>>>(n, nr, atomr_d, hb2mr_d, coefA_d, coefB_d, dwf_selr_d, kin_selr_d)
+
+     dwf_solor = dwf_solor_d
+     kin_solor = kin_solor_d
+     dwf_selr = dwf_selr_d
+     kin_selr = kin_selr_d
+
+     ok_real = .true.
+     do jw=1,n
+       do ja=1,nr
+         if (any(dwf_solor(ja,jw)%comp /= dwf_selr(ja,jw)%comp)) then
+           write(*,'(a,i0,a,i0)') 'DIFERENCIA (real, _equipo_sel) dwf en walker ', jw, ' atomo ', ja
+           ok_real = .false.
+         endif
+       enddo
+       if (kin_solor(jw) /= kin_selr(jw)) then
+         write(*,'(a,i0)') 'DIFERENCIA (real, _equipo_sel) kin en walker ', jw
+         ok_real = .false.
+       endif
+     enddo
+
+     write(*,'(a,es24.17)') 'muestra kin_solor(1) =', kin_solor(1)
+     write(*,'(a,es24.17)') 'muestra kin_selr(1)  =', kin_selr(1)
+
+     if (ok_real) then
+       write(*,*) 'PASA (tamano real, equipo selectivo 2 hilos): resultados EXACTAMENTE identicos'
+     else
+       write(*,*) 'FALLA (tamano real, equipo selectivo): hay diferencias, ver arriba'
+     endif
+  end block
+
+end program test_equipo

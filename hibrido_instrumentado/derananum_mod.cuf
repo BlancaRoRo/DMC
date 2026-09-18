@@ -1,0 +1,257 @@
+! derananum.cuf
+!
+! Puerto CUDA Fortran de derananum/derwavefm/derwavefhe3 de
+! mwavef.f90 (derananum: lineas 40-91; derwavefm: 230-261;
+! derwavefhe3: 677-711). derananum calcula la energia cinetica de un
+! walker a partir de las derivadas de las 4 partes de la funcion de
+! onda (He4-He4, He3-He3, mezcla He4-He3, e impureza/molecula), mas
+! las energias de impureza (eimp) y rotacion (erot) si aplica.
+!
+! derwavefm y derwavefhe3 son los "2 metodos no alcanzables por la
+! configuracion" (nhe3=0 en este proyecto, igual que duhe3x/uhe3x en
+! der_wavefx.cuf y wavefm/wavefhe3 en wavef.cuf): sus bucles relevantes
+! (jhe3=1,nhe3 en derwavefm; ihe3=1,nhe3 en derwavefhe3) no ejecutan
+! ninguna iteracion en la simulacion real, pero derananum los llama
+! incondicionalmente, asi que el codigo tiene que existir y compilar
+! igual -- mismo criterio ya aplicado y documentado en der_wavefx.md.
+!
+! Reutiliza en vez de redeclarar: wavefhe4/derwavefhe4 (der_wavefhe4),
+! wavefx/derwavefx/nhe4/nhe3/ngatom/natom/impureza (der_wavefx),
+! wavefhe3/wavefm/pmix (mwavef_gpu, wavef.cuf) -- todo ya portado y
+! probado en kernels anteriores.
+
+module mderananum
+ use mtipos, only: vec3
+ use der_wavefhe4, only: wavefhe4, derwavefhe4, wavef_derwavefhe4
+ use der_wavefx, only: wavefx, derwavefx, nhe4, nhe3, ngatom, natom, impureza
+ use mwavef_gpu, only: wavefhe3, wavefm, pmix
+ ! rij**(pmix(2)+1): exponente REAL, mismo motivo que en wavefm
+ ! (wavef.cuf) y el resto del arbol. Ver docs-kernels/glibc_math.md
+ ! Parte 4.
+ use glibc_pow_mod, only: mypow_log, mypow_desde_log
+
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! impurfija/rotamol: variables reales de mparametros.f90 (publicas,
+ ! sin "parameter"), fijadas una vez al leer in.mcv -- mismo
+ ! tratamiento que impureza en der_wavefx.
+ logical, device :: impurfija, rotamol
+
+contains
+
+! ---- derwavefm: sin cambios de formula, w1%atom(:) -> atom(:). El
+! bucle "jhe3=1,nhe3" (mezcla He4-He3) no ejecuta ninguna iteracion con
+! nhe3=0 -- d1wf/d2wf quedan a 0 para todos los atomos en ese caso,
+! igual que en el original. ----
+attributes(host, device) subroutine derwavefm(atom, d1wf, d2wf)
+  type(vec3), intent (in)  :: atom(ngatom)
+  type(vec3), intent (out) :: d1wf(ngatom)
+  real(kind=r8), intent (out) :: d2wf(ngatom)
+  type(vec3) :: rtemp
+  integer(kind=i4) :: iatom, jatom, jhe3
+  real(kind=r8) :: ujasp, ujass, rij
+  real(kind=r8) :: rij_hi, rij_lo
+
+! v3-cuda-optimizacion/optimizacion-mypow: mypow_log/mypow_desde_log
+! por consistencia con el resto del arbol (un solo uso de rij por
+! iteracion aqui, no hay recalculo que evitar) -- este bucle nunca
+! ejecuta ninguna iteracion en esta simulacion (nhe3=0).
+   do iatom=1,ngatom
+     d1wf(iatom)%comp(:)=0.0_r8
+     d2wf(iatom)=0.0_r8
+   enddo
+
+   do iatom=1,nhe4
+     do jhe3=1,nhe3
+         jatom=nhe4+jhe3
+         rtemp%comp=atom(iatom)%comp-atom(jatom)%comp
+         rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+         call mypow_log(rij, rij_hi, rij_lo)
+         ujasp=pmix(1)*pmix(2)/mypow_desde_log(rij_hi,rij_lo,pmix(2)+1.0_r8)
+         ujass=-(pmix(2)+1)*ujasp/rij
+         ujasp=(ujasp-pmix(3))/rij
+         d1wf(iatom)%comp(:)=d1wf(iatom)%comp(:)+ujasp*rtemp%comp(:)
+         d1wf(jatom)%comp(:)=d1wf(jatom)%comp(:)-ujasp*rtemp%comp(:)
+         d2wf(iatom)=d2wf(iatom)+ujass
+         d2wf(iatom)=d2wf(iatom)+2.0_r8*ujasp
+         d2wf(jatom)=d2wf(jatom)+ujass
+         d2wf(jatom)=d2wf(jatom)+2.0_r8*ujasp
+     enddo
+   enddo
+   do iatom=1,ngatom
+     d2wf(iatom)=d2wf(iatom)+dot_product(d1wf(iatom)%comp,d1wf(iatom)%comp)
+   enddo
+
+end subroutine derwavefm
+
+! ---- derwavefhe3: derivada NUMERICA (diferencias finitas centradas)
+! de wavefhe3 respecto a cada coordenada de cada atomo de He3. El
+! original perturba w1%atom(iatom) temporalmente y lo restaura al
+! salir, ademas de restaurar w1%lw%wfhe3 (que wavefhe3(w1) sobreescribe
+! como efecto secundario en cada llamada). Aqui, al usar la version ya
+! portada wavefhe3(atom,wfhe3) -- que devuelve el resultado en una
+! variable local, sin tocar ningun estado externo -- la restauracion
+! de wfhe3 ya no hace falta: no hay nada que ensuciar. Solo se
+! mantiene la restauracion de atom(iatom), que SI hace falta (las
+! llamadas siguientes de derananum vuelven a usar atom). El bucle
+! "ihe3=1,nhe3" no ejecuta ninguna iteracion con nhe3=0 -- d1wf/d2wf
+! son arrays de tamano nhe3 (vacios en ese caso). ----
+attributes(host, device) subroutine derwavefhe3(atom, wfhe3_0, d1wf, d2wf)
+  type(vec3), intent (inout) :: atom(natom)
+  real(kind=r8), intent (in) :: wfhe3_0
+  type(vec3), intent (out) :: d1wf(nhe3)
+  real(kind=r8), intent (out) :: d2wf(nhe3)
+  type(vec3) :: rtemp
+  real(kind=r8) :: wfmas, wfmen, dend1, dend2
+  real(kind=r8) :: sumd2
+  integer(kind=i4) :: ihe3, iatom, ic
+  real(kind=r8), parameter :: dx=1.d-3
+
+   dend1=2.0_r8*dx*wfhe3_0
+   dend2=dx**2*wfhe3_0
+
+   do ihe3=1,nhe3
+     iatom=nhe4+ihe3
+     rtemp%comp=atom(iatom)%comp
+     sumd2=0.0_r8
+     do ic=1,3
+       atom(iatom)%comp(ic)=rtemp%comp(ic)+dx
+       call wavefhe3(atom, wfmas)
+       atom(iatom)%comp(ic)=rtemp%comp(ic)-dx
+       call wavefhe3(atom, wfmen)
+       atom(iatom)%comp(ic)=rtemp%comp(ic)
+       d1wf(ihe3)%comp(ic)=(wfmas-wfmen)/dend1
+       sumd2=sumd2+(wfmas+wfmen-2.0_r8*wfhe3_0)
+     enddo
+     d2wf(ihe3)=sumd2/dend2
+   enddo
+
+end subroutine derwavefhe3
+
+! ---- derananum: la interfaz cambia de w1 a atom(natom)+sprop(3)+
+! hb2m(natom)+b, igual que en derwavefx -- w1%hb2m (allocatable) y
+! w1%b (escalar) son campos del walker que derananum necesita leer, asi
+! que se extraen como argumentos. Devuelve wf/wfhe4/wfhe3/wfm/wfx
+! ademas de kin/eimp/erot/dwf/dphi: el original los deja escritos en
+! w1%lw%* via "call wavef(w1)" (que a su vez llama a wavefhe4/wavefhe3/
+! wavefm/wavefx) -- aqui se calculan igual, con las versiones ya
+! portadas, en vez de reconstruir wavef() entero (que solo devolvia el
+! producto, no las 4 partes por separado). ----
+attributes(host, device) subroutine derananum(atom, sprop, hb2m, b, &
+                                               wf, wfhe4, wfhe3, wfm, wfx, &
+                                               kin, eimp, erot, dwf, dphi)
+  type(vec3), intent (inout) :: atom(natom)
+  type(vec3), intent (in) :: sprop(3)
+  real(kind=r8), intent (in) :: hb2m(natom)
+  real(kind=r8), intent (in) :: b
+  real(kind=r8), intent (out) :: wf, wfhe4, wfhe3, wfm, wfx
+  real(kind=r8), intent (out) :: kin, eimp, erot
+  type(vec3), intent (out) :: dwf(natom)
+  real(kind=r8), intent (out) :: dphi(2)
+
+  ! v3-cuda-optimizacion/derananum.md Parte 9: tamano FIJO (64, misma
+  ! cota ya usada en derananum_split_mod.cuf) en vez de nhe4/nhe3/
+  ! ngatom/natom (variables device, valor solo conocido en tiempo de
+  ! ejecucion) -- evita que estos locales de tamano dinamico tiren del
+  ! heap de malloc de device (compartido por TODA la GPU, se agotaba a
+  ! partir de ~3000-3500 walkers concurrentes). Con tamano fijo, cada
+  ! hilo reserva su propio hueco en memoria local automatica, sin pedir
+  ! nada a ningun heap compartido. Los usos de mas abajo (paso a
+  ! subrutina de forma explicita, indexado 1..nhe4/nhe3/ngatom/natom)
+  ! siguen siendo validos con cualquier tamano declarado >= el real.
+  type(vec3) :: d1wfhe4(64), d1wfhe3(64), d1wfm(64), d1wfx(64)
+  real(kind=r8) :: d2wfhe4(64), d2wfhe3(64), d2wfm(64), d2wfx(64)
+  real(kind=r8) :: d1zwfx(2), d2zwfx
+  real(kind=r8) :: der2
+  integer(kind=i4) :: ihe3, iatom
+
+   ! v3-cuda-optimizacion/optimizacion-mypow: wavefhe4+derwavefhe4
+   ! fusionadas (mismo rij, mismo log(rij) reutilizado) -- ver
+   ! der_wavefhe4_mod.cuf. d1wfhe4/d2wfhe4 quedan calculadas aqui, no
+   ! en la llamada a derwavefhe4 de mas abajo (eliminada).
+   call wavef_derwavefhe4(atom(1:nhe4), wfhe4, d1wfhe4, d2wfhe4)
+   call wavefhe3(atom, wfhe3)
+   call wavefm(atom(1:ngatom), wfm)
+   call wavefx(atom, sprop(3), wfx)
+   wf = wfhe4*wfhe3*wfm*wfx
+
+   ! Refactorizacion por fases (docs-kernels/tiempo-ncu-resultado.md
+   ! Parte 7): antes se llamaba a las 4 derwavef* seguidas y las 2
+   ! notas (d1wfhe4, d1wfhe3) quedaban vivas a la vez sin necesitarlo
+   ! -- el bucle He4 (abajo) solo usa d1wfhe4, y el bucle He3 (mas
+   ! abajo) solo usa d1wfhe3, nunca los dos a la vez. Se retrasa el
+   ! calculo de d1wfhe3/d2wfhe3 hasta justo antes de su bucle: mismo
+   ! orden aritmetico dentro de cada bucle, mismo resultado bit a bit
+   ! -- solo cambia CUANDO se calcula d1wfhe3, no COMO.
+   call derwavefm(atom(1:ngatom), d1wfm, d2wfm)
+   call derwavefx(atom, sprop, d1wfx, d2wfx, d1zwfx, d2zwfx)
+
+   kin=0.0_r8
+   do iatom=1,nhe4
+     dwf(iatom)%comp=d1wfhe4(iatom)%comp+d1wfm(iatom)%comp+d1wfx(iatom)%comp
+     der2=d2wfhe4(iatom)+d2wfm(iatom)+d2wfx(iatom)                        &
+ &       +2.0_r8*dot_product(d1wfhe4(iatom)%comp,d1wfm(iatom)%comp)       &
+ &       +2.0_r8*dot_product(d1wfhe4(iatom)%comp,d1wfx(iatom)%comp)       &
+ &       +2.0_r8*dot_product(d1wfm(iatom)%comp,d1wfx(iatom)%comp)
+     kin=kin-hb2m(iatom)*der2
+   enddo
+
+   ! d1wfhe4/d2wfhe4 ya no hacen falta a partir de aqui -- d1wfhe3 se
+   ! calcula ahora, no antes, para que su rango de vida no se solape.
+   call derwavefhe3(atom, wfhe3, d1wfhe3, d2wfhe3)
+
+   do ihe3=1,nhe3
+     iatom=nhe4+ihe3
+     dwf(iatom)%comp=d1wfhe3(ihe3)%comp+d1wfm(iatom)%comp+d1wfx(iatom)%comp
+     der2=d2wfhe3(ihe3)+d2wfm(iatom)+d2wfx(iatom)                         &
+ &       +2.0_r8*dot_product(d1wfhe3(ihe3)%comp,d1wfm(iatom)%comp)        &
+ &       +2.0_r8*dot_product(d1wfhe3(ihe3)%comp,d1wfx(iatom)%comp)        &
+ &       +2.0_r8*dot_product(d1wfm(iatom)%comp,d1wfx(iatom)%comp)
+     kin=kin-hb2m(iatom)*der2
+   enddo
+
+   if (.not. impurfija) then
+     dwf(natom)%comp=d1wfx(natom)%comp
+     kin=kin-hb2m(natom)*d2wfx(natom)
+     eimp=-hb2m(natom)*d2wfx(natom)
+   else
+     eimp=0.0_r8
+   endif
+   if (rotamol) then
+     dphi(:)=d1zwfx(:)
+     kin=kin-b*d2zwfx
+     erot=-b*d2zwfx
+   else
+     erot=0.0_r8
+   endif
+
+end subroutine derananum
+
+! un hilo = un walker
+attributes(global) subroutine k_derananum(n, atom, sprop, hb2m, b, &
+                                           wf, wfhe4, wfhe3, wfm, wfx, &
+                                           kin, eimp, erot, dwf, dphi)
+ integer(kind=i4), value :: n
+ type(vec3), device, intent (inout) :: atom(natom,n)
+ type(vec3), device, intent (in) :: sprop(3,n)
+ real(kind=r8), device, intent (in) :: hb2m(natom,n)
+ real(kind=r8), device, intent (in) :: b(n)
+ real(kind=r8), device, intent (out) :: wf(n), wfhe4(n), wfhe3(n), wfm(n), wfx(n)
+ real(kind=r8), device, intent (out) :: kin(n), eimp(n), erot(n)
+ type(vec3), device, intent (out) :: dwf(natom,n)
+ real(kind=r8), device, intent (out) :: dphi(2,n)
+ integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call derananum(atom(:,i), sprop(:,i), hb2m(:,i), b(i), &
+                    wf(i), wfhe4(i), wfhe3(i), wfm(i), wfx(i), &
+                    kin(i), eimp(i), erot(i), dwf(:,i), dphi(:,i))
+  endif
+end subroutine k_derananum
+
+end module mderananum
+
+

@@ -1,0 +1,81 @@
+! valibre.cuf
+!
+! Puerto CUDA Fortran de valibre (mwavef.f90:875-896). Inicializa a
+! "vacio" los campos de un walker: funcion de onda a 1, energias a 0,
+! signos a 1, y pone a cero los vectores de derivada dwf/dphi.
+!
+! Igual que en wavef.cuf: w1%lw%wf/wfhe4/wfhe3/wfm/wfx son
+! real(kind=r16) (precision cuadruple) en el original -- esta version
+! GPU los representa en real(kind=r8) (doble), siguiendo la misma
+! convencion ya establecida en wavef.cuf (ver docs-kernels/wavef.md).
+! No hay ninguna operacion aritmetica en esta subrutina (solo
+! constantes literales 0.0/1.0, exactas en cualquier precision), asi
+! que esa reduccion de precision no introduce ninguna discrepancia.
+!
+! AoS->SoA: w1%dwf(natom) (array de vec3) pasa a dwf(3,natoms); w1%dphi
+! (tamaño fijo 2) se queda igual. natom no es un PARAMETER (es variable
+! publica de mparametros.f90, fijada en tiempo de ejecucion por el
+! in.mcv), así que se pasa como argumento (natoms), igual que en
+! potenbh.cuf/vpot.cuf.
+!
+! Se envuelve en un modulo (mvalibre) por el mismo motivo que el resto
+! de kernels: evitar que el simbolo enlazado choque con el valibre
+! original de mwavef.f90 al enlazar los dos .o juntos para comparar.
+
+module mvalibre
+implicit none
+integer, private, parameter :: i4 = selected_int_kind(9)
+integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+contains
+
+attributes(host, device) subroutine valibre(natoms, wf, wfhe4, wfhe3, wfm, wfx, &
+                                             kin, pot, ene, signoup, signodw, &
+                                             dwf, dphi)
+  integer(kind=i4), value :: natoms
+  real(kind=r8), intent (out) :: wf, wfhe4, wfhe3, wfm, wfx
+  real(kind=r8), intent (out) :: kin, pot, ene
+  integer(kind=i4), intent (out) :: signoup, signodw
+  real(kind=r8), intent (out) :: dwf(3,natoms)
+  real(kind=r8), intent (out) :: dphi(2)
+  integer(kind=i4) :: iatom
+
+    wf=1.0_r8
+    wfhe4=1.0_r8
+    wfhe3=1.0_r8
+    wfm=1.0_r8
+    wfx=1.0_r8
+    kin=0.0_r8
+    pot=0.0_r8
+    ene=0.0_r8
+    signoup=1
+    signodw=1
+
+    do iatom=1,natoms
+      dwf(:,iatom)=0.0_r8
+    enddo
+    dphi(:)=0.0_r8
+
+end subroutine valibre
+
+! un hilo = un walker
+attributes(global) subroutine k_valibre(n, natoms, wf, wfhe4, wfhe3, wfm, wfx, &
+                                         kin, pot, ene, signoup, signodw, &
+                                         dwf, dphi)
+ integer(kind=i4), value :: n, natoms
+ real(kind=r8), device, intent (out) :: wf(n), wfhe4(n), wfhe3(n), wfm(n), wfx(n)
+ real(kind=r8), device, intent (out) :: kin(n), pot(n), ene(n)
+ integer(kind=i4), device, intent (out) :: signoup(n), signodw(n)
+ real(kind=r8), device, intent (out) :: dwf(3,natoms,n)
+ real(kind=r8), device, intent (out) :: dphi(2,n)
+ integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call valibre(natoms, wf(i), wfhe4(i), wfhe3(i), wfm(i), wfx(i), &
+                 kin(i), pot(i), ene(i), signoup(i), signodw(i), &
+                 dwf(:,:,i), dphi(:,i))
+  endif
+end subroutine k_valibre
+
+end module mvalibre

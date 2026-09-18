@@ -1,0 +1,21 @@
+=== op4_250walkers ===
+  wall=35.879148544s
+=== op7_250walkers ===
+  wall=26.907714949s
+=== op4_500walkers ===
+  wall=62.792586197s
+=== op7_500walkers ===
+  wall=39.037366926s
+=== op4_1000walkers ===
+  wall=127.291064602s
+=== op7_1000walkers ===
+  wall=56.866321471s
+=== op4_2000walkers ===
+  wall=253.517773291s
+=== op7_2000walkers ===
+  wall=89.833494634s
+=== op4_3000walkers ===
+  wall=374.641846497s
+=== op7_3000walkers ===
+  wall=135.625598496s
+=== TODO OK ===

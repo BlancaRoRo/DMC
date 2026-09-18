@@ -1,0 +1,34 @@
+########## test-pasos: nwalkers=1000 fijo, pasos=20 fijo, bloq_calc variable ##########
+=== /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v2-cuda-integracion/test-pasos/resultados/op4_limpio_300pasos.log ===
+  wall=25.051428130s
+=== /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v2-cuda-integracion/test-pasos/resultados/op4_limpio_600pasos.log ===
+  wall=39.623232247s
+=== /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v2-cuda-integracion/test-pasos/resultados/op4_limpio_1200pasos.log ===
+  wall=79.988284804s
+=== /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v2-cuda-integracion/test-pasos/resultados/op4_limpio_2500pasos.log ===
+  wall=175.222397182s
+=== /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v2-cuda-integracion/test-pasos/resultados/op4_limpio_5000pasos.log ===
+  wall=334.648301857s
+########## test-walker: bloq_calc=59 fijo, pasos=20 fijo, nwalkers variable ##########
+=== /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v2-cuda-integracion/test-walker/op4_250walkers.log ===
+  wall=20.004200007s
+=== /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v2-cuda-integracion/test-walker/op4_500walkers.log ===
+  wall=40.060974747s
+=== /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v2-cuda-integracion/test-walker/op4_1000walkers.log ===
+  wall=79.630364269s
+=== /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v2-cuda-integracion/test-walker/op4_2000walkers.log ===
+  wall=159.913718155s
+=== /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v2-cuda-integracion/test-walker/op4_3000walkers.log ===
+  wall=237.435746987s
+########## test-bloques: bloq_calc=59 fijo, nwalkers=1000 fijo, pasos por bloque variable ##########
+=== /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v2-cuda-integracion/test-bloques/op4_5pasosbloque.log ===
+  wall=20.360799001s
+=== /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v2-cuda-integracion/test-bloques/op4_10pasosbloque.log ===
+  wall=41.092226475s
+=== /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v2-cuda-integracion/test-bloques/op4_20pasosbloque.log ===
+  wall=79.491552163s
+=== /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v2-cuda-integracion/test-bloques/op4_40pasosbloque.log ===
+  wall=157.038659750s
+=== /home/blanca/Documentos/Universidad/TFG-CUDA/Repostorio/DMC/v2-cuda-integracion/test-bloques/op4_80pasosbloque.log ===
+  wall=304.983264972s
+=== TODO OK ===

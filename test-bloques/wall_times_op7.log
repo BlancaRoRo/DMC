@@ -1,0 +1,11 @@
+=== op7_5pasosbloque ===
+  wall=16.164207201s
+=== op7_10pasosbloque ===
+  wall=27.510937854s
+=== op7_20pasosbloque ===
+  wall=54.056883630s
+=== op7_40pasosbloque ===
+  wall=106.373881722s
+=== op7_80pasosbloque ===
+  wall=209.011609112s
+=== TODO OK ===

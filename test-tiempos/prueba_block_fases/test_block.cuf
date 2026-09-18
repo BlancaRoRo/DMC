@@ -1,0 +1,180 @@
+! test_block.cuf
+!
+! Prueba aislada, PREVIA a tocar He_dihydrogen.f (docs-kernels/
+! tiempo-ncu-resultado.md Parte 9): comprueba si envolver cada fase de
+! un calculo en un BLOCK de Fortran (con sus propias declaraciones
+! locales) reduce de verdad los registros por hilo, frente a declarar
+! todas las variables juntas al principio de la subrutina (como esta
+! He_dihydrogen.f hoy). Ambas versiones hacen EXACTAMENTE el mismo
+! calculo en 2 fases independientes (~15 escalares temporales cada
+! una, que no se usan fuera de su fase) -- solo cambia el AMBITO de
+! declaracion, nunca la aritmetica ni el orden de operaciones.
+
+module mtest_block
+ use cudafor
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+contains
+
+! ---- VERSION _top: todas las variables declaradas al principio,
+! igual que He_dihydrogen.f hoy ----
+attributes(host, device) subroutine calculo_top(x, out1, out2)
+  real(kind=r8), intent(in) :: x
+  real(kind=r8), intent(out) :: out1, out2
+  real(kind=r8) :: a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14,a15
+  real(kind=r8) :: b1,b2,b3,b4,b5,b6,b7,b8,b9,b10,b11,b12,b13,b14,b15
+
+   ! ---- fase A: usa solo a1..a15 ----
+   a1 = sin(x)
+   a2 = cos(x)*a1
+   a3 = sqrt(abs(a2))+1.0_r8
+   a4 = a3**2.3_r8
+   a5 = exp(-a4)
+   a6 = a1+a2+a3
+   a7 = a4*a5
+   a8 = sin(a6)*cos(a7)
+   a9 = a8/(a6+1.0_r8)
+   a10 = sqrt(abs(a9))
+   a11 = a10*a3
+   a12 = a11+a4
+   a13 = a12*a5
+   a14 = sin(a13)
+   a15 = a14+a8+a9+a10
+   out1 = a15
+
+   ! ---- fase B: usa solo b1..b15, no toca ninguna a* ----
+   b1 = cos(x*1.7_r8)
+   b2 = sin(x*0.3_r8)*b1
+   b3 = sqrt(abs(b2))+2.0_r8
+   b4 = b3**1.9_r8
+   b5 = exp(-b4*0.5_r8)
+   b6 = b1+b2+b3
+   b7 = b4*b5
+   b8 = cos(b6)*sin(b7)
+   b9 = b8/(b6+1.0_r8)
+   b10 = sqrt(abs(b9))
+   b11 = b10*b3
+   b12 = b11+b4
+   b13 = b12*b5
+   b14 = cos(b13)
+   b15 = b14+b8+b9+b10
+   out2 = b15
+
+end subroutine calculo_top
+
+! ---- VERSION _block: cada fase en su propio BLOCK, con sus propias
+! declaraciones locales -- MISMA aritmetica, mismo orden ----
+attributes(host, device) subroutine calculo_block(x, out1, out2)
+  real(kind=r8), intent(in) :: x
+  real(kind=r8), intent(out) :: out1, out2
+
+   block
+     real(kind=r8) :: a1,a2,a3,a4,a5,a6,a7,a8,a9,a10,a11,a12,a13,a14,a15
+     a1 = sin(x)
+     a2 = cos(x)*a1
+     a3 = sqrt(abs(a2))+1.0_r8
+     a4 = a3**2.3_r8
+     a5 = exp(-a4)
+     a6 = a1+a2+a3
+     a7 = a4*a5
+     a8 = sin(a6)*cos(a7)
+     a9 = a8/(a6+1.0_r8)
+     a10 = sqrt(abs(a9))
+     a11 = a10*a3
+     a12 = a11+a4
+     a13 = a12*a5
+     a14 = sin(a13)
+     a15 = a14+a8+a9+a10
+     out1 = a15
+   end block
+
+   block
+     real(kind=r8) :: b1,b2,b3,b4,b5,b6,b7,b8,b9,b10,b11,b12,b13,b14,b15
+     b1 = cos(x*1.7_r8)
+     b2 = sin(x*0.3_r8)*b1
+     b3 = sqrt(abs(b2))+2.0_r8
+     b4 = b3**1.9_r8
+     b5 = exp(-b4*0.5_r8)
+     b6 = b1+b2+b3
+     b7 = b4*b5
+     b8 = cos(b6)*sin(b7)
+     b9 = b8/(b6+1.0_r8)
+     b10 = sqrt(abs(b9))
+     b11 = b10*b3
+     b12 = b11+b4
+     b13 = b12*b5
+     b14 = cos(b13)
+     b15 = b14+b8+b9+b10
+     out2 = b15
+   end block
+
+end subroutine calculo_block
+
+attributes(global) subroutine k_top(n, x, out1, out2)
+  integer(kind=i4), value :: n
+  real(kind=r8), device, intent(in) :: x(n)
+  real(kind=r8), device, intent(out) :: out1(n), out2(n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) call calculo_top(x(i), out1(i), out2(i))
+end subroutine k_top
+
+attributes(global) subroutine k_block(n, x, out1, out2)
+  integer(kind=i4), value :: n
+  real(kind=r8), device, intent(in) :: x(n)
+  real(kind=r8), device, intent(out) :: out1(n), out2(n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) call calculo_block(x(i), out1(i), out2(i))
+end subroutine k_block
+
+end module mtest_block
+
+
+program test_block
+ use mtest_block
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ integer(kind=i4), parameter :: n = 256
+ real(kind=r8) :: x_h(n), out1_top(n), out2_top(n), out1_blk(n), out2_blk(n)
+ real(kind=r8), device :: x_d(n), out1_top_d(n), out2_top_d(n), out1_blk_d(n), out2_blk_d(n)
+ integer(kind=i4) :: i, threads, blocks
+ logical :: todo_ok
+
+  do i=1,n
+    x_h(i) = real(i,r8)*0.013_r8
+  enddo
+  x_d = x_h
+
+  threads = 32
+  blocks = (n + threads - 1) / threads
+  call k_top<<<blocks,threads>>>(n, x_d, out1_top_d, out2_top_d)
+  call k_block<<<blocks,threads>>>(n, x_d, out1_blk_d, out2_blk_d)
+
+  out1_top = out1_top_d
+  out2_top = out2_top_d
+  out1_blk = out1_blk_d
+  out2_blk = out2_blk_d
+
+  todo_ok = .true.
+  do i=1,n
+    if (out1_top(i) /= out1_blk(i) .or. out2_top(i) /= out2_blk(i)) then
+      write(*,'(a,i0)') 'DIFERENCIA en i=', i
+      todo_ok = .false.
+    endif
+  enddo
+
+  write(*,'(a,es24.17)') 'muestra out1_top(1) =', out1_top(1)
+  write(*,'(a,es24.17)') 'muestra out1_blk(1) =', out1_blk(1)
+
+  if (todo_ok) then
+    write(*,*) 'PASA: BLOCK da exactamente los mismos resultados que declarar todo arriba'
+  else
+    write(*,*) 'FALLA: hay diferencias, ver arriba'
+  endif
+
+end program test_block

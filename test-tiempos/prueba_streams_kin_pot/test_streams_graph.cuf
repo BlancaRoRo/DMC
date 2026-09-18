@@ -1,0 +1,179 @@
+! test_streams_graph.cuf
+!
+! Solucion C sugerida: envolver k_kin/k_pot en un CUDA Graph (patron
+! "fork-join" con cudaStreamBeginCapture/cudaStreamWaitEvent), para ver
+! si eso elimina el hueco de ~6-12 us encontrado en test_streams.cuf
+! (docs-kernels/arquitectura-streams-kin-pot.md Parte 9-11). La idea:
+! si el hueco es una decision del planificador en tiempo de
+! lanzamiento normal, empaquetar la topologia completa en un grafo y
+! lanzarla de una vez (cudaGraphLaunch) puede saltarsela.
+!
+! Misma fisica de juguete que test_streams.cuf (idénticas calc_kin/
+! calc_pot), mismo tamano (natom=20, n=4000).
+
+module mtest_streams_graph
+ use cudafor
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ type :: vec3
+   real(kind=r8) :: comp(3)
+ end type vec3
+
+contains
+
+attributes(host, device) subroutine calc_kin(natom, atom, kin)
+  integer(kind=i4), value :: natom
+  type(vec3), intent(in) :: atom(natom)
+  real(kind=r8), intent(out) :: kin
+  type(vec3) :: rtemp
+  real(kind=r8) :: rij, ujasp
+  integer(kind=i4) :: iatom, jatom
+   kin = 0.0_r8
+   do iatom=1,natom-1
+     do jatom=iatom+1,natom
+       rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+       rij = sqrt(dot_product(rtemp%comp,rtemp%comp)) + 0.1_r8
+       ujasp = 1.7_r8*2.3_r8/(rij**2.3_r8)
+       kin = kin + ujasp
+     enddo
+   enddo
+end subroutine calc_kin
+
+attributes(host, device) subroutine calc_pot(natom, atom, pot)
+  integer(kind=i4), value :: natom
+  type(vec3), intent(in) :: atom(natom)
+  real(kind=r8), intent(out) :: pot
+  type(vec3) :: rtemp
+  real(kind=r8) :: rij, vterm, r0
+  integer(kind=i4) :: iatom, jatom
+   pot = 0.0_r8
+   do iatom=1,natom-1
+     do jatom=iatom+1,natom
+       rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+       rij = sqrt(dot_product(rtemp%comp,rtemp%comp)) + 0.1_r8
+       vterm = exp(-2.5_r8*rij) - 0.9_r8/rij**6
+       pot = pot + vterm
+     enddo
+   enddo
+   do iatom=1,natom
+     r0 = sqrt(dot_product(atom(iatom)%comp,atom(iatom)%comp)) + 0.1_r8
+     pot = pot - 0.4_r8/r0**3
+   enddo
+end subroutine calc_pot
+
+attributes(global) subroutine k_kin(n, natom, atom, kin)
+  integer(kind=i4), value :: n, natom
+  type(vec3), device, intent(in) :: atom(natom,n)
+  real(kind=r8), device, intent(out) :: kin(n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) call calc_kin(natom, atom(:,i), kin(i))
+end subroutine k_kin
+
+attributes(global) subroutine k_pot(n, natom, atom, pot)
+  integer(kind=i4), value :: n, natom
+  type(vec3), device, intent(in) :: atom(natom,n)
+  real(kind=r8), device, intent(out) :: pot(n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) call calc_pot(natom, atom(:,i), pot(i))
+end subroutine k_pot
+
+attributes(global) subroutine k_combina_ene(n, kin, pot, ene)
+  integer(kind=i4), value :: n
+  real(kind=r8), device, intent(in) :: kin(n), pot(n)
+  real(kind=r8), device, intent(out) :: ene(n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) ene(i) = kin(i) + pot(i)
+end subroutine k_combina_ene
+
+end module mtest_streams_graph
+
+
+program test_streams_graph
+ use mtest_streams_graph
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ integer(kind=i4), parameter :: natom = 20, n = 4000
+ type(vec3) :: atom_h(natom,n)
+ real(kind=r8) :: ene_h(n)
+ type(vec3), device :: atom_d(natom,n)
+ real(kind=r8), device :: ene_d(n), kin_d(n), pot_d(n)
+ integer(kind=i4) :: iatom, iw, threads, blocks, istat, rep
+ real(kind=r8) :: seed
+ integer(kind=cuda_stream_kind) :: stream1, stream2
+ type(cudaEvent) :: ev_fork, ev_join
+ type(cudaGraph) :: graph
+ type(cudaGraphExec) :: graphExec
+ type(cudaEvent) :: evg0, evg1
+ real :: t_graph
+
+  do iw=1,n
+    do iatom=1,natom
+      seed = real(iw,r8)*0.37_r8 + real(iatom,r8)*1.91_r8
+      atom_h(iatom,iw)%comp(1) = sin(seed)*3.0_r8
+      atom_h(iatom,iw)%comp(2) = cos(seed*1.3_r8)*3.0_r8
+      atom_h(iatom,iw)%comp(3) = sin(seed*0.7_r8)*3.0_r8
+    enddo
+  enddo
+  atom_d = atom_h
+
+  threads = 32
+  blocks = (n + threads - 1) / threads
+
+  istat = cudaStreamCreateWithFlags(stream1, cudaStreamNonBlocking)
+  istat = cudaStreamCreateWithFlags(stream2, cudaStreamNonBlocking)
+  istat = cudaEventCreateWithFlags(ev_fork, cudaEventDisableTiming)
+  istat = cudaEventCreateWithFlags(ev_join, cudaEventDisableTiming)
+  istat = cudaEventCreate(evg0)
+  istat = cudaEventCreate(evg1)
+
+  ! ---- capturar la topologia fork-join en un grafo -- el evento de
+  ! "fork" se graba ANTES de lanzar k_kin, para que stream2 (y k_pot)
+  ! no dependan de que k_kin termine, solo del punto de bifurcacion.
+  ! Con el evento grabado DESPUES de k_kin (version anterior de este
+  ! fichero), el grafo capturado habria quedado secuencial igualmente
+  ! (k_pot esperando a que k_kin acabe), sin probar de verdad la
+  ! horquilla paralela. ----
+  istat = cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal)
+
+  istat = cudaEventRecord(ev_fork, stream1)
+  istat = cudaStreamWaitEvent(stream2, ev_fork, 0)
+
+  call k_kin<<<blocks,threads,0,stream1>>>(n, natom, atom_d, kin_d)
+  call k_pot<<<blocks,threads,0,stream2>>>(n, natom, atom_d, pot_d)
+
+  istat = cudaEventRecord(ev_join, stream2)
+  istat = cudaStreamWaitEvent(stream1, ev_join, 0)
+  call k_combina_ene<<<blocks,threads,0,stream1>>>(n, kin_d, pot_d, ene_d)
+
+  istat = cudaStreamEndCapture(stream1, graph)
+  write(*,'(a,i0)') 'cudaStreamEndCapture istat=', istat
+
+  istat = cudaGraphInstantiate(graphExec, graph, 0_8)
+  write(*,'(a,i0)') 'cudaGraphInstantiate istat=', istat
+
+  ! ---- calentamiento ----
+  istat = cudaGraphLaunch(graphExec, stream1)
+  istat = cudaStreamSynchronize(stream1)
+
+  ! ---- medido ----
+  istat = cudaEventRecord(evg0, stream1)
+  do rep=1,1
+    istat = cudaGraphLaunch(graphExec, stream1)
+  enddo
+  istat = cudaEventRecord(evg1, stream1)
+  istat = cudaEventSynchronize(evg1)
+  istat = cudaEventElapsedTime(t_graph, evg0, evg1)
+
+  ene_h = ene_d
+
+  write(*,'(a,es24.17)') 'muestra ene(1) =', ene_h(1)
+  write(*,'(a,f10.4,a)') 'tiempo CUDA Graph (k_kin+k_pot+combina) : ', t_graph, ' ms'
+
+end program test_streams_graph

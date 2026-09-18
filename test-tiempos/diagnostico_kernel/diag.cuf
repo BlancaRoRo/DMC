@@ -1,0 +1,76 @@
+module mtipos_mini
+ implicit none
+ integer, parameter :: r8=selected_real_kind(15,9)
+ type :: vec3
+   real(kind=r8) :: comp(3)
+ end type vec3
+end module mtipos_mini
+
+module mkernel_trivial
+ use mtipos_mini
+ implicit none
+contains
+ attributes(global) subroutine k_trivial(n, x)
+  integer, value :: n
+  real(kind=r8), device :: x(n)
+  integer :: i
+   i = (blockidx%x-1)*blockdim%x + threadidx%x
+   if (i<=n) x(i) = x(i) + 1.0_r8
+ end subroutine k_trivial
+end module mkernel_trivial
+
+program test_overhead
+ use cudafor
+ use mkernel_trivial
+ use mtipos_mini
+ implicit none
+ integer, parameter :: nwpaso=50, natom=22, niter=100
+ integer(kind=8) :: c0,c1,rate
+ real(kind=r8) :: dt
+ integer :: it, threads, blocks, istat
+ real(kind=r8), device :: xa(nwpaso)
+
+  call system_clock(count_rate=rate)
+  threads=32; blocks=(nwpaso+threads-1)/threads
+
+  ! ---- Caso A: un unico array device, reservado UNA vez fuera del bucle ----
+  call system_clock(c0)
+  do it=1,niter
+    call k_trivial<<<blocks,threads>>>(nwpaso, xa)
+    istat = cudaDeviceSynchronize()
+  enddo
+  call system_clock(c1)
+  dt = real(c1-c0,r8)/real(rate,r8)
+  write(*,'(a,f10.4,a,f10.6,a)') 'Caso A (1 array device preasignado, kernel trivial): total=',dt,' s, por iter=',dt/niter,' s'
+
+  ! ---- Caso B: mismo kernel trivial, pero dentro de una subrutina que
+  ! declara ~18 arrays device AUTOMATICOS (mismo patron que pasodmc_gpu) ----
+  call system_clock(c0)
+  do it=1,niter
+    call paso_con_arrays_automaticos(nwpaso, natom)
+  enddo
+  call system_clock(c1)
+  dt = real(c1-c0,r8)/real(rate,r8)
+  write(*,'(a,f10.4,a,f10.6,a)') 'Caso B (18 arrays device automaticos cada llamada): total=',dt,' s, por iter=',dt/niter,' s'
+
+contains
+
+ subroutine paso_con_arrays_automaticos(nwpaso, natom)
+  integer, intent(in) :: nwpaso, natom
+  type(vec3), device :: atom_d(natom,nwpaso), sprop_d(3,nwpaso)
+  real(kind=r8), device :: hb2m_d(natom,nwpaso), b_d(nwpaso)
+  real(kind=r8), device :: wf_d(nwpaso), wfhe4_d(nwpaso), wfhe3_d(nwpaso), wfm_d(nwpaso), wfx_d(nwpaso)
+  real(kind=r8), device :: kin_d(nwpaso), eimp_d(nwpaso), erot_d(nwpaso), pot_d(nwpaso), ene_d(nwpaso)
+  type(vec3), device :: dwf_d(natom,nwpaso)
+  real(kind=r8), device :: dphi_d(2,nwpaso)
+  integer(kind=8), device :: irn_d(nwpaso)
+  integer, device :: nsons_d(nwpaso)
+  integer :: threads2,blocks2,istat2
+
+   threads2=32; blocks2=(nwpaso+threads2-1)/threads2
+   call k_trivial<<<blocks2,threads2>>>(nwpaso, wf_d)
+   istat2 = cudaDeviceSynchronize()
+
+ end subroutine paso_con_arrays_automaticos
+
+end program test_overhead

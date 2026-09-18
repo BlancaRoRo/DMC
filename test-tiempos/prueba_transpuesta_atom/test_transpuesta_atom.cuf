@@ -1,0 +1,188 @@
+! test_transpuesta_atom.cuf
+!
+! Prueba aislada: compara el layout ACTUAL de los arrays SoA globales
+! del kernel k_dmc2 -- atom(natom,n), con "n" (walkers = hilos) como
+! dimension LENTA -- contra un layout TRANSPUESTO -- atom_t(n,natom),
+! con "n" como dimension RAPIDA (contigua) -- que es lo que hace falta
+! para que 32 hilos consecutivos (mismo warp = walkers consecutivos)
+! lean posiciones contiguas de memoria en vez de separadas por natom
+! elementos. Ver tiempo-ncu-resultado.md Parte 3.
+!
+! El patron de computo (bucle de pares iatom/jatom, acumulando en
+! d1wf/d2wf) copia deliberadamente el patron real de
+! der_wavefhe4_mod.cuf (lineas 46-91), identificado por ncu como el
+! actual cuello de botella #1 de accesos no coalescidos, SIN copiar la
+! fisica real (no hace falta para esta prueba, solo el patron de
+! acceso a memoria).
+!
+! Tecnica en la version _t (transpuesta): en vez de pasar una seccion
+! de array atom(:,i) (que con el layout transpuesto ya NO seria
+! contigua), cada hilo copia explicitamente su propio walker a un
+! array local natom-contiguo (bucle "copiar de atom_t(i,:)", que con
+! n como dimension rapida SI es un acceso coalescido entre los 32
+! hilos de un warp para cada iatom fijo), calcula exactamente igual
+! que la version original con ese array local, y copia el resultado
+! de vuelta con el mismo patron coalescido.
+
+module mtest_transpuesta
+ use cudafor
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ type :: vec3
+   real(kind=r8) :: comp(3)
+ end type vec3
+
+contains
+
+ attributes(host, device) function vnorm(v) result(r)
+  type(vec3), intent(in) :: v
+  real(kind=r8) :: r
+   r = sqrt(v%comp(1)**2 + v%comp(2)**2 + v%comp(3)**2)
+ end function vnorm
+
+! =====================================================================
+! ---- fisica de juguete compartida por las dos versiones: mismo
+! calculo exacto, para que cualquier diferencia salga solo del layout
+! de memoria, no del algoritmo ----
+! =====================================================================
+ attributes(host, device) subroutine paso_fisico(natom, atom_l, d1wf_l, d2wf_l)
+  integer(kind=i4), value :: natom
+  type(vec3), intent(in)  :: atom_l(natom)
+  type(vec3), intent(out) :: d1wf_l(natom)
+  real(kind=r8), intent(out) :: d2wf_l(natom)
+  type(vec3) :: rtemp
+  real(kind=r8) :: rij, ujasp, ujass
+  integer(kind=i4) :: iatom, jatom
+
+   do iatom=1,natom
+     d1wf_l(iatom)%comp = 0.0_r8
+     d2wf_l(iatom) = 0.0_r8
+   enddo
+
+   do iatom=1,natom-1
+     do jatom=iatom+1,natom
+       rtemp%comp = atom_l(iatom)%comp - atom_l(jatom)%comp
+       rij = vnorm(rtemp)
+       ujasp = exp(-rij) / (rij + 1.0_r8)
+       ujass = ujasp * ujasp
+       d1wf_l(iatom)%comp = d1wf_l(iatom)%comp + ujasp*rtemp%comp
+       d1wf_l(jatom)%comp = d1wf_l(jatom)%comp - ujasp*rtemp%comp
+       d2wf_l(iatom) = d2wf_l(iatom) + ujass
+       d2wf_l(jatom) = d2wf_l(jatom) + ujass
+     enddo
+   enddo
+ end subroutine paso_fisico
+
+! =====================================================================
+! ---- VERSION ACTUAL (_orig): atom(natom,n), n=walker LENTO ----
+! =====================================================================
+ attributes(global) subroutine k_orig(natom, n, atom, d1wf, d2wf)
+  integer(kind=i4), value :: natom, n
+  type(vec3), device, intent(in)  :: atom(natom,n)
+  type(vec3), device, intent(out) :: d1wf(natom,n)
+  real(kind=r8), device, intent(out) :: d2wf(natom,n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) call paso_fisico(natom, atom(:,i), d1wf(:,i), d2wf(:,i))
+ end subroutine k_orig
+
+! =====================================================================
+! ---- VERSION TRANSPUESTA (_t): atom_t(n,natom), n=walker RAPIDO ----
+! copia explicita a/desde un array local natom-contiguo por hilo,
+! coalescida entre los hilos del warp (mismo iatom, walkers
+! consecutivos = posiciones consecutivas en atom_t) ----
+! =====================================================================
+ attributes(global) subroutine k_transpuesta(natom, n, atom_t, d1wf_t, d2wf_t)
+  integer(kind=i4), value :: natom, n
+  type(vec3), device, intent(in)  :: atom_t(n,natom)
+  type(vec3), device, intent(out) :: d1wf_t(n,natom)
+  real(kind=r8), device, intent(out) :: d2wf_t(n,natom)
+  type(vec3) :: atom_l(64), d1wf_l(64)
+  real(kind=r8) :: d2wf_l(64)
+  integer(kind=i4) :: i, iatom
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) then
+     do iatom=1,natom
+       atom_l(iatom) = atom_t(i,iatom)
+     enddo
+     call paso_fisico(natom, atom_l(1:natom), d1wf_l(1:natom), d2wf_l(1:natom))
+     do iatom=1,natom
+       d1wf_t(i,iatom) = d1wf_l(iatom)
+       d2wf_t(i,iatom) = d2wf_l(iatom)
+     enddo
+   endif
+ end subroutine k_transpuesta
+
+end module mtest_transpuesta
+
+
+program test_transpuesta_atom
+ use mtest_transpuesta
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ integer(kind=i4), parameter :: natom = 22, n = 50
+ type(vec3) :: atom_h(natom,n), atom_t_h(n,natom)
+ type(vec3) :: d1wf_orig(natom,n), d1wf_t(n,natom)
+ real(kind=r8) :: d2wf_orig(natom,n), d2wf_t(n,natom)
+ type(vec3), device :: atom_d(natom,n), d1wf_d(natom,n)
+ type(vec3), device :: atom_t_d(n,natom), d1wf_t_d(n,natom)
+ real(kind=r8), device :: d2wf_d(natom,n), d2wf_t_d(n,natom)
+ integer(kind=i4) :: iatom, iw, threads, blocks
+ logical :: todo_ok
+ real(kind=r8) :: seed
+
+  ! ---- datos de entrada deterministas (no hace falta aleatoriedad
+  ! real, solo valores variados que ejerciten el bucle de pares) ----
+  do iw=1,n
+    do iatom=1,natom
+      seed = real(iw,r8)*0.37_r8 + real(iatom,r8)*1.91_r8
+      atom_h(iatom,iw)%comp(1) = sin(seed)*3.0_r8
+      atom_h(iatom,iw)%comp(2) = cos(seed*1.3_r8)*3.0_r8
+      atom_h(iatom,iw)%comp(3) = sin(seed*0.7_r8)*3.0_r8
+      atom_t_h(iw,iatom) = atom_h(iatom,iw)
+    enddo
+  enddo
+
+  atom_d = atom_h
+  atom_t_d = atom_t_h
+
+  threads = 32
+  blocks = (n + threads - 1) / threads
+  call k_orig<<<blocks,threads>>>(natom, n, atom_d, d1wf_d, d2wf_d)
+  call k_transpuesta<<<blocks,threads>>>(natom, n, atom_t_d, d1wf_t_d, d2wf_t_d)
+
+  d1wf_orig = d1wf_d
+  d2wf_orig = d2wf_d
+  d1wf_t = d1wf_t_d
+  d2wf_t = d2wf_t_d
+
+  todo_ok = .true.
+  do iw=1,n
+    do iatom=1,natom
+      if (any(d1wf_orig(iatom,iw)%comp /= d1wf_t(iw,iatom)%comp)) then
+        write(*,'(a,i0,a,i0)') 'DIFERENCIA d1wf en walker ', iw, ' atomo ', iatom
+        todo_ok = .false.
+      endif
+      if (d2wf_orig(iatom,iw) /= d2wf_t(iw,iatom)) then
+        write(*,'(a,i0,a,i0)') 'DIFERENCIA d2wf en walker ', iw, ' atomo ', iatom
+        todo_ok = .false.
+      endif
+    enddo
+  enddo
+
+  write(*,'(a,es24.17)') 'muestra d1wf_orig(1,1)%comp(1) =', d1wf_orig(1,1)%comp(1)
+  write(*,'(a,es24.17)') 'muestra d1wf_t(1,1)%comp(1)    =', d1wf_t(1,1)%comp(1)
+  write(*,'(a,es24.17)') 'muestra d2wf_orig(5,10)        =', d2wf_orig(5,10)
+  write(*,'(a,es24.17)') 'muestra d2wf_t(10,5)           =', d2wf_t(10,5)
+
+  if (todo_ok) then
+    write(*,*) 'PASA: layout transpuesto (con copia local) da EXACTAMENTE los mismos resultados'
+  else
+    write(*,*) 'FALLA: hay diferencias, ver arriba'
+  endif
+
+end program test_transpuesta_atom

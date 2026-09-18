@@ -1,0 +1,229 @@
+! test_streams_graph_real.cuf
+!
+! Paso intermedio antes de tocar dmc2.cuf real (docs-kernels/
+! arquitectura-streams-kin-pot.md §12): repite la prueba del CUDA
+! Graph, pero con las 2 diferencias que la version de juguete (n
+! identico para las dos piezas, formulas simplificadas) no cubria:
+!
+! 1. Tamanos DISTINTOS: k_kin usa solo nhe4=20 atomos (como
+!    derwavefhe4 dentro de derananum), k_pot usa los natom=21 completos
+!    (como vpot/He_dihydrogen) -- mismo patron que el codigo real,
+!    donde derananum y vpot leen el mismo atom(natom) pero cada pieza
+!    usa una parte distinta.
+! 2. mypow/myexp REALES (glibc_pow.cuf/glibc_exp_mod.cuf, copiados tal
+!    cual de hibrido_instrumentado/), no aproximaciones con ** o exp()
+!    intrinsecos -- para que el peso relativo de cada kernel se parezca
+!    al real (Parte 2 encontro que mypow/myexp son, con diferencia, lo
+!    mas caro de toda la cadena).
+!
+! n=50 (tamano real del proyecto, in.mcv).
+
+module mtest_streams_graph_real
+ use cudafor
+ use glibc_pow_mod, only: mypow
+ use glibc_exp_mod, only: myexp
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ type :: vec3
+   real(kind=r8) :: comp(3)
+ end type vec3
+
+contains
+
+! ---- kin: patron de derwavefhe4 (bucle de parejas, mypow real) ----
+attributes(host, device) subroutine calc_kin(nhe4, atom, kin)
+  integer(kind=i4), value :: nhe4
+  type(vec3), intent(in) :: atom(nhe4)
+  real(kind=r8), intent(out) :: kin
+  type(vec3) :: rtemp
+  real(kind=r8) :: rij, ujasp
+  integer(kind=i4) :: iatom, jatom
+   kin = 0.0_r8
+   do iatom=1,nhe4-1
+     do jatom=iatom+1,nhe4
+       rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+       rij = sqrt(dot_product(rtemp%comp,rtemp%comp)) + 0.1_r8
+       ujasp = 1.7_r8*2.3_r8/mypow(rij,2.3_r8)
+       kin = kin + ujasp
+     enddo
+   enddo
+end subroutine calc_kin
+
+! ---- pot: patron de V_hehe/He_dihydrogen (bucle de parejas con myexp
+! real + termino O(n) extra tipo ENERGY3) ----
+attributes(host, device) subroutine calc_pot(natom, atom, pot)
+  integer(kind=i4), value :: natom
+  type(vec3), intent(in) :: atom(natom)
+  real(kind=r8), intent(out) :: pot
+  type(vec3) :: rtemp
+  real(kind=r8) :: rij, vterm, r0
+  integer(kind=i4) :: iatom, jatom
+   pot = 0.0_r8
+   do iatom=1,natom-1
+     do jatom=iatom+1,natom
+       rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+       rij = sqrt(dot_product(rtemp%comp,rtemp%comp)) + 0.1_r8
+       vterm = myexp(-2.5_r8*rij) - 0.9_r8/mypow(rij,6.0_r8)
+       pot = pot + vterm
+     enddo
+   enddo
+   do iatom=1,natom
+     r0 = sqrt(dot_product(atom(iatom)%comp,atom(iatom)%comp)) + 0.1_r8
+     pot = pot - 0.4_r8/mypow(r0,3.0_r8)
+   enddo
+end subroutine calc_pot
+
+! ---- _secuencial: linea base, como hpsi_mod.cuf hoy (kin con solo
+! los primeros nhe4 atomos, pot con los natom completos) ----
+attributes(global) subroutine k_secuencial(n, nhe4, natom, atom, ene)
+  integer(kind=i4), value :: n, nhe4, natom
+  type(vec3), device, intent(in) :: atom(natom,n)
+  real(kind=r8), device, intent(out) :: ene(n)
+  real(kind=r8) :: kinl, potl
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) then
+     call calc_kin(nhe4, atom(1:nhe4,i), kinl)
+     call calc_pot(natom, atom(:,i), potl)
+     ene(i) = kinl + potl
+   endif
+end subroutine k_secuencial
+
+attributes(global) subroutine k_kin(n, nhe4, natom, atom, kin)
+  integer(kind=i4), value :: n, nhe4, natom
+  type(vec3), device, intent(in) :: atom(natom,n)
+  real(kind=r8), device, intent(out) :: kin(n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) call calc_kin(nhe4, atom(1:nhe4,i), kin(i))
+end subroutine k_kin
+
+attributes(global) subroutine k_pot(n, natom, atom, pot)
+  integer(kind=i4), value :: n, natom
+  type(vec3), device, intent(in) :: atom(natom,n)
+  real(kind=r8), device, intent(out) :: pot(n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) call calc_pot(natom, atom(:,i), pot(i))
+end subroutine k_pot
+
+attributes(global) subroutine k_combina_ene(n, kin, pot, ene)
+  integer(kind=i4), value :: n
+  real(kind=r8), device, intent(in) :: kin(n), pot(n)
+  real(kind=r8), device, intent(out) :: ene(n)
+  integer(kind=i4) :: i
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) ene(i) = kin(i) + pot(i)
+end subroutine k_combina_ene
+
+end module mtest_streams_graph_real
+
+
+program test_streams_graph_real
+ use mtest_streams_graph_real
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ integer(kind=i4), parameter :: nhe4 = 20, natom = 21, n = 50
+ type(vec3) :: atom_h(natom,n)
+ real(kind=r8) :: ene_sec(n), ene_gr(n)
+ type(vec3), device :: atom_d(natom,n)
+ real(kind=r8), device :: ene_sec_d(n), ene_gr_d(n), kin_d(n), pot_d(n)
+ integer(kind=i4) :: iatom, iw, threads, blocks, istat
+ logical :: todo_ok
+ real(kind=r8) :: seed
+ integer(kind=cuda_stream_kind) :: stream1, stream2
+ type(cudaEvent) :: ev_fork, ev_join, ev_sec0, ev_sec1, evg0, evg1
+ type(cudaGraph) :: graph
+ type(cudaGraphExec) :: graphExec
+ real :: t_sec, t_graph
+
+  do iw=1,n
+    do iatom=1,natom
+      seed = real(iw,r8)*0.37_r8 + real(iatom,r8)*1.91_r8
+      atom_h(iatom,iw)%comp(1) = sin(seed)*3.0_r8
+      atom_h(iatom,iw)%comp(2) = cos(seed*1.3_r8)*3.0_r8
+      atom_h(iatom,iw)%comp(3) = sin(seed*0.7_r8)*3.0_r8
+    enddo
+  enddo
+  atom_d = atom_h
+
+  threads = 32
+  blocks = (n + threads - 1) / threads
+
+  istat = cudaStreamCreateWithFlags(stream1, cudaStreamNonBlocking)
+  istat = cudaStreamCreateWithFlags(stream2, cudaStreamNonBlocking)
+  istat = cudaEventCreateWithFlags(ev_fork, cudaEventDisableTiming)
+  istat = cudaEventCreateWithFlags(ev_join, cudaEventDisableTiming)
+  istat = cudaEventCreate(ev_sec0)
+  istat = cudaEventCreate(ev_sec1)
+  istat = cudaEventCreate(evg0)
+  istat = cudaEventCreate(evg1)
+
+  ! ---- calentamiento ----
+  call k_secuencial<<<blocks,threads>>>(n, nhe4, natom, atom_d, ene_sec_d)
+  istat = cudaDeviceSynchronize()
+
+  ! ---- _secuencial: linea base ----
+  istat = cudaEventRecord(ev_sec0, 0)
+  call k_secuencial<<<blocks,threads>>>(n, nhe4, natom, atom_d, ene_sec_d)
+  istat = cudaEventRecord(ev_sec1, 0)
+  istat = cudaEventSynchronize(ev_sec1)
+  istat = cudaEventElapsedTime(t_sec, ev_sec0, ev_sec1)
+  istat = cudaDeviceSynchronize()
+
+  ! ---- captura del grafo: horquilla real (fork ANTES de lanzar
+  ! k_kin/k_pot, ver correccion de la §12) ----
+  istat = cudaStreamBeginCapture(stream1, cudaStreamCaptureModeGlobal)
+
+  istat = cudaEventRecord(ev_fork, stream1)
+  istat = cudaStreamWaitEvent(stream2, ev_fork, 0)
+
+  call k_kin<<<blocks,threads,0,stream1>>>(n, nhe4, natom, atom_d, kin_d)
+  call k_pot<<<blocks,threads,0,stream2>>>(n, natom, atom_d, pot_d)
+
+  istat = cudaEventRecord(ev_join, stream2)
+  istat = cudaStreamWaitEvent(stream1, ev_join, 0)
+  call k_combina_ene<<<blocks,threads,0,stream1>>>(n, kin_d, pot_d, ene_gr_d)
+
+  istat = cudaStreamEndCapture(stream1, graph)
+  istat = cudaGraphInstantiate(graphExec, graph, 0_8)
+
+  ! ---- calentamiento del grafo ----
+  istat = cudaGraphLaunch(graphExec, stream1)
+  istat = cudaStreamSynchronize(stream1)
+
+  ! ---- medido ----
+  istat = cudaEventRecord(evg0, stream1)
+  istat = cudaGraphLaunch(graphExec, stream1)
+  istat = cudaEventRecord(evg1, stream1)
+  istat = cudaEventSynchronize(evg1)
+  istat = cudaEventElapsedTime(t_graph, evg0, evg1)
+
+  ene_sec = ene_sec_d
+  ene_gr = ene_gr_d
+
+  todo_ok = .true.
+  do iw=1,n
+    if (ene_sec(iw) /= ene_gr(iw)) then
+      write(*,'(a,i0,a,es24.17,a,es24.17)') 'DIFERENCIA walker ', iw, &
+            ' sec=', ene_sec(iw), ' graph=', ene_gr(iw)
+      todo_ok = .false.
+    endif
+  enddo
+
+  write(*,'(a,es24.17)') 'muestra ene_sec(1) =', ene_sec(1)
+  write(*,'(a,es24.17)') 'muestra ene_gr(1)  =', ene_gr(1)
+  write(*,'(a,f10.4,a)') 'tiempo _secuencial : ', t_sec, ' ms'
+  write(*,'(a,f10.4,a)') 'tiempo CUDA Graph  : ', t_graph, ' ms'
+
+  if (todo_ok) then
+    write(*,*) 'PASA: CUDA Graph con tamanos reales y mypow/myexp reales da EXACTAMENTE los mismos resultados'
+  else
+    write(*,*) 'FALLA: hay diferencias, ver arriba'
+  endif
+
+end program test_streams_graph_real
