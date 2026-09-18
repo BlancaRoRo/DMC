@@ -1,0 +1,7 @@
+ PASA (host): mypow(x,y) == mypow_desde_log(mypow_log(x),y) en los  
+         3000  casos (incluido x=1.0)
+ PASA (device): mismo resultado bit a bit en los          3000  casos
+n walkers = 3000, repeticiones = 500
+ANTES   (2x mypow completa):            8.3861 ms total,  0.01677 ms/rep
+DESPUES (1x log + 2x remate):           6.5720 ms total,  0.01314 ms/rep
+factor de mejora:  1.276x

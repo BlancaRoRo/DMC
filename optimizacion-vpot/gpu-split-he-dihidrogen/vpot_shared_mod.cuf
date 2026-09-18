@@ -1,0 +1,83 @@
+module mvpot_shared
+ ! v3-cuda-optimizacion/optimizacion-vpot/split-he-dihidrogen: copia
+ ! DEVICE-ONLY de vpot, solo para medir termino_dispersion_shared en el
+ ! contexto real de k_vpot_t (misma atom_p/sprop_p, mismo natom/ngatom)
+ ! sin duplicar la inicializacion -- opot/ngatom/natom se reutilizan tal
+ ! cual del modulo real (mvpot/mccuerpo). No es candidata a produccion
+ ! mientras exista como copia -- ver split-he-dihidrogen.md.
+ use mtipos, only: vec3
+ use mccuerpo, only: ccuerpo, ngatom, natom
+ use mpotenbh_shared, only: potenbh_shared
+ use mvpot, only: opot
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ include 'param_atoms_bh_freeform.h'
+
+contains
+
+! ---- vpot: w1 se descompone en atom(natom)/sprop(3), igual que en
+! ccuerpo/wavef, y devuelve "pot" como escalar en vez de escribir en
+! w1%lw%pot. w1%lw (type vloc) no tiene ningun componente allocatable
+! -- a diferencia de "walker", SI se podria pasar entero a device tal
+! cual -- pero como vpot solo escribe un unico campo (pot), se
+! mantiene el mismo criterio que en wavef/wavefx: un escalar de
+! salida y ya, interfaz minima.
+!
+! Solo se porta la rama "opot==4" (ccuerpo+potenbh, ya verificados por
+! separado). La rama "opot/=4" del original (aziz_nuevo para el He-He
+! puro, y vatomol/azizgen segun impurmol para otras impurezas
+! He-OCS/He-CO) NO se porta: con opot=4 fijo en el in.mcv real de esta
+! simulacion, esa rama es codigo muerto de verdad -- el "return" al
+! final del if en el original nunca deja que se alcance. A diferencia
+! de wavefm/wavefhe3 en wavef.cuf (que SI se llaman siempre, solo con
+! resultado trivial para nhe3=0), aqui ni siquiera se ejecuta la
+! llamada, asi que no aplica el criterio de "portar aunque sea
+! barato" -- es exactamente el mismo caso ya discutido para vpot antes
+! de empezar a portar wavef. Se mantiene el "if(opot==4)" (comparacion
+! uniforme para todos los walkers, coste cero de divergencia, igual
+! que GTEST en He_dihydrogen) por fidelidad y por si algun dia cambia
+! opot, pero no hay ninguna rama alternativa que ejecutar si no se
+! cumple. ----
+attributes(device) subroutine vpot_shared(atom, sprop, pot)
+  type(vec3), intent (in) :: atom(natom), sprop(3)
+  real(kind=r8), intent (out) :: pot
+  real(kind=r8) :: rhe(3*natms)
+  real(kind=r8) :: vpotbh
+
+    if (opot == 4) then
+      call ccuerpo(atom, sprop, rhe(1:3*ngatom))
+      call potenbh_shared(ngatom, rhe(1:3*ngatom), vpotbh)
+      pot = vpotbh
+    endif
+
+end subroutine vpot_shared
+
+! Mismo cuerpo que k_vpot_t (dmc2_pipeline.cuf) -- copia local atom_l/
+! sprop_l antes de llamar, igual que el real, para que la presion de
+! registros de la parte "envoltorio" sea la misma y la comparacion con
+! k_vpot_t (106 registros, produccion) sea justa.
+attributes(global) subroutine k_vpot_shared_t(nmax, atom, sprop, pot)
+  integer(kind=i4), value :: nmax
+  type(vec3), device, intent (in) :: atom(nmax,natom)
+  type(vec3), device, intent (in) :: sprop(nmax,3)
+  real(kind=r8), device, intent (out) :: pot(nmax)
+
+  type(vec3) :: atom_l(64), sprop_l(3)
+  integer(kind=i4) :: i, iatom
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= nmax) then
+     do iatom = 1, natom
+       atom_l(iatom) = atom(i,iatom)
+     enddo
+     sprop_l(1) = sprop(i,1)
+     sprop_l(2) = sprop(i,2)
+     sprop_l(3) = sprop(i,3)
+
+     call vpot_shared(atom_l(1:natom), sprop_l, pot(i))
+   endif
+end subroutine k_vpot_shared_t
+
+end module mvpot_shared

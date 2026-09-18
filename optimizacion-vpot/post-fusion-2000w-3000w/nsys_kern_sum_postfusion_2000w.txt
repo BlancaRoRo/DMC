@@ -1,0 +1,21 @@
+Generating SQLite file nsys_postfusion_2000w.sqlite from nsys_postfusion_2000w.nsys-rep
+Processing [nsys_postfusion_2000w.sqlite] with [/opt/nvidia/hpc_sdk/Linux_x86_64/24.1/profilers/Nsight_Systems/host-linux-x64/reports/cuda_gpu_kern_sum.py]... 
+
+ ** CUDA GPU Kernel Summary (cuda_gpu_kern_sum):
+
+ Time (%)  Total Time (ns)  Instances   Avg (ns)     Med (ns)    Min (ns)   Max (ns)   StdDev (ns)                  Name                 
+ --------  ---------------  ---------  -----------  -----------  ---------  ---------  -----------  -------------------------------------
+     50,0   13.415.414.627      2.368  5.665.293,0  5.702.855,0  4.759.313  6.362.784    171.353,0  mdmc2_pipeline_k_vpot_t_             
+     24,0    6.356.214.426      2.368  2.684.212,0  2.648.341,0  2.283.561  3.454.654    210.761,0  mderananum_split_k_derananum_resto_t_
+     21,0    5.605.395.689      2.368  2.367.143,0  2.339.657,0  2.036.940  3.029.474    170.866,0  mderananum_split_k_derananum_he4_t_  
+      1,0      500.049.027      1.184    422.338,0    445.611,0    359.101    467.803     37.605,0  mdmc2_pipeline_k_fase_a_             
+      1,0      296.638.065      1.184    250.538,0    262.781,0    215.102    279.261     20.779,0  mdmc2_pipeline_k_fase_h_             
+      0,0      138.021.891      2.368     58.286,0     57.823,0     46.431    116.031      6.056,0  mderananum_split_k_derananum_join_t_ 
+      0,0       21.700.007      1.184     18.327,0     18.463,0     16.576     21.728        769,0  mdmc2_pipeline_k_fase_d_             
+      0,0        3.424.417      1.184      2.892,0      2.880,0      2.560      3.839        109,0  mdmc2_pipeline_k_fase_g_             
+      0,0        2.525.862      1.184      2.133,0      2.144,0      1.856      2.689         87,0  mdmc2_pipeline_k_fase_f_             
+      0,0        2.156.421      1.184      1.821,0      1.824,0      1.568      2.272         87,0  mdmc2_pipeline_k_fase_c_             
+      0,0          553.787        540      1.025,0        960,0        896      1.600        129,0  __pgi_dev_cumemset_16n               
+      0,0          199.003        192      1.036,0      1.024,0        991      1.632         81,0  __pgi_dev_cumemset_8n                
+      0,0          145.439          1    145.439,0    145.439,0    145.439    145.439          0,0  mrandgpu_k_split_seeds_              
+

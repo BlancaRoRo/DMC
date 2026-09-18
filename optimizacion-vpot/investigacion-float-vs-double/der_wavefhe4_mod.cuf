@@ -1,0 +1,309 @@
+module der_wavefhe4
+ ! vec3: se reutiliza mtipos.f90, igual que en duhe4x. Aqui tampoco se
+ ! usan los operadores sobrecargados de vec3 (todo via %comp).
+ use mtipos, only: vec3
+ ! rij**phe4(2)/rij**(phe4(2)+1): exponente REAL (nu de in.mcv, no
+ ! entero) -> pow(), mismo motivo que en d_uhex4.cuf/der_wavefx.cuf.
+ ! Ver docs-kernels/glibc_math.md Parte 4.
+ use glibc_pow_mod, only: mypow, mypow_log, mypow_desde_log
+ ! nhe4: consolidada en mcuda_globals (docs-kernels/hibrido.md Paso 3)
+ ! -- antes se declaraba aqui, por separado de der_wavefx.
+ use glibc_exp_mod, only: myexp
+ use mcuda_globals, only: nhe4
+
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! umax/umin SI son PARAMETER en el original (mwavef.f90), a diferencia
+ ! de nhe4/phe4 -- se declaran tal cual, sin necesitar copia a la GPU.
+ real(kind=r8), parameter :: umax = 200.0_r8, umin = -200.0_r8
+
+ ! phe4 es una variable de verdad en mparametros.f90 (publica, sin
+ ! "parameter"): mentradatos.f90 la rellena una vez al leer in.mcv y se
+ ! queda fija el resto de la simulacion. Mismo tratamiento que
+ ! lxhe4/impurmol/pxhe4 en duhe4x: device a nivel de modulo.
+ real(kind=r8), device :: phe4(3)
+ integer, private, parameter :: i8 = selected_int_kind(15)
+
+ ! ---- diagnostico de rango real para wavef_derwavefhe4_float (ver
+ ! stall-float-vs-double-derananum-he4.md / float-wavef-derwavefhe4-
+ ! validacion.md): en vez de solo contar cuantas veces se acerca a un
+ ! umbral fijo, aqui se registra el MIN/MAX real visto de "ujas" (antes
+ ! del clip) y de "wfhe4" (despues de exp), mas cuantas veces wfhe4 cae
+ ! exactamente a 0.0 (underflow) o se dispara por encima de un umbral
+ ! absurdo (overflow/Inf) -- para poder poner un clip ajustado al rango
+ ! real de float en vez de heredar el +-200 pensado para double. ----
+ ! ---- Opcion 3 (ver investigacion-float-vs-double/README.md): ujas se
+ ! acumula en DOUBLE (la suma en si no usa ninguna unidad hardware
+ ! especial, acumularla en r8 no cuesta nada de la ganancia de float),
+ ! y el exp() final tambien es en DOUBLE (myexp, bit-exacto, igual que
+ ! el original) -- solo las llamadas log()/exp() POR PAR (~190 veces)
+ ! se quedan en float, que es donde esta la ganancia real de velocidad.
+ ! Elimina el riesgo de underflow por construccion: el ujas acumulado
+ ! recupera el rango completo de double antes de exponenciar.
+ real(kind=r8), device :: ujas_d_min_visto, ujas_d_max_visto
+ real(kind=4), device :: rijp2_min_visto, rijp2_max_visto
+ integer(kind=i8), device :: n_wfhe4_no_finito
+
+contains
+
+attributes(host) subroutine inicializa_diagnostico_float()
+  ujas_d_min_visto = 1.0e30_r8
+  ujas_d_max_visto = -1.0e30_r8
+  rijp2_min_visto = 1.0e30_4
+  rijp2_max_visto = -1.0e30_4
+  n_wfhe4_no_finito = 0_i8
+end subroutine inicializa_diagnostico_float
+
+! ---- wavefhe4: la interfaz cambia de w1 (type walker) a atom(nhe4) ----
+! El original recibe el walker completo, pero type(walker) tiene
+! componentes ALLOCATABLE (atom, dwf, delta, hb2m, sigma1, sigma2) --
+! un tipo derivado con componentes allocatable no se puede usar como
+! dato device. wavefhe4 solo lee w1%atom(:) y escribe w1%lw%wfhe4, asi
+! que la interfaz se reduce a justo eso: el array de posiciones de
+! entrada, y un escalar de salida.
+attributes(host, device) subroutine wavefhe4(atom, wfhe4)
+  type(vec3), intent (in)  :: atom(nhe4)
+  real(kind=r8), intent (out) :: wfhe4
+  type(vec3) :: rtemp
+  real(kind=r8) :: ujas,rij
+  integer(kind=i4) :: iatom,jatom
+
+  ujas=0.0_r8
+  do iatom=1,nhe4-1
+    do jatom=iatom+1,nhe4
+      rtemp%comp=atom(iatom)%comp-atom(jatom)%comp
+      rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+      ujas=ujas-phe4(1)/mypow(rij,phe4(2))
+      ujas=ujas-phe4(3)*rij
+    enddo
+  enddo
+
+  ujas=min(ujas,umax)
+  ujas=max(ujas,umin)
+
+  wfhe4=myexp(ujas)
+
+end subroutine wavefhe4
+
+! ---- derwavefhe4: apenas cambia -- ya escribia d1wf/d2wf aparte,
+! solo hacia falta sustituir w1%atom(:) por atom(:) ----
+attributes(host, device) subroutine derwavefhe4(atom, d1wf, d2wf)
+  type(vec3), intent (in)  :: atom(nhe4)
+  type(vec3), intent (out)   :: d1wf(nhe4)
+  real(kind=r8), intent (out) :: d2wf(nhe4)
+  type(vec3) :: rtemp
+  integer(kind=i4) :: iatom,jatom
+  real(kind=r8) :: ujasp,ujass,rij
+
+   do iatom=1,nhe4
+     d1wf(iatom)%comp(:)=0.0_r8
+     d2wf(iatom)=0.0_r8
+   enddo
+
+   do iatom=1,nhe4-1
+     do jatom=iatom+1,nhe4
+         rtemp%comp=atom(iatom)%comp-atom(jatom)%comp
+         rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+         ujasp=phe4(1)*phe4(2)/mypow(rij,phe4(2)+1.0_r8)
+         ujass=-(phe4(2)+1)*ujasp/rij
+         ujasp=(ujasp-phe4(3))/rij
+         d1wf(iatom)%comp(:)=d1wf(iatom)%comp(:)+ujasp*rtemp%comp(:)
+         d1wf(jatom)%comp(:)=d1wf(jatom)%comp(:)-ujasp*rtemp%comp(:)
+         d2wf(iatom)=d2wf(iatom)+ujass
+         d2wf(iatom)=d2wf(iatom)+2.0_r8*ujasp
+         d2wf(jatom)=d2wf(jatom)+ujass
+         d2wf(jatom)=d2wf(jatom)+2.0_r8*ujasp
+     enddo
+   enddo
+   do iatom=1,nhe4
+     d2wf(iatom)=d2wf(iatom)+dot_product(d1wf(iatom)%comp,d1wf(iatom)%comp)
+   enddo
+
+ end subroutine derwavefhe4
+
+! ---- v3-cuda-optimizacion/optimizacion-mypow: wavefhe4 + derwavefhe4
+! FUSIONADAS -- las dos recorren los MISMOS pares (iatom,jatom) y
+! calculan el MISMO rij cada una, por separado (wavefhe4 y
+! derwavefhe4 no se tocan, se dejan intactas como referencia). Aqui se
+! calcula rij UNA vez por par, y mypow_log(rij) UNA vez por par (en
+! vez de que mypow lo recalcule por su cuenta en cada una de las 2
+! llamadas -- ver optimizacion-mypow.md). Cada acumulador (ujas,
+! d1wf, d2wf) sigue sumando en el MISMO orden exacto que en las
+! subrutinas originales -- fusionar los bucles no cambia el orden de
+! ninguna suma, solo evita recalcular rij/log(rij). Bit a bit
+! identico a llamar wavefhe4+derwavefhe4 por separado, verificado
+! antes de usarse en derananum. ----
+attributes(host, device) subroutine wavef_derwavefhe4(atom, wfhe4, d1wf, d2wf)
+  type(vec3), intent (in)  :: atom(nhe4)
+  real(kind=r8), intent (out) :: wfhe4
+  type(vec3), intent (out) :: d1wf(nhe4)
+  real(kind=r8), intent (out) :: d2wf(nhe4)
+  type(vec3) :: rtemp
+  real(kind=r8) :: ujas,ujasp,ujass,rij,inv_rij
+  real(kind=r8) :: rij_hi,rij_lo,rijp2,rijp2p1
+  integer(kind=i4) :: iatom,jatom
+
+  do iatom=1,nhe4
+    d1wf(iatom)%comp(:)=0.0_r8
+    d2wf(iatom)=0.0_r8
+  enddo
+
+  ujas=0.0_r8
+  do iatom=1,nhe4-1
+    do jatom=iatom+1,nhe4
+      rtemp%comp=atom(iatom)%comp-atom(jatom)%comp
+      rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+      inv_rij=1.0_r8/rij
+      call mypow_log(rij, rij_hi, rij_lo)
+
+      ! ---- parte de wavefhe4 (valor) ----
+      rijp2=mypow_desde_log(rij_hi,rij_lo,phe4(2))
+      ujas=ujas-phe4(1)/rijp2
+      ujas=ujas-phe4(3)*rij
+
+      ! ---- parte de derwavefhe4 (derivada) ----
+      rijp2p1=mypow_desde_log(rij_hi,rij_lo,phe4(2)+1.0_r8)
+      ujasp=phe4(1)*phe4(2)/rijp2p1
+      ujass=-(phe4(2)+1)*ujasp*inv_rij
+      ujasp=(ujasp-phe4(3))*inv_rij
+      d1wf(iatom)%comp(:)=d1wf(iatom)%comp(:)+ujasp*rtemp%comp(:)
+      d1wf(jatom)%comp(:)=d1wf(jatom)%comp(:)-ujasp*rtemp%comp(:)
+      d2wf(iatom)=d2wf(iatom)+ujass
+      d2wf(iatom)=d2wf(iatom)+2.0_r8*ujasp
+      d2wf(jatom)=d2wf(jatom)+ujass
+      d2wf(jatom)=d2wf(jatom)+2.0_r8*ujasp
+    enddo
+  enddo
+
+  ujas=min(ujas,umax)
+  ujas=max(ujas,umin)
+  wfhe4=myexp(ujas)
+
+  do iatom=1,nhe4
+    d2wf(iatom)=d2wf(iatom)+dot_product(d1wf(iatom)%comp,d1wf(iatom)%comp)
+  enddo
+
+end subroutine wavef_derwavefhe4
+
+! ---- version "mixta" (Opcion 3): log()/exp() POR PAR en float (donde
+! esta la ganancia real -- hardware nativo MUFU.LG2/EX2, ~190 veces por
+! walker), pero la SUMA de ujas y el exp() final en DOUBLE (myexp,
+! bit-exacto, igual que el original) -- ver
+! investigacion-float-vs-double/README.md. NO se lleva a produccion,
+! reconstruccion temporal en /tmp. ----
+attributes(host, device) subroutine wavef_derwavefhe4_float(atom, wfhe4, d1wf, d2wf)
+  type(vec3), intent (in)  :: atom(nhe4)
+  real(kind=r8), intent (out) :: wfhe4
+  type(vec3), intent (out) :: d1wf(nhe4)
+  real(kind=r8), intent (out) :: d2wf(nhe4)
+  type(vec3) :: rtemp
+  real(kind=4) :: ujasp,ujass,rij,inv_rij
+  real(kind=4) :: rij_hi,rijp2,rijp2p1
+  real(kind=4) :: p1,p2,p3
+  real(kind=4) :: dummy4
+  real(kind=r8) :: dummy8
+  real(kind=r8) :: ujas_d
+  integer(kind=i4) :: iatom,jatom
+
+  p1 = real(phe4(1),4); p2 = real(phe4(2),4); p3 = real(phe4(3),4)
+
+  do iatom=1,nhe4
+    d1wf(iatom)%comp(:)=0.0_r8; d2wf(iatom)=0.0_r8
+  enddo
+
+  ujas_d=0.0_r8
+  do iatom=1,nhe4-1
+    do jatom=iatom+1,nhe4
+      rtemp%comp=atom(iatom)%comp-atom(jatom)%comp
+      rij=sqrt(real(dot_product(rtemp%comp,rtemp%comp),4))
+      inv_rij=1.0_4/rij
+      rij_hi=log(rij)                          ! float nativo (MUFU.LG2)
+
+      rijp2=exp(p2*rij_hi)                     ! float nativo (MUFU.EX2)
+      dummy4 = atomicmax(rijp2_max_visto, rijp2)
+      dummy4 = atomicmin(rijp2_min_visto, rijp2)
+      ujas_d=ujas_d-real(p1/rijp2,r8)-real(p3*rij,r8)   ! ACUMULA en double
+
+      rijp2p1=exp((p2+1.0_4)*rij_hi)           ! float nativo (MUFU.EX2)
+      ujasp=p1*p2/rijp2p1
+      ujass=-(p2+1.0_4)*ujasp*inv_rij
+      ujasp=(ujasp-p3)*inv_rij
+      d1wf(iatom)%comp(:)=d1wf(iatom)%comp(:)+real(ujasp*real(rtemp%comp(:),4),r8)
+      d1wf(jatom)%comp(:)=d1wf(jatom)%comp(:)-real(ujasp*real(rtemp%comp(:),4),r8)
+      d2wf(iatom)=d2wf(iatom)+real(ujass,r8)
+      d2wf(iatom)=d2wf(iatom)+real(2.0_4*ujasp,r8)
+      d2wf(jatom)=d2wf(jatom)+real(ujass,r8)
+      d2wf(jatom)=d2wf(jatom)+real(2.0_4*ujasp,r8)
+    enddo
+  enddo
+
+  ! ---- diagnostico: min/max REAL de ujas_d antes del clip (double) ----
+  dummy8 = atomicmax(ujas_d_max_visto, ujas_d)
+  dummy8 = atomicmin(ujas_d_min_visto, ujas_d)
+
+  ujas_d=min(ujas_d,umax)
+  ujas_d=max(ujas_d,umin)
+  wfhe4=myexp(ujas_d)                          ! exp() final en DOUBLE, bit-exacto
+
+  ! ---- diagnostico: wfhe4 ya es double, con el rango completo -- solo
+  ! queda comprobar que nunca sale NaN/Inf (no debería, con el clip
+  ! umax/umin de siempre) ----
+  if (wfhe4 /= wfhe4 .or. abs(wfhe4) > huge(1.0_r8)*0.99_r8) then
+    n_wfhe4_no_finito = n_wfhe4_no_finito + 1_i8
+  endif
+
+  do iatom=1,nhe4
+    d2wf(iatom)=d2wf(iatom)+dot_product(d1wf(iatom)%comp,d1wf(iatom)%comp)
+  enddo
+
+end subroutine wavef_derwavefhe4_float
+
+attributes(host) subroutine lee_diagnostico_float()
+  real(kind=r8) :: uj_min, uj_max
+  real(kind=4) :: rp_min, rp_max
+  integer(kind=i8) :: n_nf
+  uj_min = ujas_d_min_visto; uj_max = ujas_d_max_visto
+  rp_min = rijp2_min_visto; rp_max = rijp2_max_visto
+  n_nf = n_wfhe4_no_finito
+  write(*,'(a)') '================================================================================'
+  write(*,'(a)') 'DIAGNOSTICO DE RANGO -- wavef_derwavefhe4_float (Opcion 3: ujas en double)'
+  write(*,'(a,es16.8)') 'ujas_d MINIMO visto (antes del clip, double): ', uj_min
+  write(*,'(a,es16.8)') 'ujas_d MAXIMO visto (antes del clip, double): ', uj_max
+  write(*,'(a,es16.8)') 'rijp2  MINIMO visto (float, por par):         ', rp_min
+  write(*,'(a,es16.8)') 'rijp2  MAXIMO visto (float, por par):         ', rp_max
+  write(*,'(a,i0)')     'veces que wfhe4 salio NaN/Inf: ', n_nf
+  write(*,'(a)') '================================================================================'
+end subroutine lee_diagnostico_float
+
+! un hilo = un walker = un wfhe4
+attributes(global) subroutine k_wavefhe4(n, atom, wfhe4_out)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in)  :: atom(nhe4,n)
+  real(kind=r8), device, intent (out) :: wfhe4_out(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call wavefhe4(atom(:,i), wfhe4_out(i))
+  endif
+end subroutine k_wavefhe4
+
+! un hilo = un walker = un (d1wf,d2wf) de nhe4 componentes
+attributes(global) subroutine k_derwavefhe4(n, atom, d1wf, d2wf)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in)  :: atom(nhe4,n)
+  type(vec3), device, intent (out) :: d1wf(nhe4,n)
+  real(kind=r8), device, intent (out) :: d2wf(nhe4,n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call derwavefhe4(atom(:,i), d1wf(:,i), d2wf(:,i))
+  endif
+end subroutine k_derwavefhe4
+
+end module der_wavefhe4
+
+

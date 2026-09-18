@@ -1,0 +1,243 @@
+module mwavef_gpu
+ ! Se llama mwavef_gpu y NO mwavef: el original (mwavef.f90) ya define
+ ! "module mwavef", y dos modulos con el mismo nombre en la misma
+ ! compilacion generan el mismo mwavef.mod y chocan -- mismo problema
+ ! de fondo que el de He_dihydrogen/ccuerpo, pero aqui a nivel de
+ ! MODULO en vez de subrutina suelta.
+ use mtipos, only: vec3
+ use mparametros, only: nfermax
+ use der_wavefhe4, only: wavefhe4
+ use der_wavefx, only: wavefx, nhe4, nhe3, ngatom, natom, impureza
+ ! rij**pmix(2): exponente REAL (nu de mezclas, in.mcv), mismo motivo
+ ! que en d_uhex4.cuf/der_wavefx.cuf/der_wavefhe4.cuf. Ver
+ ! docs-kernels/glibc_math.md Parte 4.
+ use glibc_pow_mod, only: mypow_log, mypow_desde_log
+ ! exp(ujas) en wavefm/wavefhe3: mismo riesgo fast/precise (__fd_exp_1
+ ! vs __pd_exp_1) confirmado para acos/pow -- ver docs-kernels/wavef.md.
+ use glibc_exp_mod, only: myexp
+
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! umax/umin: PARAMETER de verdad en el original, igual que en
+ ! der_wavefhe4 -- no hace falta copia device.
+ real(kind=r8), parameter :: umax = 200.0_r8, umin = -200.0_r8
+
+ ! pmix, phe3: variables reales de mparametros.f90 (publicas, sin
+ ! parameter), mismo tratamiento que phe4/pxhe4. nhe3up/nhe3dw: idem,
+ ! las calcula mentradatos.f90 una vez a partir de nhe3 al leer in.mcv.
+ real(kind=r8), device :: pmix(3), phe3(4)
+ integer(kind=i4), device :: nhe3up, nhe3dw
+
+ ! mhe4, mhe3, mx: masas, variables reales de mparametros.f90, hacen
+ ! falta para getcm (el centro de masas que usa wavefhe3).
+ real(kind=r8), device :: mhe4, mhe3, mx
+
+contains
+
+! ---- wavefm: mismo patron que wavefhe4/wavefx (doble bucle simple,
+! sin ningun array local de tamano variable) -- se porta entera pese a
+! que con nhe3=0 (fijo en esta simulacion) el bucle interno "jatom=
+! nhe4+1,ngatom" tiene 0 iteraciones y da siempre wfm=1.0. Mismo
+! criterio que duhe3x/uhe3x en der_wavefx.cuf: el codigo existe y
+! compila igual, la llamada esta ahi en wavef/derananum. ----
+attributes(host, device) subroutine wavefm(atom, wfm)
+  type(vec3), intent (in)  :: atom(ngatom)
+  real(kind=r8), intent (out) :: wfm
+  type(vec3) :: rtemp
+  real(kind=r8) :: ujas, rij
+  real(kind=r8) :: rij_hi, rij_lo
+  integer(kind=i4) :: iatom, jatom
+
+! v3-cuda-optimizacion/optimizacion-mypow: mypow_log/mypow_desde_log
+! por consistencia con el resto del arbol (un solo uso de rij por
+! iteracion aqui, no hay recalculo que evitar) -- este bucle nunca
+! ejecuta ninguna iteracion en esta simulacion (nhe3=0 -> ngatom=nhe4).
+    ujas = 0.0_r8
+    do iatom = 1, nhe4
+      do jatom = nhe4+1, ngatom
+        rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+        rij = sqrt(dot_product(rtemp%comp, rtemp%comp))
+        call mypow_log(rij, rij_hi, rij_lo)
+        ujas = ujas - pmix(1)/mypow_desde_log(rij_hi,rij_lo,pmix(2))
+        ujas = ujas - pmix(3)*rij
+      enddo
+    enddo
+
+    wfm = myexp(ujas)
+
+end subroutine wavefm
+
+! ---- getcm: centro de masas, necesario para wavefhe3. Sin cambios de
+! fondo frente al original salvo recibir atom(natom) suelto en vez de w1. ----
+attributes(host, device) subroutine getcm(atom, rcm)
+  type(vec3), intent (in) :: atom(natom)
+  real(kind=r8), intent (out) :: rcm(3)
+  integer(kind=i4) :: iatom
+
+    rcm = 0.0_r8
+    do iatom = 1, nhe4
+      rcm = rcm + mhe4*atom(iatom)%comp
+    enddo
+    do iatom = nhe4+1, ngatom
+      rcm = rcm + mhe3*atom(iatom)%comp
+    enddo
+    if (impureza) then
+      rcm = rcm + mx*atom(natom)%comp
+      rcm = rcm / (nhe4*mhe4 + nhe3*mhe3 + mx)
+    else
+      rcm = rcm / (nhe4*mhe4 + nhe3*mhe3)
+    endif
+
+end subroutine getcm
+
+! ---- slaterdet, RECORTADA a la unica rama alcanzable en esta
+! simulacion (npart<=1): con nhe3=0 fijo, nhe3up=nhe3dw=0 siempre, y
+! slaterdet(0,...) en el original entra directo por
+! "if(npart.le.1) then slater=1.0; return endif" -- la rama que
+! construye la matriz y llama a det() (determinante NxN de
+! mlineal.f90, con pivotaje parcial y un array local de tamano
+! variable) NUNCA se ejecuta. A diferencia de wavefm/wavefhe3 (que son
+! baratas de portar enteras aunque den un resultado trivial), esa rama
+! es autentico codigo muerto -- mismo estatus que aziz_nuevo/vatomol/
+! azizgen en vpot -- y ademas cara de portar (determinante generico en
+! device). No se porta; se documenta aqui y en docs-kernels/wavef.md.
+! Si nhe3up o nhe3dw superasen 1 algun dia, esta rutina dejaria de ser
+! valida y habria que portar la matriz+det() de verdad. ----
+attributes(host, device) subroutine slaterdet_trivial(npart, slater)
+  integer(kind=i4), intent (in) :: npart
+  real(kind=r8), intent (out) :: slater
+
+    slater = 1.0_r8
+
+end subroutine slaterdet_trivial
+
+! ---- wavefhe3: parte Jastrow (rb + los dos bucles pairwise) portada
+! entera -- misma forma que wavefm, sin numerica complicada. rb(3,n)
+! era un array local de tamano nhe3 (variable en tiempo de ejecucion)
+! en el original: se sustituye por un buffer de tamano fijo
+! 2*nfermax, reutilizando el mismo limite (nfermax=20, PARAMETER real
+! en mparametros.f90) que ya usa slaterdet en el original para su
+! propia matriz. El signoup/signodw del original (bookkeeping de
+! cruces de nodo del determinante) se omite aqui a proposito: con
+! slaterdet recortada a npart<=1 el signo es siempre +1, no aporta
+! nada mientras nhe3up/nhe3dw<=1; si algun dia hiciera falta el
+! determinante completo, habria que recuperarlos tambien. ----
+attributes(host, device) subroutine wavefhe3(atom, wfhe3)
+  type(vec3), intent (in) :: atom(natom)
+  real(kind=r8), intent (out) :: wfhe3
+  type(vec3) :: rtemp
+  real(kind=r8) :: rcm(3)
+  real(kind=r8) :: rb(3, 2*nfermax)
+  real(kind=r8) :: ujas, rij, etaij
+  real(kind=r8) :: slaterup, slaterdw
+  real(kind=r8) :: rij_hi, rij_lo
+  integer(kind=i4) :: iatom, jatom, ihe3, jhe3
+
+    call getcm(atom, rcm)
+
+    do iatom = nhe4+1, ngatom
+      ihe3 = iatom - nhe4
+      rb(:,ihe3) = atom(iatom)%comp - rcm(:)
+    enddo
+
+    ujas = 0.0_r8
+    do iatom = nhe4+1, ngatom-1
+      ihe3 = iatom - nhe4
+      do jatom = iatom+1, ngatom
+        jhe3 = jatom - nhe4
+        rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+        rij = sqrt(dot_product(rtemp%comp, rtemp%comp))
+        call mypow_log(rij, rij_hi, rij_lo)
+        ujas = ujas - phe3(1)/mypow_desde_log(rij_hi,rij_lo,phe3(2))
+        etaij = phe3(4)/(rij*rij*rij)
+        rb(:,ihe3) = rb(:,ihe3) + etaij*rtemp%comp
+        rb(:,jhe3) = rb(:,jhe3) - etaij*rtemp%comp
+      enddo
+    enddo
+
+    do ihe3 = 1, nhe3-1
+      do jhe3 = ihe3+1, nhe3
+        rtemp%comp = rb(:,ihe3) - rb(:,jhe3)
+        ujas = ujas - phe3(3)*sqrt(dot_product(rtemp%comp, rtemp%comp))
+      enddo
+    enddo
+
+    call slaterdet_trivial(nhe3up, slaterup)
+    call slaterdet_trivial(nhe3dw, slaterdw)
+
+    ujas = min(ujas, umax)
+    ujas = max(ujas, umin)
+
+    wfhe3 = myexp(ujas) * slaterup * slaterdw
+
+end subroutine wavefhe3
+
+! ---- wavef: w1 se descompone en atom(natom)/sprop3, igual que en
+! wavefx/wavefhe4. Devuelve wf como escalar en vez de escribir en
+! w1%lw%wf. atom(1:nhe4) y atom(1:ngatom) son secciones contiguas (el
+! primer tramo de un array 1D), a diferencia de sprop_d(3,:) --
+! validas para pasarlas directas a una llamada device. ----
+attributes(host, device) subroutine wavef(atom, sprop3, wf)
+  type(vec3), intent (in) :: atom(natom)
+  type(vec3), intent (in) :: sprop3
+  real(kind=r8), intent (out) :: wf
+  real(kind=r8) :: wfhe4, wfhe3, wfm, wfx
+
+    call wavefhe4(atom(1:nhe4), wfhe4)
+    call wavefhe3(atom, wfhe3)
+    call wavefm(atom(1:ngatom), wfm)
+    call wavefx(atom, sprop3, wfx)
+
+    wf = wfhe4*wfhe3*wfm*wfx
+
+end subroutine wavef
+
+attributes(global) subroutine k_wavef(n, atom, sprop, wf)
+  ! sprop(3,n) se recibe ENTERO y se indexa dentro del kernel --
+  ! pasar una seccion no contigua como sprop_d(3,:) en la llamada
+  ! (fijando el primer indice) hizo segfault en der_wavefx (ver
+  ! der_wavefx.md); aqui se evita desde el principio.
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in)  :: atom(natom,n), sprop(3,n)
+  real(kind=r8), device, intent (out) :: wf(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call wavef(atom(:,i), sprop(3,i), wf(i))
+  endif
+end subroutine k_wavef
+
+! ---- kernels de prueba directa de wavefhe3/wavefm, al margen de
+! k_wavef -- para poder ejercitarlas con nhe3>0 sin arrastrar sprop/
+! impureza (que solo hacen falta para wavefx). Mismo motivo que
+! k_duhe3x/k_uhe3x en der_wavefx.cuf. ----
+attributes(global) subroutine k_wavefhe3(n, atom, wfhe3_out)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in) :: atom(natom,n)
+  real(kind=r8), device, intent (out) :: wfhe3_out(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call wavefhe3(atom(:,i), wfhe3_out(i))
+  endif
+end subroutine k_wavefhe3
+
+attributes(global) subroutine k_wavefm(n, atom, wfm_out)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in) :: atom(ngatom,n)
+  real(kind=r8), device, intent (out) :: wfm_out(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call wavefm(atom(:,i), wfm_out(i))
+  endif
+end subroutine k_wavefm
+
+end module mwavef_gpu
+
+

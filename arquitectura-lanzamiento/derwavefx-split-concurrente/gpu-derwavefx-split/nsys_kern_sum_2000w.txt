@@ -1,0 +1,22 @@
+Generating SQLite file nsys_derwavefxsplit_2000w.sqlite from nsys_derwavefxsplit_2000w.nsys-rep
+Processing [nsys_derwavefxsplit_2000w.sqlite] with [/opt/nvidia/hpc_sdk/Linux_x86_64/24.1/profilers/Nsight_Systems/host-linux-x64/reports/cuda_gpu_kern_sum.py]... 
+
+ ** CUDA GPU Kernel Summary (cuda_gpu_kern_sum):
+
+ Time (%)  Total Time (ns)  Instances  Avg (ns)   Med (ns)   Min (ns)  Max (ns)  StdDev (ns)                    Name                   
+ --------  ---------------  ---------  ---------  ---------  --------  --------  -----------  -----------------------------------------
+     46.6      13982981114       2368  5904975.1  5904755.0   4745424   6756476     288019.9  mdmc2_pipeline_k_vpot_t_                 
+     21.1       6330678680       2368  2673428.5  2639493.5   2271976   3788410     186507.9  mderananum_split_k_derananum_he4_t_      
+     18.2       5451415822       2368  2302118.2  2278920.5   1973387   3030722     158392.0  mderananum_split_k_derananum_derwavefx_t_
+     10.9       3256097486       2368  1375041.2  1374066.0   1240563   1757775      66107.1  mderananum_split_k_derananum_resto_t_    
+      1.7        499973320       1184   422274.8   446043.0    359388    468603      37933.6  mdmc2_pipeline_k_fase_a_                 
+      1.0        297075220       1184   250908.1   263422.0    214494    282174      21125.5  mdmc2_pipeline_k_fase_h_                 
+      0.5        143922902       2368    60778.3    60448.0     46879     74015       4916.9  mderananum_split_k_derananum_join_t_     
+      0.1         22119997       1184    18682.4    18720.0     16863     23519        661.1  mdmc2_pipeline_k_fase_d_                 
+      0.0          3585955       1184     3028.7     3040.0      2848      3840         91.4  mdmc2_pipeline_k_fase_g_                 
+      0.0          2582787       1184     2181.4     2176.0      1952      2911         73.3  mdmc2_pipeline_k_fase_f_                 
+      0.0          2014448       1184     1701.4     1696.0      1503      2110         82.4  mdmc2_pipeline_k_fase_c_                 
+      0.0           555527        540     1028.8      960.0       896      1600        129.6  __pgi_dev_cumemset_16n                   
+      0.0           199616        192     1039.7     1024.0       991      1600         82.4  __pgi_dev_cumemset_8n                    
+      0.0           145470          1   145470.0   145470.0    145470    145470          0.0  mrandgpu_k_split_seeds_                  
+

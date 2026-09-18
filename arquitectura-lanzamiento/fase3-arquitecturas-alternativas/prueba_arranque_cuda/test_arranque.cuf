@@ -1,0 +1,42 @@
+! test_arranque.cuf
+!
+! Verifica la hipotesis "el coste de ~270ms es arranque generico de
+! CUDA (carga del modulo/contexto), no algo especifico de
+! sincroniza_globales_gpu/etrial": si es arranque generico, la PRIMERA
+! llamada a CUALQUIER cosa que toque la GPU deberia ser lenta, y TODAS
+! las siguientes (sea cual sea su contenido) deberian ser rapidas.
+!
+! Se cronometran, por separado: una asignacion escalar host->device
+! trivial (equivalente a sincroniza_etrial_gpu) repetida 10 veces
+! seguidas, ANTES de tocar la GPU con nada mas.
+
+module mtest_arranque
+ use cudafor
+ implicit none
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ real(kind=r8), device :: escalar_d
+contains
+end module mtest_arranque
+
+program test_arranque
+ use mtest_arranque
+ use cudafor
+ implicit none
+ integer, parameter :: i8t = selected_int_kind(15)
+ integer(kind=i8t) :: c0, c1, tasa
+ real(kind=r8) :: escalar_h, dt
+ integer :: i
+
+  call system_clock(count_rate=tasa)
+  escalar_h = 1.234_r8
+
+  write(*,*) '10 asignaciones host->device escalares seguidas, cada una cronometrada:'
+  do i=1,10
+    call system_clock(c0)
+    escalar_d = escalar_h + real(i,r8)
+    call system_clock(c1)
+    dt = real(c1-c0,r8)/real(tasa,r8)
+    write(*,'(a,i2,a,f12.6,a)') '  llamada ', i, ': ', dt*1000.0_r8, ' ms'
+  enddo
+
+end program test_arranque

@@ -1,0 +1,51 @@
+# Copias aisladas de experimentos (mismo patron que /tmp, pero creadas
+# dentro del repo por error) -- ya resumidas con sus resultados en su
+# .md correspondiente (split-he-dihidrogen.md).
+v2-cuda-integracion/split-*-tmp/
+v2-cuda-integracion/split-prod-migracion/
+
+# Informes de perfilado brutos -- grandes, regenerables volviendo a
+# correr ncu/nsys.
+Test-tiempo-ncu/
+*.ncu-rep
+*.nsys-rep
+*.sqlite
+ncu_*.log
+ncu_*.csv
+run_*.log
+n1_*.log
+n1_*.log
+nsys_*.log
+nsys_*_stdout.log
+*.bak
+*.cubin
+# Artefactos de compilacion (nvfortran/gfortran): se regeneran con los
+# scripts de compilacion ya documentados en cada carpeta -- no se versionan.
+*.mod
+*.o
+
+# Binarios (test_<kernel>, driver_<kernel>, qmccluster*, diag, sin
+# extension) -- se mantienen los fuentes correspondientes (.cuf/.f90).
+test_*
+!test_*.cuf
+!test_*.f90
+driver_*
+!driver_*.f90
+qmccluster*
+!qmccluster*.f90
+diag
+!diag.cuf
+
+# Perfiles binarios de ncu/nsys: pesan varios MB y se regeneran
+# relanzando el comando de perfilado ya documentado en cada .md.
+*.ncu-rep
+*.nsys-rep
+*.sqlite
+
+# Configuraciones .HH: se regeneran en cada corrida excepto la
+# referencia maestra que arranca la simulacion desde cero.
+*.HH
+!conf.20.00.HH
+
+__pycache__/
+*.pyc

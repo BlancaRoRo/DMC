@@ -1,0 +1,664 @@
+! dmc2_pipeline.cuf
+!
+! Opcion 1 (docs-kernels/arquitectura-streams-kin-pot.md Parte 12-13):
+! reparto de dmc2 en 7 fases lanzadas por separado desde el host
+! (msteps.f90, subrutina nueva pasodmc_gpu_pipeline), con las dos
+! llamadas a hpsi sustituidas por un CUDA Graph en horquilla
+! (k_derananum_t + k_vpot_t en paralelo). NO toca dmc2.cuf/hpsi_mod.cuf
+! originales -- viven aparte, como referencia de correccion (igual que
+! opcion=4 se dejo intacta al anadir opcion=5).
+!
+! Diseno (opcion B acordada con el usuario): todos los arrays se
+! dimensionan al MAXIMO posible (2*nwalkers, el mismo limite que ya usa
+! wsim en msteps.f90), no al nwpaso real de cada paso (que varia por la
+! reparticion de la poblacion) -- asi el grafo se construye UNA VEZ y
+! se reutiliza siempre con cudaGraphLaunch. "nw_actual" es una variable
+! device (no un argumento "value") que cada kernel lee en tiempo de
+! ejecucion para saber cuantos hilos de los 2*nwalkers lanzados son
+! walkers "de verdad" este paso -- eso es lo que permite que el MISMO
+! grafo capturado sirva pese a que el numero real de walkers cambie
+! paso a paso (un "value" quedaria fijo en el valor de captura).
+!
+! Los 2 puntos de "return" condicional de dmc2.cuf (wftest<ratio,
+! lineas 115 y 136) se convierten en una bandera "activo(n)" que las
+! fases D/G consultan -- ver arquitectura-streams-kin-pot.md, la
+! discusion de por que esto no es divergencia cara (rama vacia, no una
+! segunda fisica completa) y por que en la practica deberia disparar
+! poco (dtau esta ajustado para que sea raro).
+!
+! Fase E recalcula derananum/vpot para TODOS los walkers, incluidos
+! los ya inactivos tras la fase C -- trabajo desperdiciado pero
+! inofensivo (sus resultados se descartan via activo=.false. en la
+! fase F), a cambio de mantener el grafo con topologia fija (sin
+! compactacion dependiente de datos, que rompería la reutilizacion del
+! grafo).
+!
+! Solo las fases que llaman a derananum/vpot/rota necesitan copiar sus
+! datos a un array local contiguo ("libreta", igual que en k_dmc2) --
+! esas subrutinas exigen un array natom-contiguo (o de 3, para
+! rota/sprop), y una seccion como atom(i,:) de un array (nmax,natom) NO
+! es contigua (el walker es la dimension rapida, Parte 3).
+
+module mdmc2_pipeline
+ use cudafor
+ use mtipos, only: vec3
+ use mrota, only: rota
+ use mrandgpu, only: gauss3_gpu, rand1_gpu
+ use der_wavefx, only: natom
+ use mderananum, only: rotamol, derananum
+ use mvpot, only: vpot
+ use mdmc2, only: ratio, ncmtras, dtau, etrial
+ use mcuda_globals, only: nhe4, ngatom, impureza
+ use d_uhex4, only: impurmol
+ use mccuerpo, only: ccuerpo
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: i8 = selected_int_kind(15)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! ---- Fase H (v3-cuda-optimizacion/fase3): constantes del histograma,
+ ! MISMOS valores que mdensidades.f90 (son parametros fijos del
+ ! histograma, no de in.mcv -- replicados aqui porque son privados en
+ ! ese modulo; ver prueba_denssumapaso/prueba_denssumapaso.md para la
+ ! verificacion completa antes de escribir este kernel) ----
+ real(kind=r8), private, parameter :: rmax_h=20.0_r8
+ integer(kind=i4), private, parameter :: nhr_h=2000
+ real(kind=r8), private, parameter :: dhr_h=rmax_h/nhr_h
+ real(kind=r8), private, parameter :: cmax_h=6.0_r8
+ integer(kind=i4), private, parameter :: nhc_h=60
+ real(kind=r8), private, parameter :: dhc_h=cmax_h/nhc_h
+ real(kind=r8), private, parameter :: smax_h=6.0_r8
+ integer(kind=i4), private, parameter :: nhs_h=60
+ real(kind=r8), private, parameter :: dhs_h=smax_h/nhs_h
+
+ ! ---- histogramas de device, persistentes (acumulan TODO un bloque de
+ ! pasos DMC, igual que drb44 etc en mdensidades.f90 -- se ponen a cero
+ ! una vez por bloque con resetea_histogramas_gpu, no cada paso) ----
+ real(kind=r8), device, allocatable :: h44_p(:), h33_p(:), h43_p(:)
+ real(kind=r8), device, allocatable :: hi4_p(:), hi3_p(:), hia_p(:)
+ real(kind=r8), device, allocatable :: hbhe4_p(:,:), hbhe3_p(:,:), hbhe_p(:,:)
+ real(kind=r8), device, allocatable :: hybhe4_p(:,:), hybhe3_p(:,:), hybhe_p(:,:)
+
+ ! cuantos de los "nmax" hilos lanzados son walkers reales este paso --
+ ! se actualiza desde el host justo antes de cada cudaGraphLaunch, sin
+ ! reconstruir el grafo (ver cabecera del fichero).
+ integer(kind=i4), device :: nw_actual
+
+ ! ---- arrays persistentes, dimensionados a nmax=2*nwalkers (opcion B
+ ! acordada) -- se asignan UNA VEZ en inicializa_pipeline, se
+ ! reutilizan paso a paso (nunca se declaran locales a un paso, para
+ ! que el grafo capturado siga apuntando a las mismas direcciones de
+ ! memoria en cada cudaGraphLaunch) ----
+ type(vec3), device, allocatable :: atom_p(:,:), sprop_p(:,:), dwf_p(:,:)
+ real(kind=r8), device, allocatable :: hb2m_p(:,:), b_p(:), dphi_p(:,:)
+ ! wfhe4_p/wfhe3_p/wfm_p/wfx_p (v3-cuda-optimizacion/fase2-medicion-mejoras/
+ ! aos-to-soa.md): eliminadas -- derananum las necesita para su propio
+ ! calculo interno pero nada las vuelve a leer despues (ni otro kernel
+ ! del pipeline ni el lado CPU, ver ese documento) -- ahora se quedan
+ ! como variables locales de k_derananum_t, nunca tocan memoria
+ ! persistente ni viajan por H2D/D2H.
+ real(kind=r8), device, allocatable :: wf_p(:)
+ real(kind=r8), device, allocatable :: kin_p(:), eimp_p(:), erot_p(:), pot_p(:), ene_p(:)
+ real(kind=r8), device, allocatable :: eold_p(:), wfold_p(:)
+ integer(kind=i8), device, allocatable :: irn_p(:)
+ integer(kind=i4), device, allocatable :: nsons_p(:)
+ logical, device, allocatable :: activo_p(:)
+
+ integer(kind=i4), save :: nmax_g = 0
+ logical, save :: grafo_listo = .false.
+ integer(kind=cuda_stream_kind), save :: stream_a, stream_b
+ type(cudaEvent), save :: ev_fork1, ev_join1, ev_fork2, ev_join2
+ type(cudaGraph), save :: pipeline_graph
+ type(cudaGraphExec), save :: pipeline_graph_exec
+
+contains
+
+! ---- inicializa_pipeline: asigna los arrays persistentes (una vez,
+! con nmax=2*nwalkers) y captura el grafo completo de las 7 fases,
+! incluidas las 2 horquillas k_derananum_t+k_vpot_t. Se llama una sola
+! vez, la primera vez que se usa pasodmc_gpu_pipeline (mismo patron
+! "if(.not.iniciado)" que ya usa pasodmc_gpu para el reparto de
+! semillas, msteps.f90). ----
+attributes(host) subroutine inicializa_pipeline(nmax)
+  integer(kind=i4), intent(in) :: nmax
+  integer(kind=i4) :: threads, blocks, istat
+
+   if (grafo_listo) return
+   nmax_g = nmax
+
+   ! Sube el heap de malloc de device del valor por defecto (8 MB) a
+   ! 512 MB -- derananum (derananum_mod.cuf:136-148) declara arrays
+   ! locales dimensionados en runtime (d1wfhe4(nhe4), d1wfx(natom),
+   ! etc.), lo que obliga al compilador a reservarlos dinamicamente del
+   ! heap de device en vez de en memoria local del hilo. Con miles de
+   ! hilos concurrentes (a partir de ~3000-3500 walkers en esta GPU),
+   ! el heap por defecto se agota -- "Empty malloc" (confirmado con
+   ! compute-sanitizer) y "unspecified launch failure" en cascada. Ver
+   ! derananum.md Parte 9 para el analisis completo y la alternativa
+   ! (arrays de tamano fijo + recorte, no implementada) que eliminaria
+   ! el uso del heap por completo en vez de solo agrandarlo.
+   istat = cudaDeviceSetLimit(cudaLimitMallocHeapSize, 2048_8*1024_8*1024_8)
+   if (istat .ne. 0) write(*,'(a,i0,a,a)') 'ERROR cudaDeviceSetLimit istat=', istat, ' : ', trim(cudaGetErrorString(istat))
+
+   allocate(atom_p(nmax,natom), sprop_p(nmax,3), dwf_p(nmax,natom))
+   allocate(hb2m_p(nmax,natom), b_p(nmax), dphi_p(nmax,2))
+   allocate(wf_p(nmax))
+   allocate(kin_p(nmax), eimp_p(nmax), erot_p(nmax), pot_p(nmax), ene_p(nmax))
+   allocate(eold_p(nmax), wfold_p(nmax))
+   allocate(irn_p(nmax))
+   allocate(nsons_p(nmax))
+   allocate(activo_p(nmax))
+
+   ! ---- Fase H: histogramas de device, tamano fijo (no dependen de
+   ! nmax) -- se asignan aqui, una vez, igual que el resto ----
+   allocate(h44_p(nhr_h), h33_p(nhr_h), h43_p(nhr_h))
+   allocate(hi4_p(nhr_h), hi3_p(nhr_h), hia_p(nhr_h))
+   allocate(hbhe4_p(-nhc_h:nhc_h,nhs_h), hbhe3_p(-nhc_h:nhc_h,nhs_h), hbhe_p(-nhc_h:nhc_h,nhs_h))
+   allocate(hybhe4_p(-nhc_h:nhc_h,-nhs_h:nhs_h), hybhe3_p(-nhc_h:nhc_h,-nhs_h:nhs_h), hybhe_p(-nhc_h:nhc_h,-nhs_h:nhs_h))
+   call resetea_histogramas_gpu
+
+   istat = cudaStreamCreateWithFlags(stream_a, cudaStreamNonBlocking)
+   istat = cudaStreamCreateWithFlags(stream_b, cudaStreamNonBlocking)
+   istat = cudaEventCreateWithFlags(ev_fork1, cudaEventDisableTiming)
+   istat = cudaEventCreateWithFlags(ev_join1, cudaEventDisableTiming)
+   istat = cudaEventCreateWithFlags(ev_fork2, cudaEventDisableTiming)
+   istat = cudaEventCreateWithFlags(ev_join2, cudaEventDisableTiming)
+
+   threads = 32
+   blocks = (nmax + threads - 1) / threads
+
+   istat = cudaStreamBeginCapture(stream_a, cudaStreamCaptureModeGlobal)
+
+   call k_fase_a<<<blocks,threads,0,stream_a>>>(nmax, atom_p, sprop_p, hb2m_p, b_p, &
+                  dwf_p, dphi_p, wf_p, ene_p, eold_p, wfold_p, irn_p, nsons_p)
+
+   ! horquilla 1 (fase B = 1a hpsi): k_derananum_t + k_vpot_t en paralelo
+   istat = cudaEventRecord(ev_fork1, stream_a)
+   istat = cudaStreamWaitEvent(stream_b, ev_fork1, 0)
+   call k_derananum_t<<<blocks,threads,0,stream_a>>>(nmax, atom_p, sprop_p, hb2m_p, b_p, &
+                  wf_p, kin_p, eimp_p, erot_p, dwf_p, dphi_p)
+   call k_vpot_t<<<blocks,threads,0,stream_b>>>(nmax, atom_p, sprop_p, pot_p)
+   istat = cudaEventRecord(ev_join1, stream_b)
+   istat = cudaStreamWaitEvent(stream_a, ev_join1, 0)
+
+   call k_fase_c<<<blocks,threads,0,stream_a>>>(nmax, wf_p, wfold_p, kin_p, pot_p, ene_p, activo_p)
+
+   call k_fase_d<<<blocks,threads,0,stream_a>>>(nmax, atom_p, sprop_p, hb2m_p, b_p, &
+                  dwf_p, dphi_p, activo_p)
+
+   ! horquilla 2 (fase E = 2a hpsi): k_derananum_t + k_vpot_t en paralelo otra vez
+   istat = cudaEventRecord(ev_fork2, stream_a)
+   istat = cudaStreamWaitEvent(stream_b, ev_fork2, 0)
+   call k_derananum_t<<<blocks,threads,0,stream_a>>>(nmax, atom_p, sprop_p, hb2m_p, b_p, &
+                  wf_p, kin_p, eimp_p, erot_p, dwf_p, dphi_p)
+   call k_vpot_t<<<blocks,threads,0,stream_b>>>(nmax, atom_p, sprop_p, pot_p)
+   istat = cudaEventRecord(ev_join2, stream_b)
+   istat = cudaStreamWaitEvent(stream_a, ev_join2, 0)
+
+   call k_fase_f<<<blocks,threads,0,stream_a>>>(nmax, wf_p, wfold_p, kin_p, pot_p, ene_p, activo_p)
+
+   call k_fase_g<<<blocks,threads,0,stream_a>>>(nmax, eold_p, ene_p, irn_p, activo_p, nsons_p)
+
+   ! DESACTIVADA para tiempos-metodos-dmc/prueba_reset_histogramas:
+   ! prueba de aislamiento -- ver si el fallo bajo compute-sanitizer
+   ! desaparece sin la Fase H (no se ejecuta, el resto del grafo queda
+   ! identico a antes de anadirla).
+   !call k_fase_h<<<blocks,threads,0,stream_a>>>(nmax, atom_p, sprop_p, nsons_p, &
+   !               h44_p, h33_p, h43_p, hi4_p, hi3_p, hia_p, &
+   !               hbhe4_p, hbhe3_p, hbhe_p, hybhe4_p, hybhe3_p, hybhe_p)
+
+   istat = cudaStreamEndCapture(stream_a, pipeline_graph)
+   istat = cudaGraphInstantiate(pipeline_graph_exec, pipeline_graph, 0_8)
+
+   grafo_listo = .true.
+end subroutine inicializa_pipeline
+
+! ---- lanza_pipeline: actualiza nw_actual (device, NO "value" -- ver
+! cabecera) y relanza el grafo ya construido, sin volver a capturarlo.
+! istat SI se comprueba (antes se descartaba en silencio -- eso hacia
+! que un fallo real dentro del grafo solo se viera mas tarde, en una
+! operacion sin relacion, como establecio derananum.md Parte 9). ----
+attributes(host) subroutine lanza_pipeline(nwpaso_actual)
+  integer(kind=i4), intent(in) :: nwpaso_actual
+  integer(kind=i4) :: istat
+
+   nw_actual = nwpaso_actual
+   istat = cudaGraphLaunch(pipeline_graph_exec, stream_a)
+   if (istat .ne. 0) write(*,'(a,i0,a,a)') 'ERROR cudaGraphLaunch istat=', istat, ' : ', trim(cudaGetErrorString(istat))
+   istat = cudaStreamSynchronize(stream_a)
+   if (istat .ne. 0) write(*,'(a,i0,a,a)') 'ERROR cudaStreamSynchronize istat=', istat, ' : ', trim(cudaGetErrorString(istat))
+end subroutine lanza_pipeline
+
+! ---- Fase H: reset/volcado -- FUERA del grafo capturado (el grafo
+! tiene topologia fija; poner a cero solo debe pasar una vez por
+! BLOQUE, no en cada paso, igual que densceroblo/denssumablo en
+! mdensidades.f90, no en cada llamada a denssumapaso) ----
+attributes(host) subroutine resetea_histogramas_gpu
+   h44_p=0.0_r8; h33_p=0.0_r8; h43_p=0.0_r8
+   hi4_p=0.0_r8; hi3_p=0.0_r8; hia_p=0.0_r8
+   hbhe4_p=0.0_r8; hbhe3_p=0.0_r8; hbhe_p=0.0_r8
+   hybhe4_p=0.0_r8; hybhe3_p=0.0_r8; hybhe_p=0.0_r8
+end subroutine resetea_histogramas_gpu
+
+! ---- vuelca_histogramas_gpu: copia D2H (una vez por bloque, no una
+! vez por paso -- la ganancia de la Fase H viene precisamente de
+! ahorrarse esa copia en cada uno de los npasosblo pasos) y los
+! inyecta en los acumuladores reales de mdensidades.f90 (densputblo_r/
+! _c/_y, ver esa cabecera) para que denssumablo/denssumafin sigan
+! funcionando exactamente igual que siempre, sin saber de donde vino
+! el dato. ----
+attributes(host) subroutine vuelca_histogramas_gpu
+ use mdensidades, only: densputblo_r, densputblo_c, densputblo_y
+  real(kind=r8) :: h44_h(nhr_h), h33_h(nhr_h), h43_h(nhr_h)
+  real(kind=r8) :: hi4_h(nhr_h), hi3_h(nhr_h), hia_h(nhr_h)
+  real(kind=r8) :: hbhe4_h(-nhc_h:nhc_h,nhs_h), hbhe3_h(-nhc_h:nhc_h,nhs_h), hbhe_h(-nhc_h:nhc_h,nhs_h)
+  real(kind=r8) :: hybhe4_h(-nhc_h:nhc_h,-nhs_h:nhs_h), hybhe3_h(-nhc_h:nhc_h,-nhs_h:nhs_h), hybhe_h(-nhc_h:nhc_h,-nhs_h:nhs_h)
+
+   h44_h=h44_p; h33_h=h33_p; h43_h=h43_p
+   hi4_h=hi4_p; hi3_h=hi3_p; hia_h=hia_p
+   hbhe4_h=hbhe4_p; hbhe3_h=hbhe3_p; hbhe_h=hbhe_p
+   hybhe4_h=hybhe4_p; hybhe3_h=hybhe3_p; hybhe_h=hybhe_p
+
+   call densputblo_r(1,h44_h); call densputblo_r(2,h33_h); call densputblo_r(3,h43_h)
+   call densputblo_r(4,hi4_h); call densputblo_r(5,hi3_h); call densputblo_r(6,hia_h)
+   call densputblo_c(7,hbhe4_h); call densputblo_c(8,hbhe3_h); call densputblo_c(9,hbhe_h)
+   call densputblo_y(10,hybhe4_h); call densputblo_y(11,hybhe3_h); call densputblo_y(12,hybhe_h)
+end subroutine vuelca_histogramas_gpu
+
+! =====================================================================
+! ---- Fase A: dmc2.cuf:84-109 -- nsons=0, captura eold/wfold, difusion
+! con arrastre del dwf VIEJO + rotacion, con sorteos gauss3_gpu ----
+! =====================================================================
+attributes(global) subroutine k_fase_a(nmax, atom, sprop, hb2m, b, dwf, dphi, &
+                                        wf, ene, eold, wfold, irn, nsons)
+  integer(kind=i4), value :: nmax
+  type(vec3), device, intent (inout) :: atom(nmax,natom)
+  type(vec3), device, intent (inout) :: sprop(nmax,3)
+  real(kind=r8), device, intent (in) :: hb2m(nmax,natom)
+  real(kind=r8), device, intent (in) :: b(nmax)
+  type(vec3), device, intent (in) :: dwf(nmax,natom)
+  real(kind=r8), device, intent (in) :: dphi(nmax,2)
+  real(kind=r8), device, intent (in) :: wf(nmax), ene(nmax)
+  real(kind=r8), device, intent (out) :: eold(nmax), wfold(nmax)
+  integer(kind=i8), device, intent (inout) :: irn(nmax)
+  integer(kind=i4), device, intent (out) :: nsons(nmax)
+
+  type(vec3) :: rtemp, sprop_l(3)
+  real(kind=r8) :: gvar3(3)
+  real(kind=r8) :: phix1, phiy, phix2
+  real(kind=r8) :: sigma1_l, sigma2_l, sig1rot_l, sig2rot_l, sig1hrot_l, sig2hrot_l
+  integer(kind=i4) :: i, iatom
+  integer(kind=i8) :: irn_l
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= nw_actual) then
+     nsons(i) = 0
+     eold(i) = ene(i)
+     wfold(i) = wf(i)
+     irn_l = irn(i)
+
+     do iatom = 1, ncmtras
+       call gauss3_gpu(irn_l, gvar3)
+       sigma1_l = sqrt(2.0_r8*hb2m(i,iatom)*dtau)
+       sigma2_l = 2.0_r8*hb2m(i,iatom)*dtau
+       rtemp%comp(:) = sigma1_l*gvar3(:)
+       rtemp%comp(:) = rtemp%comp(:) + 0.50_r8*sigma2_l*dwf(i,iatom)%comp(:)
+       atom(i,iatom)%comp(:) = atom(i,iatom)%comp(:) + rtemp%comp(:)
+     enddo
+
+     if (rotamol) then
+       sprop_l(1) = sprop(i,1)
+       sprop_l(2) = sprop(i,2)
+       sprop_l(3) = sprop(i,3)
+
+       call gauss3_gpu(irn_l, gvar3)
+       sig1rot_l  = sqrt(2.0_r8*b(i)*dtau)
+       sig2rot_l  = 2.0_r8*b(i)*dtau
+       sig1hrot_l = sqrt(b(i)*dtau)
+       sig2hrot_l = b(i)*dtau
+       phix1 = sig1hrot_l*gvar3(1) + 0.50_r8*sig2hrot_l*dphi(i,1)
+       phiy  = sig1rot_l *gvar3(2) + 0.50_r8*sig2rot_l *dphi(i,2)
+       phix2 = sig1hrot_l*gvar3(3) + 0.50_r8*sig2hrot_l*dphi(i,1)
+       call rota(1, phix1, sprop_l)
+       call rota(2, phiy,  sprop_l)
+       call rota(1, phix2, sprop_l)
+
+       sprop(i,1) = sprop_l(1)
+       sprop(i,2) = sprop_l(2)
+       sprop(i,3) = sprop_l(3)
+     endif
+
+     irn(i) = irn_l
+   endif
+end subroutine k_fase_a
+
+! =====================================================================
+! ---- k_derananum_t / k_vpot_t: fases B y E (la horquilla del grafo).
+! Version SoA transpuesta (nmax,natom), con "libreta" local -- igual
+! patron que k_dmc2 (dmc2.cuf:176-200), NO las versiones AoS antiguas
+! de derananum_mod.cuf/vpot_mod.cuf (esas reintroducirian el problema
+! de acceso no coalescido de la Parte 3). Se ejecutan para TODOS los
+! walkers activos hasta nw_actual, sin mirar la bandera "activo"
+! (fase E recalcula tambien para los ya inactivos -- ver cabecera). ----
+! =====================================================================
+! wfhe4/wfhe3/wfm/wfx (v3-cuda-optimizacion/fase2-medicion-mejoras/
+! aos-to-soa.md): derananum las necesita para su propio calculo interno
+! (wf=wfhe4*wfhe3*wfm*wfx) pero nada las vuelve a leer despues -- se
+! quedan en variables LOCALES del kernel (wfhe4_l etc.), nunca se
+! escriben a un array persistente ni viajan por H2D/D2H.
+attributes(global) subroutine k_derananum_t(nmax, atom, sprop, hb2m, b, &
+                                             wf, kin, eimp, erot, dwf, dphi)
+  integer(kind=i4), value :: nmax
+  type(vec3), device, intent (inout) :: atom(nmax,natom)
+  type(vec3), device, intent (in) :: sprop(nmax,3)
+  real(kind=r8), device, intent (in) :: hb2m(nmax,natom)
+  real(kind=r8), device, intent (in) :: b(nmax)
+  real(kind=r8), device, intent (out) :: wf(nmax)
+  real(kind=r8), device, intent (out) :: kin(nmax), eimp(nmax), erot(nmax)
+  type(vec3), device, intent (out) :: dwf(nmax,natom)
+  real(kind=r8), device, intent (out) :: dphi(nmax,2)
+
+  type(vec3) :: atom_l(64), dwf_l(64), sprop_l(3)
+  real(kind=r8) :: hb2m_l(64), dphi_l(2)
+  real(kind=r8) :: wfhe4_l, wfhe3_l, wfm_l, wfx_l
+  integer(kind=i4) :: i, iatom
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= nw_actual) then
+     do iatom = 1, natom
+       atom_l(iatom) = atom(i,iatom)
+       hb2m_l(iatom) = hb2m(i,iatom)
+     enddo
+     sprop_l(1) = sprop(i,1)
+     sprop_l(2) = sprop(i,2)
+     sprop_l(3) = sprop(i,3)
+
+     call derananum(atom_l(1:natom), sprop_l, hb2m_l(1:natom), b(i), &
+                     wf(i), wfhe4_l, wfhe3_l, wfm_l, wfx_l, &
+                     kin(i), eimp(i), erot(i), dwf_l(1:natom), dphi_l)
+
+     do iatom = 1, natom
+       dwf(i,iatom) = dwf_l(iatom)
+     enddo
+     dphi(i,1) = dphi_l(1)
+     dphi(i,2) = dphi_l(2)
+   endif
+end subroutine k_derananum_t
+
+attributes(global) subroutine k_vpot_t(nmax, atom, sprop, pot)
+  integer(kind=i4), value :: nmax
+  type(vec3), device, intent (in) :: atom(nmax,natom)
+  type(vec3), device, intent (in) :: sprop(nmax,3)
+  real(kind=r8), device, intent (out) :: pot(nmax)
+
+  type(vec3) :: atom_l(64), sprop_l(3)
+  integer(kind=i4) :: i, iatom
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= nw_actual) then
+     do iatom = 1, natom
+       atom_l(iatom) = atom(i,iatom)
+     enddo
+     sprop_l(1) = sprop(i,1)
+     sprop_l(2) = sprop(i,2)
+     sprop_l(3) = sprop(i,3)
+
+     call vpot(atom_l(1:natom), sprop_l, pot(i))
+   endif
+end subroutine k_vpot_t
+
+! =====================================================================
+! ---- Fase C: dmc2.cuf:114-115 -- wftest tras la 1a hpsi, decide la
+! bandera activo. Tambien combina ene=kin+pot (dmc2.cuf no lo hace
+! explicito porque hpsi() ya devuelve "ene" combinado por dentro --
+! aqui hpsi ya no existe como pieza unica, asi que hace falta un paso
+! que junte kin+pot) ----
+! =====================================================================
+attributes(global) subroutine k_fase_c(nmax, wf, wfold, kin, pot, ene, activo)
+  integer(kind=i4), value :: nmax
+  real(kind=r8), device, intent (in) :: wf(nmax), wfold(nmax), kin(nmax), pot(nmax)
+  real(kind=r8), device, intent (out) :: ene(nmax)
+  logical, device, intent (out) :: activo(nmax)
+  real(kind=r8) :: wftest
+  integer(kind=i4) :: i
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= nw_actual) then
+     ene(i) = kin(i) + pot(i)
+     wftest = (wf(i)/wfold(i))**2
+     activo(i) = (wftest .ge. ratio)
+   endif
+end subroutine k_fase_c
+
+! =====================================================================
+! ---- Fase D: dmc2.cuf:117-130 -- 2o medio paso de arrastre (con el
+! dwf/dphi NUEVOS de la fase B) + rotacion, SIN sorteo nuevo. Solo si
+! activo(i). ----
+! =====================================================================
+attributes(global) subroutine k_fase_d(nmax, atom, sprop, hb2m, b, dwf, dphi, activo)
+  integer(kind=i4), value :: nmax
+  type(vec3), device, intent (inout) :: atom(nmax,natom)
+  type(vec3), device, intent (inout) :: sprop(nmax,3)
+  real(kind=r8), device, intent (in) :: hb2m(nmax,natom)
+  real(kind=r8), device, intent (in) :: b(nmax)
+  type(vec3), device, intent (in) :: dwf(nmax,natom)
+  real(kind=r8), device, intent (in) :: dphi(nmax,2)
+  logical, device, intent (in) :: activo(nmax)
+
+  type(vec3) :: sprop_l(3)
+  real(kind=r8) :: sigma2_l, sig2rot_l, sig2hrot_l
+  real(kind=r8) :: phix1, phiy, phix2
+  integer(kind=i4) :: i, iatom
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= nw_actual) then
+     if (activo(i)) then
+       do iatom = 1, ncmtras
+         sigma2_l = 2.0_r8*hb2m(i,iatom)*dtau
+         atom(i,iatom)%comp(:) = atom(i,iatom)%comp(:) + 0.50_r8*sigma2_l*dwf(i,iatom)%comp(:)
+       enddo
+       if (rotamol) then
+         sprop_l(1) = sprop(i,1)
+         sprop_l(2) = sprop(i,2)
+         sprop_l(3) = sprop(i,3)
+
+         sig2rot_l  = 2.0_r8*b(i)*dtau
+         sig2hrot_l = b(i)*dtau
+         phix1 = 0.50_r8*sig2hrot_l*dphi(i,1)
+         phiy  = 0.50_r8*sig2rot_l *dphi(i,2)
+         phix2 = 0.50_r8*sig2hrot_l*dphi(i,1)
+         call rota(1, phix1, sprop_l)
+         call rota(2, phiy,  sprop_l)
+         call rota(1, phix2, sprop_l)
+
+         sprop(i,1) = sprop_l(1)
+         sprop(i,2) = sprop_l(2)
+         sprop(i,3) = sprop_l(3)
+       endif
+     endif
+   endif
+end subroutine k_fase_d
+
+! =====================================================================
+! ---- Fase F: dmc2.cuf:135-136 -- wftest tras la 2a hpsi, actualiza
+! activo (si ya estaba inactivo, se queda inactivo; si seguia activo,
+! se comprueba el 2o test). Combina ene=kin+pot otra vez (2a hpsi). ----
+! =====================================================================
+attributes(global) subroutine k_fase_f(nmax, wf, wfold, kin, pot, ene, activo)
+  integer(kind=i4), value :: nmax
+  real(kind=r8), device, intent (in) :: wf(nmax), wfold(nmax), kin(nmax), pot(nmax)
+  real(kind=r8), device, intent (out) :: ene(nmax)
+  logical, device, intent (inout) :: activo(nmax)
+  real(kind=r8) :: wftest
+  integer(kind=i4) :: i
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= nw_actual) then
+     ene(i) = kin(i) + pot(i)
+     if (activo(i)) then
+       wftest = (wf(i)/wfold(i))**2
+       activo(i) = (wftest .ge. ratio)
+     endif
+   endif
+end subroutine k_fase_f
+
+! =====================================================================
+! ---- Fase G: dmc2.cuf:138-142 -- sorteo final + nsons. Solo si
+! activo(i) (si no, nsons se queda en 0, puesto en la fase A). ----
+! =====================================================================
+attributes(global) subroutine k_fase_g(nmax, eold, ene, irn, activo, nsons)
+  integer(kind=i4), value :: nmax
+  real(kind=r8), device, intent (in) :: eold(nmax), ene(nmax)
+  integer(kind=i8), device, intent (inout) :: irn(nmax)
+  logical, device, intent (in) :: activo(nmax)
+  integer(kind=i4), device, intent (inout) :: nsons(nmax)
+
+  real(kind=r8) :: gb, rn
+  integer(kind=i8) :: irn_l
+  integer(kind=i4) :: i
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= nw_actual) then
+     if (activo(i)) then
+       gb = exp(-(0.50_r8*(eold(i)+ene(i))-etrial)*dtau)
+       irn_l = irn(i)
+       call rand1_gpu(rn, irn_l)
+       irn(i) = irn_l
+       nsons(i) = int(gb+rn)
+       if (nsons(i) .gt. 10) nsons(i) = 0
+     endif
+   endif
+end subroutine k_fase_g
+
+! =====================================================================
+! ---- Fase H (v3-cuda-optimizacion/fase3): denssumapaso fusionada,
+! mdensidades.f90:102-225 -- misma geometria EXACTA (mismas formulas,
+! mismos indices), pero recorriendo la poblacion pre-reparto y pesando
+! cada incremento por nsons(i) en vez de recorrer copias ya
+! materializadas por el reparto (que en el pipeline pasa en la CPU,
+! DESPUES de esta fase -- ver la cabecera del fichero). Un walker con
+! nsons(i)=0 (muere este paso) no aporta nada, sin ningun caso
+! especial. Verificado contra la denssumapaso real: histogramas de
+! conteo simple (h44 etc, el grueso del coste) bit a bit identicos;
+! angulares (hbhe4 etc, pesan por 1/sin(theta)) correctos a ~1e-14,
+! ruido de redondeo por reordenacion de suma, no un fallo -- ver
+! prueba_denssumapaso/prueba_denssumapaso.md para el analisis completo. ----
+! =====================================================================
+attributes(global) subroutine k_fase_h(nmax, atom, sprop, nsons, &
+                    h44, h33, h43, hi4, hi3, hia, &
+                    hbhe4, hbhe3, hbhe, hybhe4, hybhe3, hybhe)
+  integer(kind=i4), value :: nmax
+  type(vec3), device, intent (in) :: atom(nmax,natom)
+  type(vec3), device, intent (in) :: sprop(nmax,3)
+  integer(kind=i4), device, intent (in) :: nsons(nmax)
+  real(kind=r8), device :: h44(nhr_h), h33(nhr_h), h43(nhr_h)
+  real(kind=r8), device :: hi4(nhr_h), hi3(nhr_h), hia(nhr_h)
+  real(kind=r8), device :: hbhe4(-nhc_h:nhc_h,nhs_h), hbhe3(-nhc_h:nhc_h,nhs_h), hbhe(-nhc_h:nhc_h,nhs_h)
+  real(kind=r8), device :: hybhe4(-nhc_h:nhc_h,-nhs_h:nhs_h), hybhe3(-nhc_h:nhc_h,-nhs_h:nhs_h), hybhe(-nhc_h:nhc_h,-nhs_h:nhs_h)
+
+  type(vec3) :: atom_l(64), sprop_l(3), rtemp
+  real(kind=r8) :: rhe(3*64)
+  real(kind=r8) :: rij, cth, sth, dnor, cval, sval, w, dummy
+  integer(kind=i4) :: i, iatom, jatom, izatom, ihr, ihc, ihs
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= nw_actual) then
+     if (nsons(i) > 0) then
+       w = real(nsons(i), r8)
+
+       do iatom = 1, natom
+         atom_l(iatom) = atom(i,iatom)
+       enddo
+       sprop_l(1) = sprop(i,1); sprop_l(2) = sprop(i,2); sprop_l(3) = sprop(i,3)
+
+       do iatom=1,nhe4-1
+         do jatom=iatom+1,nhe4
+           rtemp%comp = atom_l(iatom)%comp - atom_l(jatom)%comp
+           rij = sqrt(dot_product(rtemp%comp,rtemp%comp))
+           ihr = int(rij/dhr_h)+1; ihr = min(ihr,nhr_h)
+           dummy = atomicadd(h44(ihr), w)
+         enddo
+       enddo
+
+       do iatom=nhe4+1,ngatom
+         do jatom=iatom+1,ngatom
+           rtemp%comp = atom_l(iatom)%comp - atom_l(jatom)%comp
+           rij = sqrt(dot_product(rtemp%comp,rtemp%comp))
+           ihr = int(rij/dhr_h)+1; ihr = min(ihr,nhr_h)
+           dummy = atomicadd(h33(ihr), w)
+         enddo
+       enddo
+
+       do iatom=1,nhe4
+         do jatom=nhe4+1,ngatom
+           rtemp%comp = atom_l(iatom)%comp - atom_l(jatom)%comp
+           rij = sqrt(dot_product(rtemp%comp,rtemp%comp))
+           ihr = int(rij/dhr_h)+1; ihr = min(ihr,nhr_h)
+           dummy = atomicadd(h43(ihr), w)
+         enddo
+       enddo
+
+       if (impureza) then
+         if (impurmol) then
+           dnor = sqrt(dot_product(sprop_l(3)%comp, sprop_l(3)%comp))
+           call ccuerpo(atom_l(1:natom), sprop_l, rhe(1:3*ngatom))
+           izatom = 3
+         endif
+
+         do iatom=1,nhe4
+           rtemp%comp = atom_l(iatom)%comp - atom_l(natom)%comp
+           rij = sqrt(dot_product(rtemp%comp,rtemp%comp))
+           ihr = int(rij/dhr_h)+1; ihr = min(ihr,nhr_h)
+           dummy = atomicadd(hi4(ihr), w)
+           dummy = atomicadd(hia(ihr), w)
+           if (impurmol) then
+             cval = dot_product(rtemp%comp, sprop_l(3)%comp)/dnor
+             cth = cval/rij; sth = sqrt(1.0_r8-cth**2); sval = rij*sth
+             if (cval.gt.0.0_r8) then
+               ihc = int(cval/dhc_h)+1; ihc = min(ihc,nhc_h)
+             else
+               ihc = int(cval/dhc_h)-1; ihc = max(ihc,-nhc_h)
+             endif
+             ihs = int(sval/dhs_h)+1; ihs = min(ihs,nhs_h)
+             dummy = atomicadd(hbhe4(ihc,ihs), w/sth)
+             dummy = atomicadd(hbhe(ihc,ihs), w/sth)
+             if (rhe(izatom-1).lt.0.0_r8) then
+               ihs = int(-sval/dhs_h)-1; ihs = max(ihs,-nhs_h)
+             endif
+             dummy = atomicadd(hybhe4(ihc,ihs), w/sth)
+             dummy = atomicadd(hybhe(ihc,ihs), w/sth)
+             izatom = izatom+3
+           endif
+         enddo
+
+         do iatom=nhe4+1,ngatom
+           rtemp%comp = atom_l(iatom)%comp - atom_l(natom)%comp
+           rij = sqrt(dot_product(rtemp%comp,rtemp%comp))
+           ihr = int(rij/dhr_h)+1; ihr = min(ihr,nhr_h)
+           dummy = atomicadd(hi3(ihr), w)
+           dummy = atomicadd(hia(ihr), w)
+           if (impurmol) then
+             cval = dot_product(rtemp%comp, sprop_l(3)%comp)/dnor
+             cth = cval/rij; sth = sqrt(1.0_r8-cth**2); sval = rij*sth
+             if (cval.gt.0.0_r8) then
+               ihc = int(cval/dhc_h)+1; ihc = min(ihc,nhc_h)
+             else
+               ihc = int(cval/dhc_h)-1; ihc = max(ihc,-nhc_h)
+             endif
+             ihs = int(sval/dhs_h)+1; ihs = min(ihs,nhs_h)
+             dummy = atomicadd(hbhe3(ihc,ihs), w/sth)
+             dummy = atomicadd(hbhe(ihc,ihs), w/sth)
+             if (rhe(izatom-1).lt.0.0_r8) then
+               ihs = int(-sval/dhs_h)-1; ihs = max(ihs,-nhs_h)
+             endif
+             dummy = atomicadd(hybhe3(ihc,ihs), w/sth)
+             dummy = atomicadd(hybhe(ihc,ihs), w/sth)
+             izatom = izatom+3
+           endif
+         enddo
+       endif
+     endif
+   endif
+end subroutine k_fase_h
+
+end module mdmc2_pipeline

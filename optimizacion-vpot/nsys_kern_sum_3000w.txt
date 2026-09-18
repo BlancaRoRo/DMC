@@ -1,0 +1,19 @@
+Generating SQLite file nsys_pipeline_3000w_v2.sqlite from nsys_pipeline_3000w_v2.nsys-rep
+Processing [nsys_pipeline_3000w_v2.sqlite] with [/opt/nvidia/hpc_sdk/Linux_x86_64/24.1/profilers/Nsight_Systems/host-linux-x64/reports/cuda_gpu_kern_sum.py]... 
+
+ ** CUDA GPU Kernel Summary (cuda_gpu_kern_sum):
+
+ Time (%)  Total Time (ns)  Instances    Avg (ns)      Med (ns)     Min (ns)    Max (ns)   StdDev (ns)              Name             
+ --------  ---------------  ---------  ------------  ------------  ----------  ----------  -----------  -----------------------------
+     71,0   68.242.736.586      2.368  28.818.723,0  28.825.696,0  25.105.404  35.243.890    936.146,0  mdmc2_pipeline_k_derananum_t_
+     27,0   26.403.669.349      2.368  11.150.198,0  11.184.411,0   8.932.004  12.819.354    422.619,0  mdmc2_pipeline_k_vpot_t_     
+      0,0      784.014.177      1.184     662.174,0     661.657,0     657.818     849.559      9.526,0  mdmc2_pipeline_k_fase_a_     
+      0,0      459.728.945      1.184     388.284,0     388.091,0     385.660     499.259      4.626,0  mdmc2_pipeline_k_fase_h_     
+      0,0       29.806.347      1.184      25.174,0      25.088,0      23.295      30.591        750,0  mdmc2_pipeline_k_fase_d_     
+      0,0        4.164.514      1.184       3.517,0       3.520,0       3.328       4.607         80,0  mdmc2_pipeline_k_fase_g_     
+      0,0        2.567.213      1.184       2.168,0       2.176,0       1.984       3.007         99,0  mdmc2_pipeline_k_fase_f_     
+      0,0        2.517.722      1.184       2.126,0       2.111,0       1.983       2.911         81,0  mdmc2_pipeline_k_fase_c_     
+      0,0          553.459        540       1.024,0         960,0         896       1.504        125,0  __pgi_dev_cumemset_16n       
+      0,0          234.141          1     234.141,0     234.141,0     234.141     234.141          0,0  mrandgpu_k_split_seeds_      
+      0,0          198.686        192       1.034,0       1.024,0         991       1.600         75,0  __pgi_dev_cumemset_8n        
+

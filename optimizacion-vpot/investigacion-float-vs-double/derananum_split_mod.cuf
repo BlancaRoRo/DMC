@@ -1,0 +1,278 @@
+! derananum_split_mod.cuf
+!
+! v3-cuda-optimizacion/derananum-split-concurrente: PRUEBA -- parte
+! derananum en 3 kernels para poder lanzar en streams concurrentes las
+! 2 partes independientes que hoy se calculan una detras de otra dentro
+! de una sola llamada a derananum() (ver derananum_mod.cuf lineas
+! 164-218):
+!
+!   - "He4" (wavef_derwavefhe4): el bucle de parejas He4-He4, la parte
+!     mas pesada (~190 pares con nhe4=20).
+!   - "resto" (wavefhe3+wavefm+wavefx+derwavefm+derwavefx+derwavefhe3):
+!     todo lo demas -- con nhe3=0, wavefhe3/wavefm/derwavefhe3 son
+!     practicamente gratis (bucles vacios), pero wavefx/derwavefx (la
+!     interaccion impureza-He4, O(nhe4)=20) es un coste real.
+!
+! Ambas partes leen los MISMOS atom/sprop de entrada y no dependen la
+! una de la otra -- solo se combinan al final (wf=wfhe4*wfhe3*wfm*wfx,
+! kin=suma con productos cruzados). Un tercer kernel (k_derananum_join_t)
+! hace esa combinacion final, reproduciendo EXACTAMENTE la logica de
+! derananum() (mismo orden de operaciones, mismo resultado bit a bit).
+!
+! No toca derananum_mod.cuf (que sigue siendo la referencia verificada,
+! usada tal cual por k_derananum_t en el pipeline de produccion) -- esto
+! es una copia aislada para medir si el reparto en streams compensa el
+! coste de pasar los resultados intermedios por memoria global en vez
+! de mantenerlos en registros/pila dentro de una sola llamada.
+
+module mderananum_split
+ use mtipos, only: vec3
+ use der_wavefhe4, only: wavef_derwavefhe4, wavef_derwavefhe4_float
+ use der_wavefx, only: wavefx, derwavefx, nhe4, nhe3, ngatom, natom, impureza
+ use mwavef_gpu, only: wavefhe3, wavefm
+ use mderananum, only: derwavefm, derwavefhe3, rotamol, impurfija
+
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+contains
+
+! ---- parte "He4": un hilo = un walker. Escribe wfhe4/d1wfhe4/d2wfhe4
+! en memoria global persistente (arrays *_s del modulo mdmc2_pipeline,
+! pasados como argumentos) para que el kernel de cierre los recoja.
+! "nw_act" se pasa como argumento device (NO "value") apuntando a la
+! MISMA nw_actual de mdmc2_pipeline.cuf -- evita duplicar la variable
+! (y su propia copia H2D por separado, ver informe de bug) sin crear
+! una dependencia circular de modulos. ----
+attributes(global) subroutine k_derananum_he4_t(nmax, nw_act, atom, wfhe4_s, d1wfhe4_s, d2wfhe4_s)
+  integer(kind=i4), value :: nmax
+  integer(kind=i4), device, intent (in) :: nw_act
+  type(vec3), device, intent (in) :: atom(nmax,natom)
+  real(kind=r8), device, intent (out) :: wfhe4_s(nmax)
+  type(vec3), device, intent (out) :: d1wfhe4_s(nmax,nhe4)
+  real(kind=r8), device, intent (out) :: d2wfhe4_s(nmax,nhe4)
+
+  type(vec3) :: atom_l(64), d1wf_l(64)
+  real(kind=r8) :: d2wf_l(64)
+  real(kind=r8) :: wfhe4_l
+  integer(kind=i4) :: i, iatom
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= nw_act) then
+    do iatom = 1, nhe4
+      atom_l(iatom) = atom(i,iatom)
+    enddo
+
+    call wavef_derwavefhe4(atom_l(1:nhe4), wfhe4_l, d1wf_l(1:nhe4), d2wf_l(1:nhe4))
+
+    wfhe4_s(i) = wfhe4_l
+    do iatom = 1, nhe4
+      d1wfhe4_s(i,iatom) = d1wf_l(iatom)
+      d2wfhe4_s(i,iatom) = d2wf_l(iatom)
+    enddo
+  endif
+end subroutine k_derananum_he4_t
+
+attributes(global) subroutine k_derananum_he4_float_t(nmax, nw_act, atom, wfhe4_s, d1wfhe4_s, d2wfhe4_s)
+  integer(kind=i4), value :: nmax
+  integer(kind=i4), device, intent (in) :: nw_act
+  type(vec3), device, intent (in) :: atom(nmax,natom)
+  real(kind=r8), device, intent (out) :: wfhe4_s(nmax)
+  type(vec3), device, intent (out) :: d1wfhe4_s(nmax,nhe4)
+  real(kind=r8), device, intent (out) :: d2wfhe4_s(nmax,nhe4)
+
+  type(vec3) :: atom_l(64), d1wf_l(64)
+  real(kind=r8) :: d2wf_l(64)
+  real(kind=r8) :: wfhe4_l
+  integer(kind=i4) :: i, iatom
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= nw_act) then
+    do iatom = 1, nhe4
+      atom_l(iatom) = atom(i,iatom)
+    enddo
+
+    call wavef_derwavefhe4_float(atom_l(1:nhe4), wfhe4_l, d1wf_l(1:nhe4), d2wf_l(1:nhe4))
+
+    wfhe4_s(i) = wfhe4_l
+    do iatom = 1, nhe4
+      d1wfhe4_s(i,iatom) = d1wf_l(iatom)
+      d2wfhe4_s(i,iatom) = d2wf_l(iatom)
+    enddo
+  endif
+end subroutine k_derananum_he4_float_t
+
+! ---- parte "resto": wavefhe3+wavefm+wavefx+derwavefm+derwavefx+
+! derwavefhe3, en el MISMO orden que derananum() para que wfhe3 este
+! calculado antes de que derwavefhe3 lo necesite (igual que en el
+! original, linea 165 antes de la linea 193). ----
+attributes(global) subroutine k_derananum_resto_t(nmax, nw_act, atom, sprop, &
+                    wfhe3_s, wfm_s, wfx_s, d1wfm_s, d2wfm_s, &
+                    d1wfx_s, d2wfx_s, d1zwfx_s, d2zwfx_s, d1wfhe3_s, d2wfhe3_s)
+  integer(kind=i4), value :: nmax
+  integer(kind=i4), device, intent (in) :: nw_act
+  type(vec3), device, intent (inout) :: atom(nmax,natom)
+  type(vec3), device, intent (in) :: sprop(nmax,3)
+  real(kind=r8), device, intent (out) :: wfhe3_s(nmax), wfm_s(nmax), wfx_s(nmax)
+  type(vec3), device, intent (out) :: d1wfm_s(nmax,ngatom)
+  real(kind=r8), device, intent (out) :: d2wfm_s(nmax,ngatom)
+  type(vec3), device, intent (out) :: d1wfx_s(nmax,natom)
+  real(kind=r8), device, intent (out) :: d2wfx_s(nmax,natom)
+  real(kind=r8), device, intent (out) :: d1zwfx_s(nmax,2), d2zwfx_s(nmax)
+  type(vec3), device, intent (out) :: d1wfhe3_s(nmax,nhe3)
+  real(kind=r8), device, intent (out) :: d2wfhe3_s(nmax,nhe3)
+
+  type(vec3) :: atom_l(64), sprop_l(3)
+  type(vec3) :: d1wfm_l(64), d1wfx_l(64), d1wfhe3_l(64)
+  real(kind=r8) :: d2wfm_l(64), d2wfx_l(64), d2wfhe3_l(64)
+  real(kind=r8) :: d1zwfx_l(2), d2zwfx_l
+  real(kind=r8) :: wfhe3_l, wfm_l, wfx_l
+  integer(kind=i4) :: i, iatom, ihe3
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= nw_act) then
+    do iatom = 1, natom
+      atom_l(iatom) = atom(i,iatom)
+    enddo
+    sprop_l(1) = sprop(i,1)
+    sprop_l(2) = sprop(i,2)
+    sprop_l(3) = sprop(i,3)
+
+    call wavefhe3(atom_l, wfhe3_l)
+    call wavefm(atom_l(1:ngatom), wfm_l)
+    call wavefx(atom_l, sprop_l(3), wfx_l)
+
+    call derwavefm(atom_l(1:ngatom), d1wfm_l(1:ngatom), d2wfm_l(1:ngatom))
+    call derwavefx(atom_l, sprop_l, d1wfx_l(1:natom), d2wfx_l(1:natom), d1zwfx_l, d2zwfx_l)
+    call derwavefhe3(atom_l, wfhe3_l, d1wfhe3_l(1:nhe3), d2wfhe3_l(1:nhe3))
+
+    wfhe3_s(i) = wfhe3_l
+    wfm_s(i) = wfm_l
+    wfx_s(i) = wfx_l
+    do iatom = 1, ngatom
+      d1wfm_s(i,iatom) = d1wfm_l(iatom)
+      d2wfm_s(i,iatom) = d2wfm_l(iatom)
+    enddo
+    do iatom = 1, natom
+      d1wfx_s(i,iatom) = d1wfx_l(iatom)
+      d2wfx_s(i,iatom) = d2wfx_l(iatom)
+    enddo
+    d1zwfx_s(i,1) = d1zwfx_l(1)
+    d1zwfx_s(i,2) = d1zwfx_l(2)
+    d2zwfx_s(i) = d2zwfx_l
+    do ihe3 = 1, nhe3
+      d1wfhe3_s(i,ihe3) = d1wfhe3_l(ihe3)
+      d2wfhe3_s(i,ihe3) = d2wfhe3_l(ihe3)
+    enddo
+  endif
+end subroutine k_derananum_resto_t
+
+! ---- cierre: reproduce EXACTAMENTE la combinacion final de derananum()
+! (derananum_mod.cuf lineas 168, 181-218) a partir de los resultados
+! intermedios ya escritos en memoria global por los 2 kernels de
+! arriba. Mismo orden de sumas/productos, mismo resultado bit a bit. ----
+attributes(global) subroutine k_derananum_join_t(nmax, nw_act, hb2m, b, &
+                    wfhe4_s, d1wfhe4_s, d2wfhe4_s, &
+                    wfhe3_s, wfm_s, wfx_s, d1wfm_s, d2wfm_s, &
+                    d1wfx_s, d2wfx_s, d1zwfx_s, d2zwfx_s, d1wfhe3_s, d2wfhe3_s, &
+                    wf, kin, eimp, erot, dwf, dphi)
+  integer(kind=i4), value :: nmax
+  integer(kind=i4), device, intent (in) :: nw_act
+  real(kind=r8), device, intent (in) :: hb2m(nmax,natom)
+  real(kind=r8), device, intent (in) :: b(nmax)
+  real(kind=r8), device, intent (in) :: wfhe4_s(nmax)
+  type(vec3), device, intent (in) :: d1wfhe4_s(nmax,nhe4)
+  real(kind=r8), device, intent (in) :: d2wfhe4_s(nmax,nhe4)
+  real(kind=r8), device, intent (in) :: wfhe3_s(nmax), wfm_s(nmax), wfx_s(nmax)
+  type(vec3), device, intent (in) :: d1wfm_s(nmax,ngatom)
+  real(kind=r8), device, intent (in) :: d2wfm_s(nmax,ngatom)
+  type(vec3), device, intent (in) :: d1wfx_s(nmax,natom)
+  real(kind=r8), device, intent (in) :: d2wfx_s(nmax,natom)
+  real(kind=r8), device, intent (in) :: d1zwfx_s(nmax,2), d2zwfx_s(nmax)
+  type(vec3), device, intent (in) :: d1wfhe3_s(nmax,nhe3)
+  real(kind=r8), device, intent (in) :: d2wfhe3_s(nmax,nhe3)
+  real(kind=r8), device, intent (out) :: wf(nmax)
+  real(kind=r8), device, intent (out) :: kin(nmax), eimp(nmax), erot(nmax)
+  type(vec3), device, intent (out) :: dwf(nmax,natom)
+  real(kind=r8), device, intent (out) :: dphi(nmax,2)
+
+  type(vec3) :: d1wfhe4_l(64), d1wfm_l(64), d1wfx_l(64), d1wfhe3_l(64), dwf_l(64)
+  real(kind=r8) :: d2wfhe4_l(64), d2wfm_l(64), d2wfx_l(64), d2wfhe3_l(64), hb2m_l(64)
+  real(kind=r8) :: d1zwfx_l(2)
+  real(kind=r8) :: wf_l, kin_l, eimp_l, erot_l, der2
+  integer(kind=i4) :: i, iatom, ihe3
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= nw_act) then
+    do iatom = 1, nhe4
+      d1wfhe4_l(iatom) = d1wfhe4_s(i,iatom)
+      d2wfhe4_l(iatom) = d2wfhe4_s(i,iatom)
+    enddo
+    do iatom = 1, ngatom
+      d1wfm_l(iatom) = d1wfm_s(i,iatom)
+      d2wfm_l(iatom) = d2wfm_s(i,iatom)
+    enddo
+    do iatom = 1, natom
+      d1wfx_l(iatom) = d1wfx_s(i,iatom)
+      d2wfx_l(iatom) = d2wfx_s(i,iatom)
+      hb2m_l(iatom) = hb2m(i,iatom)
+    enddo
+    do ihe3 = 1, nhe3
+      d1wfhe3_l(ihe3) = d1wfhe3_s(i,ihe3)
+      d2wfhe3_l(ihe3) = d2wfhe3_s(i,ihe3)
+    enddo
+    d1zwfx_l(1) = d1zwfx_s(i,1)
+    d1zwfx_l(2) = d1zwfx_s(i,2)
+
+    wf_l = wfhe4_s(i) * wfhe3_s(i) * wfm_s(i) * wfx_s(i)
+
+    kin_l = 0.0_r8
+    do iatom = 1, nhe4
+      dwf_l(iatom)%comp = d1wfhe4_l(iatom)%comp + d1wfm_l(iatom)%comp + d1wfx_l(iatom)%comp
+      der2 = d2wfhe4_l(iatom) + d2wfm_l(iatom) + d2wfx_l(iatom) &
+ &        + 2.0_r8*dot_product(d1wfhe4_l(iatom)%comp,d1wfm_l(iatom)%comp) &
+ &        + 2.0_r8*dot_product(d1wfhe4_l(iatom)%comp,d1wfx_l(iatom)%comp) &
+ &        + 2.0_r8*dot_product(d1wfm_l(iatom)%comp,d1wfx_l(iatom)%comp)
+      kin_l = kin_l - hb2m_l(iatom)*der2
+    enddo
+
+    do ihe3 = 1, nhe3
+      iatom = nhe4 + ihe3
+      dwf_l(iatom)%comp = d1wfhe3_l(ihe3)%comp + d1wfm_l(iatom)%comp + d1wfx_l(iatom)%comp
+      der2 = d2wfhe3_l(ihe3) + d2wfm_l(iatom) + d2wfx_l(iatom) &
+ &        + 2.0_r8*dot_product(d1wfhe3_l(ihe3)%comp,d1wfm_l(iatom)%comp) &
+ &        + 2.0_r8*dot_product(d1wfhe3_l(ihe3)%comp,d1wfx_l(iatom)%comp) &
+ &        + 2.0_r8*dot_product(d1wfm_l(iatom)%comp,d1wfx_l(iatom)%comp)
+      kin_l = kin_l - hb2m_l(iatom)*der2
+    enddo
+
+    if (.not. impurfija) then
+      dwf_l(natom)%comp = d1wfx_l(natom)%comp
+      kin_l = kin_l - hb2m_l(natom)*d2wfx_l(natom)
+      eimp_l = -hb2m_l(natom)*d2wfx_l(natom)
+    else
+      eimp_l = 0.0_r8
+    endif
+    if (rotamol) then
+      kin_l = kin_l - b(i)*d2zwfx_s(i)
+      erot_l = -b(i)*d2zwfx_s(i)
+    else
+      erot_l = 0.0_r8
+    endif
+
+    wf(i) = wf_l
+    kin(i) = kin_l
+    eimp(i) = eimp_l
+    erot(i) = erot_l
+    do iatom = 1, natom
+      dwf(i,iatom) = dwf_l(iatom)
+    enddo
+    if (rotamol) then
+      dphi(i,1) = d1zwfx_l(1)
+      dphi(i,2) = d1zwfx_l(2)
+    endif
+  endif
+end subroutine k_derananum_join_t
+
+end module mderananum_split

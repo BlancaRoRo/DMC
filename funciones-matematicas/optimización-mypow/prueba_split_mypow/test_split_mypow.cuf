@@ -1,0 +1,168 @@
+! test_split_mypow.cuf
+!
+! Verifica que mypow_desde_log(mypow_log(x), y) da EXACTAMENTE lo mismo
+! que mypow(x,y) (misma aritmetica, solo separada en 2 llamadas), y
+! mide cuanto se ahorra al reutilizar mypow_log(rij) para 2 exponentes
+! distintos (patron real de duhe4x/uhe4x: mismo rij, p2=9.763290 y
+! p4=0.129298, valores reales de in.mcv, l=0 nu/p4 he4) frente a llamar
+! a mypow(rij,p2) y mypow(rij,p4) por separado (codigo actual).
+!
+! Incluye x=1.0 como caso de prueba (caso especial de mypow que
+! devuelve 1.0 sin calcular nada -- se comprueba que la version
+! partida tambien lo reproduce, aunque rij=1.0 no ocurra nunca en la
+! fisica real de este proyecto).
+module mtest_split
+ use cudafor
+ implicit none
+ integer, parameter :: r8 = selected_real_kind(15,9)
+contains
+
+! ---- version device: ANTES (2 llamadas completas a mypow) ----
+attributes(global) subroutine k_antes(n, rij_v, p2, p4, r2, r4)
+ use glibc_pow_mod, only: mypow
+ integer, value :: n
+ real(kind=r8), device, intent(in) :: rij_v(n)
+ real(kind=r8), value :: p2, p4
+ real(kind=r8), device, intent(out) :: r2(n), r4(n)
+ integer :: i
+  i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+  if (i<=n) then
+    r2(i) = mypow(rij_v(i), p2)
+    r4(i) = mypow(rij_v(i), p4)
+  endif
+end subroutine k_antes
+
+! ---- version device: DESPUES (1 log_inline + 2 remates) ----
+attributes(global) subroutine k_despues(n, rij_v, p2, p4, r2, r4)
+ use glibc_pow_mod, only: mypow_log, mypow_desde_log
+ integer, value :: n
+ real(kind=r8), device, intent(in) :: rij_v(n)
+ real(kind=r8), value :: p2, p4
+ real(kind=r8), device, intent(out) :: r2(n), r4(n)
+ integer :: i
+ real(kind=r8) :: hi, lo
+  i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+  if (i<=n) then
+    call mypow_log(rij_v(i), hi, lo)
+    r2(i) = mypow_desde_log(hi, lo, p2)
+    r4(i) = mypow_desde_log(hi, lo, p4)
+  endif
+end subroutine k_despues
+
+end module mtest_split
+
+
+program test_split_mypow
+ use mtest_split
+ use glibc_pow_mod, only: mypow, mypow_log, mypow_desde_log
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: i8t = selected_int_kind(15)
+
+ integer(kind=i4), parameter :: n = 3000   ! como una corrida real de walkers
+ integer(kind=i4), parameter :: nrep = 500
+ real(kind=r8), parameter :: p2 = 9.763290_r8, p4 = 0.129298_r8
+
+ real(kind=r8), allocatable :: rij_h(:)
+ real(kind=r8), allocatable :: r2_antes_h(:), r4_antes_h(:), r2_despues_h(:), r4_despues_h(:)
+ real(kind=r8), device, allocatable :: rij_d(:), r2_d(:), r4_d(:)
+ integer(kind=i4) :: i, threads, blocks
+ real(kind=r8) :: hi, lo, ra, rb
+ logical :: todo_ok
+ integer(kind=i4) :: n_dif
+ integer(kind=i8t) :: c0, c1, tasa
+ real(kind=r8) :: t_antes, t_despues
+
+  allocate(rij_h(n), r2_antes_h(n), r4_antes_h(n), r2_despues_h(n), r4_despues_h(n))
+  allocate(rij_d(n), r2_d(n), r4_d(n))
+
+  do i=1,n
+    rij_h(i) = 0.3_r8 + mod(i,200)*0.03_r8   ! rango fisico realista, 0.3-6.3 A
+  enddo
+  rij_h(1) = 1.0_r8   ! caso especial: x=1
+
+  ! =========================================================
+  ! 1) VERIFICACION bit a bit, en HOST (mas facil de depurar)
+  ! =========================================================
+  todo_ok = .true.
+  n_dif = 0
+  do i=1,n
+    ra = mypow(rij_h(i), p2)
+    call mypow_log(rij_h(i), hi, lo)
+    rb = mypow_desde_log(hi, lo, p2)
+    if (ra /= rb) then
+      n_dif = n_dif + 1
+      if (n_dif <= 5) write(*,'(a,i0,a,f10.6,a,es24.16,a,es24.16)') &
+        'DIFERENCIA (p2) i=', i, ' rij=', rij_h(i), ' mypow=', ra, ' partida=', rb
+      todo_ok = .false.
+    endif
+    ra = mypow(rij_h(i), p4)
+    rb = mypow_desde_log(hi, lo, p4)
+    if (ra /= rb) then
+      n_dif = n_dif + 1
+      if (n_dif <= 5) write(*,'(a,i0,a,f10.6,a,es24.16,a,es24.16)') &
+        'DIFERENCIA (p4) i=', i, ' rij=', rij_h(i), ' mypow=', ra, ' partida=', rb
+      todo_ok = .false.
+    endif
+  enddo
+  if (todo_ok) then
+    write(*,*) 'PASA (host): mypow(x,y) == mypow_desde_log(mypow_log(x),y) en los ', n, ' casos (incluido x=1.0)'
+  else
+    write(*,'(a,i0,a)') 'FALLA (host): ', n_dif, ' diferencias'
+  endif
+
+  ! =========================================================
+  ! 2) VERIFICACION bit a bit, en DEVICE
+  ! =========================================================
+  rij_d = rij_h
+  threads = 256
+  blocks = (n + threads - 1) / threads
+  call k_antes<<<blocks,threads>>>(n, rij_d, p2, p4, r2_d, r4_d)
+  r2_antes_h = r2_d; r4_antes_h = r4_d
+  call k_despues<<<blocks,threads>>>(n, rij_d, p2, p4, r2_d, r4_d)
+  r2_despues_h = r2_d; r4_despues_h = r4_d
+
+  todo_ok = .true.
+  n_dif = 0
+  do i=1,n
+    if (r2_antes_h(i) /= r2_despues_h(i) .or. r4_antes_h(i) /= r4_despues_h(i)) then
+      n_dif = n_dif + 1
+      todo_ok = .false.
+    endif
+  enddo
+  if (todo_ok) then
+    write(*,*) 'PASA (device): mismo resultado bit a bit en los ', n, ' casos'
+  else
+    write(*,'(a,i0,a)') 'FALLA (device): ', n_dif, ' diferencias'
+  endif
+
+  ! =========================================================
+  ! 3) TIEMPO: ANTES (2 mypow completas) vs DESPUES (1 log + 2 remates)
+  ! =========================================================
+  call system_clock(count_rate=tasa)
+  call k_antes<<<blocks,threads>>>(n, rij_d, p2, p4, r2_d, r4_d)   ! calentamiento
+  i = cudaDeviceSynchronize()
+
+  call system_clock(c0)
+  do i=1,nrep
+    call k_antes<<<blocks,threads>>>(n, rij_d, p2, p4, r2_d, r4_d)
+  enddo
+  i = cudaDeviceSynchronize()
+  call system_clock(c1)
+  t_antes = real(c1-c0,r8)/tasa
+
+  call system_clock(c0)
+  do i=1,nrep
+    call k_despues<<<blocks,threads>>>(n, rij_d, p2, p4, r2_d, r4_d)
+  enddo
+  i = cudaDeviceSynchronize()
+  call system_clock(c1)
+  t_despues = real(c1-c0,r8)/tasa
+
+  write(*,'(a,i0,a,i0)') 'n walkers = ', n, ', repeticiones = ', nrep
+  write(*,'(a,f10.4,a,f8.5,a)') 'ANTES   (2x mypow completa):        ', 1000.0_r8*t_antes,   ' ms total, ', 1000.0_r8*t_antes/nrep,   ' ms/rep'
+  write(*,'(a,f10.4,a,f8.5,a)') 'DESPUES (1x log + 2x remate):       ', 1000.0_r8*t_despues, ' ms total, ', 1000.0_r8*t_despues/nrep, ' ms/rep'
+  write(*,'(a,f6.3,a)') 'factor de mejora: ', t_antes/t_despues, 'x'
+
+end program test_split_mypow

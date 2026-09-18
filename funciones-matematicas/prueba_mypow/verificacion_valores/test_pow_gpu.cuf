@@ -1,0 +1,68 @@
+! test_pow_gpu.cuf
+!
+! Compara, para pares (rij,nu) REALES de este proyecto (nu he4=4.725025,
+! nu he4+1=5.725025, l=0 nu he4=9.763290 -- de in.mcv, der_wavefhe4_mod.cuf/
+! d_uhex4_mod.cuf), mypow bit-exacta (glibc_pow.cuf original, sin tocar)
+! contra x**y nativa de nvfortran -- en HOST y en DEVICE por separado
+! (attributes(host,device), podrian no coincidir entre si). La
+! referencia real (gfortran) se calcula aparte, en test_pow_gfortran.f90.
+module mtest_pow_gpu
+ use cudafor
+ implicit none
+ integer, parameter :: r8 = selected_real_kind(15,9)
+contains
+
+attributes(global) subroutine k_pow(rij, nu, r_bitexacta, r_nativa)
+ use glibc_pow_mod, only: mypow
+ real(kind=r8), device, intent(in) :: rij, nu
+ real(kind=r8), device, intent(out) :: r_bitexacta, r_nativa
+
+  r_bitexacta = mypow(rij, nu)
+  r_nativa = rij**nu
+
+end subroutine k_pow
+
+end module mtest_pow_gpu
+
+
+program test_pow_gpu
+ use mtest_pow_gpu
+ use glibc_pow_mod, only: mypow
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+
+ integer(kind=i4), parameter :: nrij = 20
+ integer(kind=i4), parameter :: nnu = 3
+ real(kind=r8) :: nus(nnu) = [4.725025_r8, 5.725025_r8, 9.763290_r8]
+ real(kind=r8) :: rijs(nrij)
+ integer(kind=i4) :: i, j
+
+ real(kind=r8), device :: rij_d, nu_d, r_bitexacta_d, r_nativa_d
+ real(kind=r8) :: r_bitexacta_h, r_nativa_h, r_bitexacta_d_host, r_nativa_d_host
+
+  do i=1,nrij
+    rijs(i) = 0.3_r8 + (i-1)*0.3_r8   ! 0.3, 0.6, ..., 6.0
+  enddo
+
+  write(*,'(a)') 'rij, nu, mypow_host(bit-exacta), x**y_host(nativa), mypow_device(bit-exacta), x**y_device(nativa)'
+  do j=1,nnu
+    do i=1,nrij
+      ! ---- HOST: mypow es attributes(host,device), se puede llamar
+      ! directamente en CPU con el binario nvfortran ----
+      r_bitexacta_h = mypow(rijs(i), nus(j))
+      r_nativa_h = rijs(i)**nus(j)
+
+      ! ---- DEVICE: mismo calculo, dentro de un kernel ----
+      rij_d = rijs(i)
+      nu_d = nus(j)
+      call k_pow<<<1,1>>>(rij_d, nu_d, r_bitexacta_d, r_nativa_d)
+      r_bitexacta_d_host = r_bitexacta_d
+      r_nativa_d_host = r_nativa_d
+
+      write(*,'(f6.2,1x,f10.6,1x,4es24.16)') rijs(i), nus(j), &
+        r_bitexacta_h, r_nativa_h, r_bitexacta_d_host, r_nativa_d_host
+    enddo
+  enddo
+
+end program test_pow_gpu

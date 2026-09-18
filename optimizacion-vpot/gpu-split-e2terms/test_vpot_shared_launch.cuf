@@ -1,0 +1,33 @@
+! v3-cuda-optimizacion/optimizacion-vpot/split-he-dihidrogen: lanza
+! k_vpot_shared_t (e2terms en memoria compartida) y k_vpot_control_t
+! (He_dihydrogen original, sin cambios) 20 veces cada uno sobre
+! atom_p/sprop_p reales (ya inicializados por la corrida real) -- para
+! medir con nsys en el MISMO binario/contexto, sin tocar la corrida real
+! ni el grafo CUDA capturado.
+subroutine lanza_test_vpot_shared()
+  use mdmc2_pipeline, only: atom_p, sprop_p
+  use mvpot_shared, only: k_vpot_shared_t, k_vpot_control_t
+  use mccuerpo, only: natom
+  use cudafor
+  implicit none
+  integer, parameter :: r8 = selected_real_kind(15,9)
+  integer :: nmax, threads, blocks, istat, rep
+  real(kind=r8), device, allocatable :: pot_shared_p(:), pot_control_p(:)
+
+  nmax = size(atom_p, 1)
+  allocate(pot_shared_p(nmax), pot_control_p(nmax))
+  threads = 32
+  blocks = (nmax + threads - 1) / threads
+
+  do rep = 1, 20
+    call k_vpot_shared_t<<<blocks,threads>>>(nmax, atom_p, sprop_p, pot_shared_p)
+  end do
+  istat = cudaDeviceSynchronize()
+
+  do rep = 1, 20
+    call k_vpot_control_t<<<blocks,threads>>>(nmax, atom_p, sprop_p, pot_control_p)
+  end do
+  istat = cudaDeviceSynchronize()
+
+  deallocate(pot_shared_p, pot_control_p)
+end subroutine lanza_test_vpot_shared

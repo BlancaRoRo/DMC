@@ -1,0 +1,23 @@
+! v3-cuda-optimizacion/optimizacion-vpot/split-he-dihidrogen: lanza
+! k_vpot_shared_t UNA VEZ sobre atom_p/sprop_p reales (ya inicializados
+! por la corrida real de qmccluster_pipeline) -- solo para medir con ncu
+! el efecto de termino_dispersion_shared en el contexto real de vpot, sin
+! tocar la cadena de produccion ni el grafo CUDA capturado.
+subroutine lanza_test_vpot_shared()
+  use mdmc2_pipeline, only: atom_p, sprop_p
+  use mvpot_shared, only: k_vpot_shared_t
+  use mccuerpo, only: natom
+  use cudafor
+  implicit none
+  integer, parameter :: r8 = selected_real_kind(15,9)
+  integer :: nmax, threads, blocks, istat
+  real(kind=r8), device, allocatable :: pot_shared_p(:)
+
+  nmax = size(atom_p, 1)
+  allocate(pot_shared_p(nmax))
+  threads = 32
+  blocks = (nmax + threads - 1) / threads
+  call k_vpot_shared_t<<<blocks,threads>>>(nmax, atom_p, sprop_p, pot_shared_p)
+  istat = cudaDeviceSynchronize()
+  deallocate(pot_shared_p)
+end subroutine lanza_test_vpot_shared

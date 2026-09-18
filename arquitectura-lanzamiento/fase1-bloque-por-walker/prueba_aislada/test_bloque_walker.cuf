@@ -1,0 +1,405 @@
+! test_bloque_walker.cuf
+!
+! Prueba aislada de la hipotesis "1 bloque = 1 walker" (v3-cuda-optimizacion/
+! README.md, Fase 1): compara la arquitectura ACTUAL (_solo, 1 hilo = 1
+! walker completo, recorre los natom atomos en un bucle secuencial dentro
+! del propio hilo) contra una arquitectura nueva (_bloque, 1 BLOQUE = 1
+! walker, cada uno de sus natom hilos calcula la contribucion de UN atomo
+! en paralelo, deja el resultado en memoria compartida, y tras una
+! barrera se reduce a un escalar por walker) -- para el mismo volumen
+! total de trabajo (mismo n walkers, mismo natom, misma formula por
+! atomo), medir con ncu/nsys si _bloque consigue mas bloques resistentes
+! por SM y menos tiempo de kernel que _solo, ANTES de tocar derananum/
+! vpot de verdad.
+!
+! Simplificacion deliberada frente a derananum/vpot reales: aqui la
+! contribucion de cada atomo es INDEPENDIENTE de los demas (no hay
+! bucle de parejas O(n^2) con escritura cruzada atomo-atomo, como SI
+! tiene derwavefm/vpot) -- para poder repartir un atomo por hilo sin
+! condiciones de carrera ni reduccion compleja. Si esta prueba confirma
+! la hipotesis, la version real (con parejas) necesitara ademas resolver
+! ese reparto -- mas trabajo, no cubierto aqui.
+!
+! No se usan mypow/myexp (evita arrastrar las tablas .txt de esos
+! modulos, que no hacen falta para esta prueba de arquitectura pura) --
+! se usan los intrinsecos **/exp() nativos, con carga aritmetica e
+! intermedios comparables, solo para tener un kernel no trivial.
+
+module mtest_bloque_walker
+ use cudafor
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ integer(kind=i4), parameter :: natom_real = 21   ! mismo tamano real del proyecto
+
+contains
+
+! ---- contribucion de UN atomo, independiente de los demas -- 6
+! subterminos con **/exp(), varias variables intermedias (carga
+! aritmetica/registro no trivial, sin depender de mypow/myexp) ----
+attributes(host, device) function contrib_atomo(x, y, z, coef) result(val)
+  real(kind=r8), value :: x, y, z, coef
+  real(kind=r8) :: val, r, t1, t2, t3, t4, t5, t6
+  integer(kind=i4) :: sub
+
+   r = sqrt(x*x+y*y+z*z) + 0.15_r8
+   val = 0.0_r8
+   ! 160 en vez de 6: calibrado para que el coste por walker de este
+   ! kernel de juguete se acerque al de k_derananum_t real (~7 us/walker,
+   ! medido en la Fase 0) -- con 6 el kernel era ~26x mas barato que el
+   ! real, y el coste fijo de syncthreads()/reduccion podia dominar el
+   ! resultado sin decir nada del caso real.
+   do sub = 1, 160
+     t1 = r + real(sub,r8)*0.01_r8
+     t2 = t1**(coef+0.5_r8)
+     t3 = exp(-t1*0.3_r8*coef)
+     t4 = t2*t3
+     t5 = t4/(1.0_r8+t1)
+     t6 = t5 - coef*0.02_r8
+     val = val + t6
+   enddo
+
+end function contrib_atomo
+
+! =====================================================================
+! ---- VERSION ACTUAL (_solo): 1 hilo = 1 walker, bucle secuencial
+! sobre los natom atomos dentro del propio hilo ----
+! =====================================================================
+attributes(global) subroutine k_solo(n, natomv, x, y, z, coef, kin)
+  integer(kind=i4), value :: n, natomv
+  real(kind=r8), device, intent(in) :: x(natomv,n), y(natomv,n), z(natomv,n)
+  real(kind=r8), value :: coef
+  real(kind=r8), device, intent(out) :: kin(n)
+  integer(kind=i4) :: i, iatom
+  real(kind=r8) :: acumulado
+
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) then
+     acumulado = 0.0_r8
+     do iatom=1,natomv
+       acumulado = acumulado + contrib_atomo(x(iatom,i), y(iatom,i), z(iatom,i), coef)
+     enddo
+     kin(i) = acumulado
+   endif
+end subroutine k_solo
+
+! =====================================================================
+! ---- VERSION NUEVA (_bloque): 1 bloque = 1 walker, blockDim=32 (solo
+! los primeros natomv hilos trabajan, el resto de la loseta de 32
+! queda ocioso -- natom=21 no llena un warp completo, coste asumido).
+! Cada hilo activo calcula la contribucion de UN atomo en memoria
+! compartida; barrera; reduccion secuencial simple (hilo 0 suma el
+! array compartido) -- la version mas simple posible de reduccion,
+! suficiente para esta prueba de concepto. ----
+! =====================================================================
+attributes(global) subroutine k_bloque(n, natomv, x, y, z, coef, kin)
+  integer(kind=i4), value :: n, natomv
+  real(kind=r8), device, intent(in) :: x(natomv,n), y(natomv,n), z(natomv,n)
+  real(kind=r8), value :: coef
+  real(kind=r8), device, intent(out) :: kin(n)
+  real(kind=r8), shared :: parcial(32)
+  integer(kind=i4) :: i, tid, iatom
+  real(kind=r8) :: acumulado
+
+   i = blockIdx%x   ! 1 bloque = 1 walker
+   tid = threadIdx%x
+   iatom = tid
+
+   if (i<=n) then
+     if (iatom<=natomv) then
+       parcial(tid) = contrib_atomo(x(iatom,i), y(iatom,i), z(iatom,i), coef)
+     else
+       parcial(tid) = 0.0_r8
+     endif
+
+     call syncthreads()
+
+     if (tid==1) then
+       acumulado = 0.0_r8
+       do iatom=1,natomv
+         acumulado = acumulado + parcial(iatom)
+       enddo
+       kin(i) = acumulado
+     endif
+   endif
+end subroutine k_bloque
+
+! =====================================================================
+! ---- VERSION _bloque_arbol: igual que _bloque, pero la reduccion
+! final es en ARBOL (log2(32)=5 pasos, todos los hilos participan en
+! cada paso, no 1 solo hilo sumando 21 valores en serie) -- para
+! aislar si el coste extra de _bloque venia de esa reduccion serie. ----
+! =====================================================================
+attributes(global) subroutine k_bloque_arbol(n, natomv, x, y, z, coef, kin)
+  integer(kind=i4), value :: n, natomv
+  real(kind=r8), device, intent(in) :: x(natomv,n), y(natomv,n), z(natomv,n)
+  real(kind=r8), value :: coef
+  real(kind=r8), device, intent(out) :: kin(n)
+  real(kind=r8), shared :: parcial(32)
+  integer(kind=i4) :: i, tid, iatom, stride
+
+   i = blockIdx%x   ! 1 bloque = 1 walker
+   tid = threadIdx%x
+   iatom = tid
+
+   if (i<=n) then
+     if (iatom<=natomv) then
+       parcial(tid) = contrib_atomo(x(iatom,i), y(iatom,i), z(iatom,i), coef)
+     else
+       parcial(tid) = 0.0_r8
+     endif
+
+     call syncthreads()
+
+     stride = 16
+     do while (stride >= 1)
+       if (tid <= stride) parcial(tid) = parcial(tid) + parcial(tid+stride)
+       call syncthreads()
+       stride = stride / 2
+     enddo
+
+     if (tid==1) kin(i) = parcial(1)
+   endif
+end subroutine k_bloque_arbol
+
+! =====================================================================
+! ---- VERSION _bloque_grupo: punto intermedio entre _bloque_arbol (1
+! hilo = 1 atomo) y _solo (1 hilo = TODOS los atomos). Cada hilo activo
+! recorre "atomos_por_hilo" atomos SEGUIDOS, acumulando en un registro
+! local (igual que hace _solo internamente, sin tocar memoria
+! compartida en cada atomo) -- solo escribe en memoria compartida UNA
+! vez, su suma parcial ya hecha. Menos hilos activos, pero cada uno
+! escribe/lee memoria compartida una sola vez en vez de una vez por
+! atomo -- menos rondas de la latencia que domina en _bloque_arbol
+! (Fase 1, analisis con ncu --set full). Reduccion final: mismo patron
+! en arbol de 5 pasos, sobre 32 casillas (las no usadas quedan a 0). ----
+attributes(global) subroutine k_bloque_grupo(n, natomv, atomos_por_hilo, x, y, z, coef, kin)
+  integer(kind=i4), value :: n, natomv, atomos_por_hilo
+  real(kind=r8), device, intent(in) :: x(natomv,n), y(natomv,n), z(natomv,n)
+  real(kind=r8), value :: coef
+  real(kind=r8), device, intent(out) :: kin(n)
+  real(kind=r8), shared :: parcial(32)
+  integer(kind=i4) :: i, tid, iatom, ia_ini, ia_fin, stride
+  real(kind=r8) :: acumulado
+
+   i = blockIdx%x   ! 1 bloque = 1 walker
+   tid = threadIdx%x
+   ia_ini = (tid-1)*atomos_por_hilo + 1
+   ia_fin = min(tid*atomos_por_hilo, natomv)
+
+   if (i<=n) then
+     if (ia_ini<=natomv) then
+       acumulado = 0.0_r8
+       do iatom=ia_ini,ia_fin
+         acumulado = acumulado + contrib_atomo(x(iatom,i), y(iatom,i), z(iatom,i), coef)
+       enddo
+       parcial(tid) = acumulado
+     else
+       parcial(tid) = 0.0_r8
+     endif
+
+     call syncthreads()
+
+     stride = 16
+     do while (stride >= 1)
+       if (tid <= stride) parcial(tid) = parcial(tid) + parcial(tid+stride)
+       call syncthreads()
+       stride = stride / 2
+     enddo
+
+     if (tid==1) kin(i) = parcial(1)
+   endif
+end subroutine k_bloque_grupo
+
+! =====================================================================
+! ---- VERSION _multiwalker: familia completa, generaliza _solo (W=32,
+! T=1) y _bloque_arbol (W=1, T=32). W walkers por bloque, T=32/W hilos
+! por walker (bloque fijo de 32 hilos siempre) -- los hilos "sobrantes"
+! de un walker se los queda OTRO walker del mismo bloque, no se
+! desperdician. Reduccion SEGMENTADA: cada grupo contiguo de T hilos se
+! reduce entre si (arbol de log2(T) pasos), no los 32 a la vez. ----
+! walkers_por_bloque: pasado como argumento "value" (no parameter) para
+! poder barrer W en tiempo de ejecucion sin recompilar. ----
+attributes(global) subroutine k_multiwalker(n, natomv, walkers_por_bloque, x, y, z, coef, kin)
+  integer(kind=i4), value :: n, natomv, walkers_por_bloque
+  real(kind=r8), device, intent(in) :: x(natomv,n), y(natomv,n), z(natomv,n)
+  real(kind=r8), value :: coef
+  real(kind=r8), device, intent(out) :: kin(n)
+  real(kind=r8), shared :: parcial(32)
+  integer(kind=i4) :: tid, hilos_por_walker, walker_local, sub, i
+  integer(kind=i4) :: atomos_por_hilo, ia_ini, ia_fin, iatom, stride
+  real(kind=r8) :: acumulado
+
+   tid = threadIdx%x
+   hilos_por_walker = 32 / walkers_por_bloque
+   walker_local = (tid-1) / hilos_por_walker        ! 0..W-1
+   sub = mod(tid-1, hilos_por_walker)                ! 0..T-1
+   i = (blockIdx%x-1)*walkers_por_bloque + walker_local + 1
+
+   atomos_por_hilo = (natomv + hilos_por_walker - 1) / hilos_por_walker
+   ia_ini = sub*atomos_por_hilo + 1
+   ia_fin = min((sub+1)*atomos_por_hilo, natomv)
+
+   if (i<=n) then
+     if (ia_ini<=natomv) then
+       acumulado = 0.0_r8
+       do iatom=ia_ini,ia_fin
+         acumulado = acumulado + contrib_atomo(x(iatom,i), y(iatom,i), z(iatom,i), coef)
+       enddo
+       parcial(tid) = acumulado
+     else
+       parcial(tid) = 0.0_r8
+     endif
+   endif
+
+   call syncthreads()
+
+   ! reduccion segmentada: cada grupo contiguo de "hilos_por_walker"
+   ! hilos se reduce SOLO entre si (stride nunca cruza a otro walker,
+   ! porque hilos_por_walker siempre es potencia de 2 y los grupos
+   ! empiezan en multiplos de hilos_por_walker)
+   stride = hilos_por_walker / 2
+   do while (stride >= 1)
+     if (sub < stride) parcial(tid) = parcial(tid) + parcial(tid+stride)
+     call syncthreads()
+     stride = stride / 2
+   enddo
+
+   if (i<=n .and. sub==0) kin(i) = parcial(tid)
+end subroutine k_multiwalker
+
+end module mtest_bloque_walker
+
+
+program test_bloque_walker
+ use mtest_bloque_walker
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ integer(kind=i4) :: n
+ integer(kind=i4), parameter :: natomv = natom_real
+ real(kind=r8), allocatable :: x_h(:,:), y_h(:,:), z_h(:,:)
+ real(kind=r8), allocatable :: kin_solo(:), kin_bloque(:), kin_arbol(:), kin_grupo(:), kin_multi(:)
+ real(kind=r8), device, allocatable :: x_d(:,:), y_d(:,:), z_d(:,:)
+ real(kind=r8), device, allocatable :: kin_solo_d(:), kin_bloque_d(:), kin_arbol_d(:), kin_grupo_d(:), kin_multi_d(:)
+ real(kind=r8) :: coef_h
+ integer(kind=i4) :: iatom, iw, threads, blocks
+ logical :: todo_ok
+ real(kind=r8) :: seed
+ character(len=32) :: arg
+ integer(kind=i4) :: nrep, irep, atomos_por_hilo, walkers_por_bloque
+
+  n = 1500
+  if (command_argument_count() >= 1) then
+    call get_command_argument(1, arg)
+    read(arg,*) n
+  endif
+  nrep = 1
+  if (command_argument_count() >= 2) then
+    call get_command_argument(2, arg)
+    read(arg,*) nrep
+  endif
+  atomos_por_hilo = 1
+  if (command_argument_count() >= 3) then
+    call get_command_argument(3, arg)
+    read(arg,*) atomos_por_hilo
+  endif
+  walkers_por_bloque = 1
+  if (command_argument_count() >= 4) then
+    call get_command_argument(4, arg)
+    read(arg,*) walkers_por_bloque
+  endif
+
+  allocate(x_h(natomv,n), y_h(natomv,n), z_h(natomv,n))
+  allocate(kin_solo(n), kin_bloque(n), kin_arbol(n), kin_grupo(n), kin_multi(n))
+  allocate(x_d(natomv,n), y_d(natomv,n), z_d(natomv,n))
+  allocate(kin_solo_d(n), kin_bloque_d(n), kin_arbol_d(n), kin_grupo_d(n), kin_multi_d(n))
+
+  do iw=1,n
+    do iatom=1,natomv
+      seed = real(iw,r8)*0.37_r8 + real(iatom,r8)*1.91_r8
+      x_h(iatom,iw) = sin(seed)*3.0_r8
+      y_h(iatom,iw) = cos(seed*1.3_r8)*3.0_r8
+      z_h(iatom,iw) = sin(seed*0.7_r8)*3.0_r8
+    enddo
+  enddo
+  coef_h = 1.7_r8
+
+  x_d = x_h; y_d = y_h; z_d = z_h
+
+  threads = 32
+  blocks = (n + threads - 1) / threads
+  do irep=1,nrep
+    call k_solo<<<blocks,threads>>>(n, natomv, x_d, y_d, z_d, coef_h, kin_solo_d)
+  enddo
+
+  threads = 32
+  blocks = n   ! 1 bloque = 1 walker
+  do irep=1,nrep
+    call k_bloque<<<blocks,threads>>>(n, natomv, x_d, y_d, z_d, coef_h, kin_bloque_d)
+  enddo
+
+  threads = 32
+  blocks = n   ! 1 bloque = 1 walker
+  do irep=1,nrep
+    call k_bloque_arbol<<<blocks,threads>>>(n, natomv, x_d, y_d, z_d, coef_h, kin_arbol_d)
+  enddo
+
+  threads = 32
+  blocks = n   ! 1 bloque = 1 walker
+  do irep=1,nrep
+    call k_bloque_grupo<<<blocks,threads>>>(n, natomv, atomos_por_hilo, x_d, y_d, z_d, coef_h, kin_grupo_d)
+  enddo
+
+  threads = 32
+  blocks = (n + walkers_por_bloque - 1) / walkers_por_bloque
+  do irep=1,nrep
+    call k_multiwalker<<<blocks,threads>>>(n, natomv, walkers_por_bloque, x_d, y_d, z_d, coef_h, kin_multi_d)
+  enddo
+
+  kin_solo = kin_solo_d
+  kin_bloque = kin_bloque_d
+  kin_arbol = kin_arbol_d
+  kin_grupo = kin_grupo_d
+  kin_multi = kin_multi_d
+
+  todo_ok = .true.
+  do iw=1,n
+    if (kin_solo(iw) /= kin_bloque(iw)) then
+      write(*,'(a,i0,a,es24.17,a,es24.17)') 'DIFERENCIA walker ', iw, ': solo=', kin_solo(iw), ' bloque=', kin_bloque(iw)
+      todo_ok = .false.
+    endif
+    ! _arbol suma en orden distinto (reduccion en arbol, no secuencial
+    ! iatom=1..natomv) -- se compara con tolerancia, no bit a bit
+    if (abs(kin_solo(iw)-kin_arbol(iw)) > 1.0e-10_r8*abs(kin_solo(iw))) then
+      write(*,'(a,i0,a,es24.17,a,es24.17)') 'DIFERENCIA (arbol, fuera de tolerancia) walker ', iw, ': solo=', kin_solo(iw), ' arbol=', kin_arbol(iw)
+      todo_ok = .false.
+    endif
+    if (abs(kin_solo(iw)-kin_grupo(iw)) > 1.0e-10_r8*abs(kin_solo(iw))) then
+      write(*,'(a,i0,a,es24.17,a,es24.17)') 'DIFERENCIA (grupo, fuera de tolerancia) walker ', iw, ': solo=', kin_solo(iw), ' grupo=', kin_grupo(iw)
+      todo_ok = .false.
+    endif
+    if (abs(kin_solo(iw)-kin_multi(iw)) > 1.0e-10_r8*abs(kin_solo(iw))) then
+      write(*,'(a,i0,a,es24.17,a,es24.17)') 'DIFERENCIA (multi, fuera de tolerancia) walker ', iw, ': solo=', kin_solo(iw), ' multi=', kin_multi(iw)
+      todo_ok = .false.
+    endif
+  enddo
+
+  write(*,'(a,es24.17)') 'muestra kin_solo(1)   =', kin_solo(1)
+  write(*,'(a,es24.17)') 'muestra kin_bloque(1) =', kin_bloque(1)
+  write(*,'(a,es24.17)') 'muestra kin_arbol(1)  =', kin_arbol(1)
+  write(*,'(a,es24.17)') 'muestra kin_grupo(1)  =', kin_grupo(1)
+  write(*,'(a,es24.17)') 'muestra kin_multi(1)  =', kin_multi(1)
+  write(*,'(a,i0)') 'n walkers = ', n
+  write(*,'(a,i0)') 'atomos_por_hilo = ', atomos_por_hilo
+  write(*,'(a,i0)') 'walkers_por_bloque = ', walkers_por_bloque
+
+  if (todo_ok) then
+    write(*,*) 'PASA: _solo, _bloque, _arbol, _grupo y _multi dan los mismos resultados (con tolerancia numerica donde aplica)'
+  else
+    write(*,*) 'FALLA: hay diferencias, ver arriba'
+  endif
+
+end program test_bloque_walker

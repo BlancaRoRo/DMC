@@ -1,0 +1,322 @@
+! test_multiblock_parejas.cuf
+!
+! Continuacion de test_parejas.cuf. Idea nueva (propuesta por el
+! usuario, distinta de k_multiwalker_parejas_atomic): en vez de meter
+! VARIOS WALKERS en 1 bloque y repartir hilos dentro de ese bloque
+! (tecnica ya probada, negativa con parejas -- ver
+! fase1-bloque-por-walker.md), aqui se reparten las parejas de UN SOLO
+! walker entre VARIOS BLOQUES independientes. Como los bloques no
+! pueden hacer syncthreads() entre si, la combinacion final no puede
+! ser una reduccion en memoria compartida -- se resuelve con 2 piezas:
+!
+!   1) k_multiblock_parejas_atomic: cada bloque calcula su porcion de
+!      parejas de un walker y suma su contribucion con atomicAdd
+!      DIRECTAMENTE a un array en memoria GLOBAL (d1x_g/d1y_g/d1z_g/
+!      d2_g, uno por walker) -- sin array local propio de 84 valores,
+!      sin reduccion aparte, un atomicAdd por resultado parcial (el
+!      hueco que quedaba sin probar en test_parejas.cuf, cuyo unico
+!      atomicAdd era a memoria COMPARTIDA dentro de un bloque, nunca a
+!      memoria global entre bloques).
+!   2) k_cierre_multiblock: kernel SEPARADO, lanzado despues (mismo
+!      stream -> se ordena solo, sin necesitar sincronizacion de grid),
+!      que lee el acumulador global ya completo y calcula kin -- hace
+!      el papel de la barrera que los bloques no pueden hacer entre si.
+!
+! Multiplica el numero de bloques del grid por B (bloques/walker) --
+! ataca directamente el "Waves Per SM=0,33" medido hoy en
+! v4-cuda-pruebas/prueba1-2000w-500pasos-bloque/ (grid demasiado
+! pequeno para llenar la GPU), al contrario que dar mas hilos a un
+! walker (que no cambia el numero de bloques, solo su tamano -- ver
+! v4-cuda-pruebas/prueba2-threads-por-bloque/, resultado negativo).
+!
+! Contrapartida esperada: contencion en el atomicAdd si muchos bloques
+! escriben al mismo atomo a la vez (mas B = mas bloques compitiendo
+! por el mismo destino), y el coste de zerar el acumulador global +
+! lanzar un kernel extra (k_cierre_multiblock) en vez de terminar todo
+! en 1 solo lanzamiento.
+
+module mtest_multiblock
+ use cudafor
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ type :: vec3
+   real(kind=r8) :: comp(3)
+ end type vec3
+
+ integer(kind=i4), parameter :: natom_real = 21
+
+contains
+
+! ---- mismas piezas que test_parejas.cuf, repetidas aqui para que
+! este fichero compile solo, sin depender de mtest_parejas ----
+attributes(host, device) subroutine pieza_parejas(natomv, atom, coef, ia_desde, ia_hasta, d1, d2)
+  integer(kind=i4), value :: natomv, ia_desde, ia_hasta
+  type(vec3), intent(in) :: atom(natomv)
+  real(kind=r8), value :: coef
+  type(vec3), intent(inout) :: d1(natomv)
+  real(kind=r8), intent(inout) :: d2(natomv)
+  type(vec3) :: rtemp
+  integer(kind=i4) :: iatom, jatom
+  real(kind=r8) :: ujasp, ujass, rij
+
+   do iatom=ia_desde,ia_hasta
+     do jatom=iatom+1,natomv
+       rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+       rij = sqrt(dot_product(rtemp%comp,rtemp%comp)) + 0.1_r8
+       ujasp = coef*1.3_r8/(rij**(coef+1.0_r8))
+       ujass = -(coef+1.0_r8)*ujasp/rij
+       ujasp = (ujasp-0.05_r8)/rij
+       d1(iatom)%comp(:) = d1(iatom)%comp(:) + ujasp*rtemp%comp(:)
+       d1(jatom)%comp(:) = d1(jatom)%comp(:) - ujasp*rtemp%comp(:)
+       d2(iatom) = d2(iatom) + ujass + 2.0_r8*ujasp
+       d2(jatom) = d2(jatom) + ujass + 2.0_r8*ujasp
+     enddo
+   enddo
+
+end subroutine pieza_parejas
+
+attributes(host, device) function cierre(natomv, d1, d2) result(kin)
+  integer(kind=i4), value :: natomv
+  type(vec3), intent(in) :: d1(natomv)
+  real(kind=r8), intent(in) :: d2(natomv)
+  real(kind=r8) :: kin
+  integer(kind=i4) :: iatom
+
+   kin = 0.0_r8
+   do iatom=1,natomv
+     kin = kin + d2(iatom) + dot_product(d1(iatom)%comp,d1(iatom)%comp)
+   enddo
+
+end function cierre
+
+! =====================================================================
+! ---- k_solo_parejas: arquitectura actual, referencia (identica a la
+! de test_parejas.cuf) ----
+! =====================================================================
+attributes(global) subroutine k_solo_parejas(n, natomv, x, y, z, coef, kin)
+  integer(kind=i4), value :: n, natomv
+  real(kind=r8), device, intent(in) :: x(natomv,n), y(natomv,n), z(natomv,n)
+  real(kind=r8), value :: coef
+  real(kind=r8), device, intent(out) :: kin(n)
+  type(vec3) :: atom_l(natom_real), d1(natom_real)
+  real(kind=r8) :: d2(natom_real)
+  integer(kind=i4) :: i, iatom
+
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) then
+     do iatom=1,natomv
+       atom_l(iatom)%comp(1) = x(iatom,i)
+       atom_l(iatom)%comp(2) = y(iatom,i)
+       atom_l(iatom)%comp(3) = z(iatom,i)
+       d1(iatom)%comp(:) = 0.0_r8
+       d2(iatom) = 0.0_r8
+     enddo
+     call pieza_parejas(natomv, atom_l(1:natomv), coef, 1, natomv-1, d1(1:natomv), d2(1:natomv))
+     kin(i) = cierre(natomv, d1(1:natomv), d2(1:natomv))
+   endif
+end subroutine k_solo_parejas
+
+! =====================================================================
+! ---- k_zera_global: pone a cero el acumulador global antes de cada
+! lanzamiento de k_multiblock_parejas_atomic ----
+! =====================================================================
+attributes(global) subroutine k_zera_global(n, natomv, d1x_g, d1y_g, d1z_g, d2_g)
+  integer(kind=i4), value :: n, natomv
+  real(kind=r8), device :: d1x_g(natomv,n), d1y_g(natomv,n), d1z_g(natomv,n), d2_g(natomv,n)
+  integer(kind=i4) :: i, iatom
+
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) then
+     do iatom=1,natomv
+       d1x_g(iatom,i) = 0.0_r8
+       d1y_g(iatom,i) = 0.0_r8
+       d1z_g(iatom,i) = 0.0_r8
+       d2_g(iatom,i)  = 0.0_r8
+     enddo
+   endif
+end subroutine k_zera_global
+
+! =====================================================================
+! ---- k_multiblock_parejas_atomic: B bloques por walker (en vez de W
+! walkers por bloque). Bloque fijo de 32 hilos; entre los B bloques de
+! un mismo walker y sus 32 hilos cada uno, se reparten las B*32
+! porciones del bucle exterior (iatom=1..natomv-1). Cada hilo calcula
+! su porcion con pieza_parejas en un array LOCAL pequeno (registros,
+! no memoria compartida) y lo sube con atomicAdd directo al
+! acumulador GLOBAL del walker -- sin reduccion, sin memoria
+! compartida en absoluto. ----
+! =====================================================================
+attributes(global) subroutine k_multiblock_parejas_atomic(n, natomv, bloques_por_walker, x, y, z, coef, &
+                                                            d1x_g, d1y_g, d1z_g, d2_g)
+  integer(kind=i4), value :: n, natomv, bloques_por_walker
+  real(kind=r8), device, intent(in) :: x(natomv,n), y(natomv,n), z(natomv,n)
+  real(kind=r8), value :: coef
+  real(kind=r8), device :: d1x_g(natomv,n), d1y_g(natomv,n), d1z_g(natomv,n), d2_g(natomv,n)
+  type(vec3) :: atom_l(natom_real), d1(natom_real)
+  real(kind=r8) :: d2(natom_real)
+  integer(kind=i4) :: i, b, tid, trabajador, total_trabajadores
+  integer(kind=i4) :: pares_por_trabajador, ia_desde, ia_hasta, iatom
+  real(kind=r8) :: dummy
+
+   ! bloque (blockIdx%x) = (walker-1)*bloques_por_walker + b, b en [0,bloques_por_walker)
+   i = (blockIdx%x-1)/bloques_por_walker + 1
+   b = mod(blockIdx%x-1, bloques_por_walker)
+   tid = threadIdx%x
+
+   total_trabajadores = bloques_por_walker*32
+   trabajador = b*32 + (tid-1)   ! indice 0-based de este hilo entre los B*32 del walker
+
+   pares_por_trabajador = ((natomv-1) + total_trabajadores - 1) / total_trabajadores
+   ia_desde = trabajador*pares_por_trabajador + 1
+   ia_hasta = min((trabajador+1)*pares_por_trabajador, natomv-1)
+
+   if (i<=n) then
+     do iatom=1,natomv
+       atom_l(iatom)%comp(1) = x(iatom,i)
+       atom_l(iatom)%comp(2) = y(iatom,i)
+       atom_l(iatom)%comp(3) = z(iatom,i)
+       d1(iatom)%comp(:) = 0.0_r8
+       d2(iatom) = 0.0_r8
+     enddo
+     if (ia_desde<=ia_hasta .and. ia_desde<=natomv-1) then
+       call pieza_parejas(natomv, atom_l(1:natomv), coef, ia_desde, ia_hasta, d1(1:natomv), d2(1:natomv))
+       ! solo sube a memoria global lo que de verdad calculo -- evita
+       ! atomicAdd(0.0) de sobra en atomos fuera de su rango de parejas
+       do iatom=1,natomv
+         if (d1(iatom)%comp(1)/=0.0_r8 .or. d1(iatom)%comp(2)/=0.0_r8 .or. &
+             d1(iatom)%comp(3)/=0.0_r8 .or. d2(iatom)/=0.0_r8) then
+           dummy = atomicadd(d1x_g(iatom,i), d1(iatom)%comp(1))
+           dummy = atomicadd(d1y_g(iatom,i), d1(iatom)%comp(2))
+           dummy = atomicadd(d1z_g(iatom,i), d1(iatom)%comp(3))
+           dummy = atomicadd(d2_g(iatom,i),  d2(iatom))
+         endif
+       enddo
+     endif
+   endif
+end subroutine k_multiblock_parejas_atomic
+
+! =====================================================================
+! ---- k_cierre_multiblock: kernel aparte, lanzado DESPUES de
+! k_multiblock_parejas_atomic en el mismo stream -- hace de barrera
+! entre bloques (que no pueden syncthreads() entre si). Lee el
+! acumulador global ya completo y calcula kin, igual que cierre(). ----
+! =====================================================================
+attributes(global) subroutine k_cierre_multiblock(n, natomv, d1x_g, d1y_g, d1z_g, d2_g, kin)
+  integer(kind=i4), value :: n, natomv
+  real(kind=r8), device, intent(in) :: d1x_g(natomv,n), d1y_g(natomv,n), d1z_g(natomv,n), d2_g(natomv,n)
+  real(kind=r8), device, intent(out) :: kin(n)
+  type(vec3) :: d1(natom_real)
+  real(kind=r8) :: d2(natom_real)
+  integer(kind=i4) :: i, iatom
+
+   i = (blockIdx%x-1)*blockDim%x + threadIdx%x
+   if (i<=n) then
+     do iatom=1,natomv
+       d1(iatom)%comp(1) = d1x_g(iatom,i)
+       d1(iatom)%comp(2) = d1y_g(iatom,i)
+       d1(iatom)%comp(3) = d1z_g(iatom,i)
+       d2(iatom) = d2_g(iatom,i)
+     enddo
+     kin(i) = cierre(natomv, d1(1:natomv), d2(1:natomv))
+   endif
+end subroutine k_cierre_multiblock
+
+end module mtest_multiblock
+
+
+program test_multiblock_parejas
+ use mtest_multiblock
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ integer(kind=i4) :: n
+ integer(kind=i4), parameter :: natomv = natom_real
+ real(kind=r8), allocatable :: x_h(:,:), y_h(:,:), z_h(:,:)
+ real(kind=r8), allocatable :: kin_solo(:), kin_multi(:)
+ real(kind=r8), device, allocatable :: x_d(:,:), y_d(:,:), z_d(:,:)
+ real(kind=r8), device, allocatable :: kin_solo_d(:), kin_multi_d(:)
+ real(kind=r8), device, allocatable :: d1x_g(:,:), d1y_g(:,:), d1z_g(:,:), d2_g(:,:)
+ real(kind=r8) :: coef_h
+ integer(kind=i4) :: iatom, iw, threads, blocks
+ logical :: todo_ok
+ real(kind=r8) :: seed
+ character(len=32) :: arg
+ integer(kind=i4) :: nrep, irep, bloques_por_walker
+
+  n = 1500
+  if (command_argument_count() >= 1) then
+    call get_command_argument(1, arg)
+    read(arg,*) n
+  endif
+  nrep = 1
+  if (command_argument_count() >= 2) then
+    call get_command_argument(2, arg)
+    read(arg,*) nrep
+  endif
+  bloques_por_walker = 1
+  if (command_argument_count() >= 3) then
+    call get_command_argument(3, arg)
+    read(arg,*) bloques_por_walker
+  endif
+
+  allocate(x_h(natomv,n), y_h(natomv,n), z_h(natomv,n))
+  allocate(kin_solo(n), kin_multi(n))
+  allocate(x_d(natomv,n), y_d(natomv,n), z_d(natomv,n))
+  allocate(kin_solo_d(n), kin_multi_d(n))
+  allocate(d1x_g(natomv,n), d1y_g(natomv,n), d1z_g(natomv,n), d2_g(natomv,n))
+
+  do iw=1,n
+    do iatom=1,natomv
+      seed = real(iw,r8)*0.37_r8 + real(iatom,r8)*1.91_r8
+      x_h(iatom,iw) = sin(seed)*3.0_r8
+      y_h(iatom,iw) = cos(seed*1.3_r8)*3.0_r8
+      z_h(iatom,iw) = sin(seed*0.7_r8)*3.0_r8
+    enddo
+  enddo
+  coef_h = 1.7_r8
+
+  x_d = x_h; y_d = y_h; z_d = z_h
+
+  threads = 32
+  blocks = (n + threads - 1) / threads
+  do irep=1,nrep
+    call k_solo_parejas<<<blocks,threads>>>(n, natomv, x_d, y_d, z_d, coef_h, kin_solo_d)
+  enddo
+
+  blocks = (n + threads - 1) / threads
+  do irep=1,nrep
+    call k_zera_global<<<blocks,threads>>>(n, natomv, d1x_g, d1y_g, d1z_g, d2_g)
+    call k_multiblock_parejas_atomic<<<n*bloques_por_walker,32>>>(n, natomv, bloques_por_walker, &
+                                                                     x_d, y_d, z_d, coef_h, &
+                                                                     d1x_g, d1y_g, d1z_g, d2_g)
+    call k_cierre_multiblock<<<blocks,threads>>>(n, natomv, d1x_g, d1y_g, d1z_g, d2_g, kin_multi_d)
+  enddo
+
+  kin_solo = kin_solo_d
+  kin_multi = kin_multi_d
+
+  todo_ok = .true.
+  do iw=1,n
+    ! suma en orden distinto (atomicAdd, no determinista) -> tolerancia
+    if (abs(kin_solo(iw)-kin_multi(iw)) > 1.0e-9_r8*abs(kin_solo(iw))) then
+      write(*,'(a,i0,a,es24.17,a,es24.17)') 'DIFERENCIA walker ', iw, ': solo=', kin_solo(iw), ' multiblock=', kin_multi(iw)
+      todo_ok = .false.
+    endif
+  enddo
+
+  write(*,'(a,es24.17)') 'muestra kin_solo(1)      =', kin_solo(1)
+  write(*,'(a,es24.17)') 'muestra kin_multiblock(1)=', kin_multi(1)
+  write(*,'(a,i0)') 'n walkers = ', n
+  write(*,'(a,i0)') 'bloques_por_walker = ', bloques_por_walker
+  write(*,'(a,i0)') 'grid total (multiblock) = ', n*bloques_por_walker
+
+  if (todo_ok) then
+    write(*,*) 'PASA: k_solo_parejas y k_multiblock_parejas_atomic dan los mismos resultados (con tolerancia numerica)'
+  else
+    write(*,*) 'FALLA: hay diferencias, ver arriba'
+  endif
+
+end program test_multiblock_parejas

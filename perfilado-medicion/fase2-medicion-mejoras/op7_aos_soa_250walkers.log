@@ -1,0 +1,322 @@
+
+
+
+VALORES DE LAS CONSTANTES EN ESTE CALCULO
+    Constantes fisicas segun CODATA 2010
+velocidad de la luz en m/s                      299792458.0
+radio de Bohr en A                           0.529177210670
+k_Boltzmann en eV/K                        8.6173324000E-05
+hbarra*c en MeV*fm                           197.3269718000
+uma en MeV/c**2                              931.4940610000
+hbar**2/(2m) en uma*K A**2                    24.2543684668
+hbar**2/(2m) en uma* cm-1                     16.8576292014
+1 cm-1 en K                                    1.4387769583
+K en meV                                       0.0861329640
+hbar**2/(2m) en uma*eV A**2                    2.0891006466
+Esquema de ocupacion de los espines
+N de atomos de helio3       0   1   2   3   4   5   6   7   8
+Ocupacion up                0   1   1   2   3   4   4   4   4
+Ocupacion down              0   0   1   1   1   1   2   3   4
+Si hay mas de 8 he3: polarizacion de espin minima
+pi                                              3.141592654
+
+
+
+DATOS DEL SISTEMA
+Energias en meV y distancias en A
+
+
+
+DATOS DEL SISTEMA
+calculo sin interaccion               F
+masa helio 4 en uma            4.002600
+masa helio 3 en uma            3.016040
+numero de atomos de he4              20
+numero de atomos de he3               0
+atomos en la impureza molecular       2
+atomo  1   nombre  H  masa      1.00783
+atomo  2   nombre  H  masa      1.00783
+    distancia en A                 H H    1.05887
+Coordenadas de los atomos en el sistema intrinseco
+ H    0.0000000   0.0000000  -0.5294355
+ H    0.0000000   0.0000000   0.5294355
+ CM en el sistema intrinseco   0.000000
+tipo de potencial X-He                4
+fichero potencial X-He       heh2m.pot
+la impureza se traslada               T
+la impureza no se traslada            F
+la impureza rota                      T
+
+
+
+DATOS MONTE CARLO
+semilla num aleatorios               11
+opcion de calculo                     7
+enermin energia minima                T
+minimiza energia con Metropolis
+delta pasos metropolis he4     0.960000
+delta pasos metropolis he3     1.000000
+delta pasos metropol impureza  0.295000
+delta giros metropol grados   55.700000
+delta giros metropol rad       0.972148
+etrial energia prueba dmc  -631.8000000
+dtau paso de tiempo dmc        0.000100
+bloques de equilibrio                 1
+pasos de descorrelacion              10
+bloques de calculo                   59
+pasos por bloque                     20
+numero de walkers                   250
+pasos para cambiar etrial            10
+
+
+
+DATOS FUNCION DE ONDA
+     << f(r)=exp(-0.5*(b/r)**nu+alfa*r) >> 
+     << eta(r)=bb/r**3) >> 
+b he4, incremento simplex                3.139383  0.100000
+nu he4, incremento simplex               4.725025 -0.400000
+alfa he4, incremento simplex             0.009428 -0.000700
+b he3, incremento simplex                0.000000  0.000000
+nu he3, incremento simplex               1.000000  0.000000
+alfa he3, incremento simplex             1.000000  0.000000
+bb backflow, incremento simplex          0.000000  0.000000
+b mezclas, incremento simplex            0.000000  0.000000
+nu mezclas, incremento simplex           1.000000  0.000000
+alfa mezclas, incremento simplex         0.000000  0.000000
+     << f_l(r)=exp(-0.5*(b_l/r)**nu_l+alfa*r**p4_l-p5_l*ln(r)) >> 
+lmax Legendre impureza-he4                      4
+l=    0  b he4                           1.680309 -0.120000
+l=    0  nu he4                          9.763290  0.800000
+l=    0  alfa he4                        0.643208 -0.050000
+l=    0  p4 he4                          0.129298  0.030000
+l=    0  p5 he4                         13.568705 -0.700000
+l=    1  b he4                           0.000000  0.000000
+l=    1  nu he4                          1.000000  0.000000
+l=    1  alfa he4                        0.000000  0.000000
+l=    1  p4 he4                          0.000000  0.000000
+l=    1  p5 he4                          0.000000  0.000000
+l=    2  b he4                           3.033954 -0.100000
+l=    2  nu he4                          3.155952 -0.150000
+l=    2  alfa he4                        0.004908  0.000500
+l=    2  p4 he4                          0.084248  0.007000
+l=    2  p5 he4                          0.000706 -0.000060
+l=    3  b he4                           0.000000  0.000000
+l=    3  nu he4                          1.000000  0.000000
+l=    3  alfa he4                        0.000000  0.000000
+l=    3  p4 he4                          0.000000  0.000000
+l=    3  p5 he4                          0.000000  0.000000
+l=    4  b he4                           0.732198  0.080000
+l=    4  nu he4                         11.036848 -0.900000
+l=    4  alfa he4                        0.078598  0.008000
+l=    4  p4 he4                          0.096948  0.004000
+l=    4  p5 he4                          0.020823  0.002000
+lmax Legendre impureza-he3                      0
+l=    0  b he3                           0.000000  0.000000
+l=    0  nu he3                          0.000000  0.000000
+l=    0  alfa he3                        1.000000  0.000000
+l=    0  p4 he3                          1.000000  0.000000
+l=    0  p5 he3                          0.000000  0.000000
+
+
+
+numero de constituyentes del sistema           21
+numero de atomos en la gota (he4 y he3)        20
+numero de cm que se trasladan                  21
+hay impureza en la gota                         T
+nombre de la impureza                            HH        
+masa de la impureza en uma               2.015650
+la impureza es una molecula                     T
+momento de inercia molecular             0.564991
+la molecula rota                                T
+la impureza realiza traslacion                  T
+constituyentes del sistema=atomos en la gota+1           21        21
+cm que se trasladan=constituyentes del sistema           21        21
+ 
+hb2/(2*mhe4) en meV A**2       0.521936
+hb2/(2*mhe3) en meV A**2       0.692663
+ 
+hb2/(2*mx) en meV A**2         1.036440
+B=hb2/(2*I) en meV             3.697585
+B=hb2/(2*I) en cm-1           29.837006
+B=hb2/(2*I) en MHz    894490.9400763081
+J, E_J=J*(J+1)*B en meV     1   7.39517
+J, E_J=J*(J+1)*B en meV     2  22.18551
+J, E_J=J*(J+1)*B en meV     3  44.37101
+J, E_J=J*(J+1)*B en meV     4  73.95169
+J, E_J=J*(J+1)*B en meV     5 110.92754
+J, E_J=J*(J+1)*B en meV     6 155.29855
+ 
+Parametros he4:    0.5*(b**nu),nu,alfa      111.31963     4.72502     0.00943
+Parametros he3:    0.5*(b**nu),nu,alfa,bb     0.00000     1.00000     1.00000     0.00000
+Parametros mezcla: 0.5*(b**nu),nu,alfa        0.00000     1.00000     0.00000
+Parametros impureza he4: 0.5*(b**nu),nu,alfa,p4,p5
+l=  0                   79.34319     9.76329     0.64321     0.12930    13.56870
+l=  1                    0.00000     1.00000     0.00000     0.00000     0.00000
+l=  2                   16.60226     3.15595     0.00491     0.08425     0.00071
+l=  3                    0.00000     1.00000     0.00000     0.00000     0.00000
+l=  4                    0.01603    11.03685     0.07860     0.09695     0.02082
+Parametros impureza he3: 0.5*(b**nu),nu,alfa,p4,p5
+l=  0                    0.50000     0.00000     1.00000     1.00000     0.00000
+Leyendo los parametros del potencial H2p-He
+Referencia potencial         He-H2+ Breton et al. Preprint 2023
+
+
+
+                   NOMBRE DEL CALCULO: 20.00.HH        
+
+
+
+DATOS CALCULO EN PARALELO
+procesos en cada maquina (solo PVM)             2
+calculo en serie
+numero de calculos                              1
+ proceso numero            1
+ numero de walkers en este proceso          250
+ semilla para este proceso           98330646220102
+
+
+DATOS DE LAS CONFIGURACIONES INICIALES
+configuraciones segun fichero                   1
+    configuraciones leidas del fichero          1
+    Se usan las configuraciones del fichero
+    en el fichero hay menos configuraciones de las necesarias
+configuraciones que hay que repetir           249
+se eligen aleatoriamente las que se repiten
+se usa esta semilla                      98330646220102
+configuraciones iniciales totales             250
+energia media                               -615.5737694990
+elegimos el walker                            109
+energia del walker                          -615.5737694990
+e poten del walker                         -1078.0865541324
+ *****************************************************
+
+
+
+ *****************************************************
+ Comienza el 15 de Agosto de 2026,  23:16:19.612
+ Calculo en el ordenador: blanca-Victus-by-HP-Gaming-Laptop-15-fb3xxx
+ *****************************************************
+
+
+================================================================================
+                   CALCULO Diffusion Monte Carlo
+================================================================================
+==================Bloques para EQUILIBRIO=======================================
+    Bloque  Blq/Proc   Proceso <E_bloque>       <E_calculo>   <E_growth>   <Poblacion> 
+       1       1       1   -619.72520622   -619.72520622   -621.77994651    249.00
+=====================Bloques de CALCULO=========================================
+    Bloque  Blq/Proc   Proceso <E_bloque>       <E_calculo>   <E_growth>   <Poblacion> 
+       1       1       1   -636.95860782   -636.95860782   -622.31624111    247.10
+       2       2       1   -657.01058323   -646.98459553   -642.53789941    250.88
+       3       3       1   -675.50698323   -656.49205809   -655.12325798    255.83
+       4       4       1   -684.76247642   -663.55966267   -664.74055629    261.00
+       5       5       1   -687.03121469   -668.25397308   -670.69948783    264.95
+       6       6       1   -695.41362377   -672.78058153   -672.34605855    267.33
+       7       7       1   -704.55805498   -677.32022059   -674.95782517    268.87
+       8       8       1   -712.05926923   -681.66260167   -679.87969073    271.02
+       9       9       1   -724.37282100   -686.40818160   -684.57547124    273.87
+      10      10       1   -746.61813200   -692.42917664   -691.39765892    277.18
+      11      11       1   -712.23295022   -694.22951969   -692.87010722    279.38
+      12      12       1   -702.18614833   -694.89257208   -694.73362770    281.10
+      13      13       1   -691.84539996   -694.65817422   -693.78827677    281.69
+      14      14       1   -693.12768565   -694.54885361   -693.22864321    281.50
+      15      15       1   -697.16195973   -694.72306068   -692.38741297    281.53
+      16      16       1   -698.98622636   -694.98950854   -692.95963308    281.45
+      17      17       1   -721.23293628   -696.53323958   -693.27294965    281.51
+      18      18       1   -695.28337411   -696.46380261   -693.14521063    281.62
+      19      19       1   -682.79571022   -695.74442933   -692.45755187    281.47
+      20      20       1   -680.20754720   -694.96758522   -691.76803446    281.37
+      21      21       1   -674.30527805   -693.98366583   -690.72378693    280.84
+      22      22       1   -675.25679719   -693.13244453   -689.52402849    280.30
+      23      23       1   -678.47383445   -692.49511366   -689.42094887    280.03
+      24      24       1   -681.44468930   -692.03467931   -689.84922777    280.13
+      25      25       1   -686.48150109   -691.81255218   -690.26735864    280.33
+      26      26       1   -678.76666638   -691.31078734   -689.74955018    280.30
+      27      27       1   -673.98583192   -690.66912233   -689.40163884    280.14
+      28      28       1   -674.41349955   -690.08856437   -688.72647281    279.86
+      29      29       1   -675.64100078   -689.59037252   -688.73682959    279.72
+      30      30       1   -676.23154964   -689.14507843   -687.68955124    279.45
+      31      31       1   -685.33685550   -689.02223253   -687.84034744    279.29
+      32      32       1   -684.98772020   -688.89615402   -688.11362068    279.31
+      33      33       1   -676.19838022   -688.51137299   -688.26963266    279.43
+      34      34       1   -674.46966220   -688.09838150   -687.47467266    279.37
+      35      35       1   -676.52005378   -687.76757213   -687.58449360    279.27
+      36      36       1   -670.46559383   -687.28696163   -687.14637586    279.16
+      37      37       1   -667.11117939   -686.74167021   -686.63494828    278.94
+      38      38       1   -667.60272260   -686.23801370   -686.55111680    278.71
+      39      39       1   -673.65634744   -685.91540687   -685.80341563    278.53
+      40      40       1   -666.11841421   -685.42048205   -684.90820480    278.26
+      41      41       1   -668.03053390   -684.99633698   -684.53008511    277.87
+      42      42       1   -661.67554260   -684.44107997   -683.92194963    277.64
+      43      43       1   -655.96287856   -683.77879621   -683.05486662    277.20
+      44      44       1   -675.13119504   -683.58225982   -682.62540870    276.90
+      45      45       1   -666.29986731   -683.19820666   -682.74543374    276.78
+      46      46       1   -663.63700643   -682.77296317   -682.19628460    276.66
+      47      47       1   -657.97038096   -682.24524866   -681.76791631    276.43
+      48      48       1   -663.08589635   -681.84609549   -681.22376309    276.19
+      49      49       1   -670.92811159   -681.62327949   -680.58824954    275.88
+      50      50       1   -672.03741934   -681.43156228   -680.11167875    275.62
+      51      51       1   -658.86132974   -680.98900871   -679.49616085    275.32
+      52      52       1   -661.28035761   -680.60999618   -679.27039098    275.08
+      53      53       1   -657.01112007   -680.16473437   -678.95200523    274.88
+      54      54       1   -651.40686726   -679.63218128   -678.61461247    274.78
+      55      55       1   -646.59942565   -679.03158572   -677.88412438    274.52
+      56      56       1   -649.56845380   -678.50545836   -677.42945649    274.24
+      57      57       1   -659.90251015   -678.17909085   -677.07060215    274.00
+      58      58       1   -659.76756710   -677.86165079   -676.69707977    273.78
+      59      59       1   -665.84316734   -677.65794768   -676.52880641    273.60
+Warning: ieee_inexact is signaling
+FORTRAN STOP
+ tiempo total opcion7 (pipeline):      22.6007 s
+================================================================================
+
+
+================================================================================
+         RESULTADOS DEL CALCULO        
+================================================================================
+Resultados en meV
+meV Energia cinetica     =  0.0001000      214.6803436118 +/-       5.21551265
+meV Energia potencial    =  0.0001000     -892.3382912887 +/-       5.21562363
+meV Energia total        =  0.0001000     -677.6579476769 +/-       2.61916301
+meV Energia rotacion     =  0.0001000       54.1976551404 +/-       1.69292371
+meV Energia trasl impur  =  0.0001000       58.6358230414 +/-       2.13121212
+meV Energia growth       =  0.0001000     -676.5288064131 +/-       2.94597274
+meV Poblacion media      =  0.0001000      273.5966101695 +/-       1.50452117
+meV Estadistica          =  0.0001000    5.4719322034E+03 +/-   3.00904235E+01
+================================================================================
+Resultados en K
+K Energia cinetica       =  0.0001000     2492.4295366544 +/-      60.55187713
+K Energia potencial      =  0.0001000   -10360.0091022646 +/-      60.55316555
+K Energia total          =  0.0001000    -7867.5795656103 +/-      30.40836961
+K Energia rotacion       =  0.0001000      629.2324402722 +/-      19.65477126
+K Energia trasl impur    =  0.0001000      680.7593783184 +/-      24.74328084
+K Energia growth         =  0.0001000    -7854.4702842034 +/-      34.20261658
+================================================================================
+Resultados en cm-1
+cm-1 Energia cinetica    =  0.0001000     1732.3251684386 +/-      42.08565948
+cm-1 Energia potencial   =  0.0001000    -7200.5664550087 +/-      42.08655497
+cm-1 Energia total       =  0.0001000    -5468.2412865701 +/-      21.13487392
+cm-1 Energia rotacion    =  0.0001000      437.3384190210 +/-      13.66074925
+cm-1 Energia trasl impur =  0.0001000      473.1514321141 +/-      17.19744029
+cm-1 Energia growth      =  0.0001000    -5459.1298802947 +/-      23.77200745
+================================================================================
+Poblacion media      =   3.176445E+03 +/-  1.74674E+01
+Estadistica          =   6.352890E+04 +/-  3.49349E+02
+
+
+
+ *****************************************************
+ Finaliza el 15 de Agosto de 2026,  23:16:42.268
+ Calculo en el ordenador: blanca-Victus-by-HP-Gaming-Laptop-15-fb3xxx
+ *****************************************************
+
+
+ *****************************************************
+ tiempo de CPU en s    22.65572    
+ tiempo de CPU en m   0.3775954    
+ tiempo de CPU en h   6.2932568E-03
+ tiempo de CPU en d   2.6221902E-04
+ *****************************************************
+energia final de las configuraciones        -615.5737694990
+ numero de walkers que tengo finales          250
+ numero de walkers de partida en la simulacion          250

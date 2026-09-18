@@ -1,0 +1,41 @@
+! v3-cuda-optimizacion/optimizacion-vpot/split-he-dihidrogen: lanza
+! k_test_hehe_t y k_test_impureza_t una vez cada uno sobre atom_p/sprop_p
+! reales -- solo para medir registros/tiempo, sin tocar la corrida real.
+subroutine lanza_test_split_loops()
+  use mdmc2_pipeline, only: atom_p, sprop_p
+  use mtest_split_loops, only: k_test_hehe_t, k_test_impureza_t, &
+       k_test_ccuerpo_only_t, k_test_combined_t
+  use mccuerpo, only: natom
+  use cudafor
+  implicit none
+  integer, parameter :: r8 = selected_real_kind(15,9)
+  integer :: nmax, threads, blocks, istat
+  real(kind=r8), device, allocatable :: pot_hehe_p(:), pot_impureza_p(:)
+
+  integer :: rep
+
+  nmax = size(atom_p, 1)
+  allocate(pot_hehe_p(nmax), pot_impureza_p(nmax))
+  threads = 32
+  blocks = (nmax + threads - 1) / threads
+  ! 20 repeticiones de cada uno -- diluye el coste de "arranque en frio"
+  ! (carga de codigo la 1a vez que se ejecuta este kernel concreto),
+  ! igual que k_vpot_t real se beneficia de sus miles de lanzamientos.
+  do rep = 1, 20
+    call k_test_hehe_t<<<blocks,threads>>>(nmax, atom_p, sprop_p, pot_hehe_p)
+  end do
+  istat = cudaDeviceSynchronize()
+  do rep = 1, 20
+    call k_test_impureza_t<<<blocks,threads>>>(nmax, atom_p, sprop_p, pot_impureza_p)
+  end do
+  istat = cudaDeviceSynchronize()
+  do rep = 1, 20
+    call k_test_ccuerpo_only_t<<<blocks,threads>>>(nmax, atom_p, sprop_p, pot_hehe_p)
+  end do
+  istat = cudaDeviceSynchronize()
+  do rep = 1, 20
+    call k_test_combined_t<<<blocks,threads>>>(nmax, atom_p, sprop_p, pot_hehe_p)
+  end do
+  istat = cudaDeviceSynchronize()
+  deallocate(pot_hehe_p, pot_impureza_p)
+end subroutine lanza_test_split_loops

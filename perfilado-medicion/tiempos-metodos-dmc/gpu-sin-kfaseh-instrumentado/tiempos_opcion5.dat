@@ -1,0 +1,15 @@
+reparto de tiempos, opcion=5 (GPU)
+tiempo total (bucle bloques+pasos), s =         1.7298
+ 
+sincroniza_globales_gpu                                     0.0109 s  (  0.632 % del total)
+reparto de semillas (1 vez)                                 0.0001 s  (  0.008 % del total)
+empaquetar AoS->SoA (host)                                  0.0470 s  (  2.718 % del total)
+copia host->device (H2D)                                    0.0117 s  (  0.679 % del total)
+kernel k_dmc2 (device)                                      1.2108 s  ( 69.998 % del total)
+copia device->host (D2H)                                    0.0154 s  (  0.888 % del total)
+desempaquetar SoA->AoS (host)                               0.0554 s  (  3.205 % del total)
+reparticion/compactacion                                    0.0143 s  (  0.826 % del total)
+ 
+CONVERSION AoS<->SoA total (pack+H2D+D2H+unpack)            0.1296 s  (  7.490 % del total)
+pasodmc_gpu completo                                        1.3658 s  ( 78.958 % del total)
+otros (E/S por bloque, promedios...)                        0.3640 s  ( 21.042 % del total)

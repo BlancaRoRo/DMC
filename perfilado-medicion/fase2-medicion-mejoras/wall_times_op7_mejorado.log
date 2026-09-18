@@ -1,0 +1,10 @@
+=== op7_250walkers (mejorado) ===
+  wall=24.906758594s
+=== op7_500walkers (mejorado) ===
+  wall=32.521511348s
+=== op7_1000walkers (mejorado) ===
+  wall=46.414087289s
+=== op7_2000walkers (mejorado) ===
+  wall=72.715565192s
+=== op7_3000walkers (mejorado) ===
+  wall=111.062155299s
