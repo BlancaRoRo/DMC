@@ -1,0 +1,39 @@
+# Copias aisladas de experimentos (mismo patron que /tmp, pero creadas
+# dentro del repo por error) -- ya resumidas con sus resultados en su
+# .md correspondiente (split-he-dihidrogen.md).
+v2-cuda-integracion/split-*-tmp/
+v2-cuda-integracion/split-prod-migracion/
+
+# Informes de perfilado brutos -- grandes, regenerables volviendo a
+# correr ncu/nsys.
+Test-tiempo-ncu/
+*.ncu-rep
+*.nsys-rep
+*.sqlite
+ncu_*.log
+ncu_*.csv
+run_*.log
+n1_*.log
+n1_*.log
+nsys_*.log
+nsys_*_stdout.log
+*.bak
+*.cubin
+# Artefactos de compilacion (nvfortran/gfortran): se regeneran con los
+# comandos ya documentados en cada docs-kernels/*.md -- no se versionan.
+*.mod
+*.o
+*.log
+
+# Binarios de prueba (test_<kernel>[...], sin extension) y el
+# ejecutable principal original (qmccluster) -- se mantienen los
+# fuentes correspondientes (.cuf/.f90).
+test_*
+!test_*.cuf
+!test_*.f90
+qmccluster
+
+# Utilidad de postprocesado (promedia.f90) copiada junto a cada kernel
+# portado -- se mantiene el fuente, no el binario.
+promedia
+!promedia.f90

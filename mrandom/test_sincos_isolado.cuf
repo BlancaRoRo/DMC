@@ -1,0 +1,62 @@
+! test_sincos_isolado.cuf
+!
+! Aislar el "arg" exacto (llamada 9 desde la semilla del walker 1,
+! el arg que da xl*sin(arg)/xl*cos(arg) del par que parecia divergir
+! en gauss3) y comparar sin(arg)/cos(arg) INTRINSECOS de nvfortran-host
+! (libnvcpumath, lo que usa el gauss3 ORIGINAL de mrandom.f90) contra
+! mysin(arg)/mycos(arg) (el port de glibc que usa gauss3_gpu).
+
+module msincostest
+ use glibc_sincos_mod, only: mycos, mysin
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: i8 = selected_int_kind(15)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+contains
+attributes(host, device) subroutine rand1_hd(rn, irn)
+  integer(kind=i8), intent (inout) :: irn
+  real(kind=r8), intent (out) :: rn
+  integer(kind=i8) :: mask24, mask48
+  real(kind=r8),  parameter :: twom48=2.0_r8**(-48)
+  integer(kind=i8),  parameter :: mult1 = 44485709377909_i8
+  integer(kind=i8) :: m11, m12
+  integer(kind=i8),  parameter :: iadd1 = 96309754297_i8
+  integer(kind=i8) :: is1,is2
+   mask24 = ishft(1_i8, 24_i8) - 1_i8
+   mask48 = ishft(1_i8, 48_i8) - 1_i8
+   m11 = iand(mult1,mask24)
+   m12 = iand(ishft(mult1,-24_i8),mask24)
+   is2=iand(ishft(irn,-24_i8),mask24)
+   is1=iand(irn,mask24)
+   irn=iand(ishft(iand(is1*m12+is2*m11,mask24),24_i8)+is1*m11+iadd1,mask48)
+   rn=ior(irn,1_i8)*twom48
+end subroutine rand1_hd
+end module msincostest
+
+program test_sincos_isolado
+ use msincostest
+ implicit none
+ integer, parameter :: i8 = selected_int_kind(15)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+ real(kind=r8), parameter :: pi = 3.1415926535897930_r8
+ integer(kind=i8) :: irn
+ real(kind=r8) :: rn, arg
+ integer :: ic
+
+  irn = 161367636491668_i8
+  do ic = 1, 9
+    call rand1_hd(rn, irn)
+  enddo
+  arg = 2.0_r8*pi*rn
+
+  write(*,'(a,es24.17)') 'arg (9a llamada) =', arg
+  write(*,*)
+  write(*,'(a,es24.17)') 'sin(arg)  intrinseco host (libnvcpumath) =', sin(arg)
+  write(*,'(a,es24.17)') 'mysin(arg) (port glibc)                  =', mysin(arg)
+  write(*,'(a,es10.2)')  '|dif sin|=', abs(sin(arg)-mysin(arg))
+  write(*,*)
+  write(*,'(a,es24.17)') 'cos(arg)  intrinseco host (libnvcpumath) =', cos(arg)
+  write(*,'(a,es24.17)') 'mycos(arg) (port glibc)                  =', mycos(arg)
+  write(*,'(a,es10.2)')  '|dif cos|=', abs(cos(arg)-mycos(arg))
+
+end program test_sincos_isolado

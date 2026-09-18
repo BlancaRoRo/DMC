@@ -1,0 +1,168 @@
+! valibre.cuf
+!
+! Puerto CUDA Fortran de valibre (mwavef.f90:875-896). Inicializa a
+! "vacio" los campos de un walker: funcion de onda a 1, energias a 0,
+! signos a 1, y pone a cero los vectores de derivada dwf/dphi.
+!
+! Igual que en wavef.cuf: w1%lw%wf/wfhe4/wfhe3/wfm/wfx son
+! real(kind=r16) (precision cuadruple) en el original -- esta version
+! GPU los representa en real(kind=r8) (doble), siguiendo la misma
+! convencion ya establecida en wavef.cuf (ver docs-kernels/wavef.md).
+! No hay ninguna operacion aritmetica en esta subrutina (solo
+! constantes literales 0.0/1.0, exactas en cualquier precision), asi
+! que esa reduccion de precision no introduce ninguna discrepancia.
+!
+! AoS->SoA: w1%dwf(natom) (array de vec3) pasa a dwf(3,natoms); w1%dphi
+! (tamaño fijo 2) se queda igual. natom no es un PARAMETER (es variable
+! publica de mparametros.f90, fijada en tiempo de ejecucion por el
+! in.mcv), así que se pasa como argumento (natoms), igual que en
+! potenbh.cuf/vpot.cuf.
+!
+! Se envuelve en un modulo (mvalibre) por el mismo motivo que el resto
+! de kernels: evitar que el simbolo enlazado choque con el valibre
+! original de mwavef.f90 al enlazar los dos .o juntos para comparar.
+
+module mvalibre
+implicit none
+integer, private, parameter :: i4 = selected_int_kind(9)
+integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+contains
+
+attributes(host, device) subroutine valibre(natoms, wf, wfhe4, wfhe3, wfm, wfx, &
+                                             kin, pot, ene, signoup, signodw, &
+                                             dwf, dphi)
+  integer(kind=i4), value :: natoms
+  real(kind=r8), intent (out) :: wf, wfhe4, wfhe3, wfm, wfx
+  real(kind=r8), intent (out) :: kin, pot, ene
+  integer(kind=i4), intent (out) :: signoup, signodw
+  real(kind=r8), intent (out) :: dwf(3,natoms)
+  real(kind=r8), intent (out) :: dphi(2)
+  integer(kind=i4) :: iatom
+
+    wf=1.0_r8
+    wfhe4=1.0_r8
+    wfhe3=1.0_r8
+    wfm=1.0_r8
+    wfx=1.0_r8
+    kin=0.0_r8
+    pot=0.0_r8
+    ene=0.0_r8
+    signoup=1
+    signodw=1
+
+    do iatom=1,natoms
+      dwf(:,iatom)=0.0_r8
+    enddo
+    dphi(:)=0.0_r8
+
+end subroutine valibre
+
+! un hilo = un walker
+attributes(global) subroutine k_valibre(n, natoms, wf, wfhe4, wfhe3, wfm, wfx, &
+                                         kin, pot, ene, signoup, signodw, &
+                                         dwf, dphi)
+ integer(kind=i4), value :: n, natoms
+ real(kind=r8), device, intent (out) :: wf(n), wfhe4(n), wfhe3(n), wfm(n), wfx(n)
+ real(kind=r8), device, intent (out) :: kin(n), pot(n), ene(n)
+ integer(kind=i4), device, intent (out) :: signoup(n), signodw(n)
+ real(kind=r8), device, intent (out) :: dwf(3,natoms,n)
+ real(kind=r8), device, intent (out) :: dphi(2,n)
+ integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call valibre(natoms, wf(i), wfhe4(i), wfhe3(i), wfm(i), wfx(i), &
+                 kin(i), pot(i), ene(i), signoup(i), signodw(i), &
+                 dwf(:,:,i), dphi(:,i))
+  endif
+end subroutine k_valibre
+
+end module mvalibre
+
+program test_valibre
+ ! CPU de confianza: valibre de mwavef.f90 ORIGINAL, sin tocar (recibe
+ ! el type(walker) completo, con w1%lw%wf/... en real(kind=r16)).
+ use mvalibre, only: k_valibre
+ use mwavef, only: valibre
+ use mtipos, only: walker, allocatewalker
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ integer(kind=i4), parameter :: n_atom = 5
+ integer(kind=i4), parameter :: n_walk = 3
+
+ real(kind=r8) :: wf_h(n_walk), wfhe4_h(n_walk), wfhe3_h(n_walk), wfm_h(n_walk), wfx_h(n_walk)
+ real(kind=r8) :: kin_h(n_walk), pot_h(n_walk), ene_h(n_walk)
+ integer(kind=i4) :: signoup_h(n_walk), signodw_h(n_walk)
+ real(kind=r8) :: dwf_h(3,n_atom,n_walk), dphi_h(2,n_walk)
+
+ real(kind=r8), device :: wf_d(n_walk), wfhe4_d(n_walk), wfhe3_d(n_walk), wfm_d(n_walk), wfx_d(n_walk)
+ real(kind=r8), device :: kin_d(n_walk), pot_d(n_walk), ene_d(n_walk)
+ integer(kind=i4), device :: signoup_d(n_walk), signodw_d(n_walk)
+ real(kind=r8), device :: dwf_d(3,n_atom,n_walk), dphi_d(2,n_walk)
+
+ type(walker) :: w1
+ integer(kind=i4) :: iw, ia, threads, blocks
+ real(kind=r8) :: err, errmax
+
+  threads = 32
+  blocks = (n_walk + threads - 1) / threads
+  call k_valibre<<<blocks,threads>>>(n_walk, n_atom, wf_d, wfhe4_d, wfhe3_d, wfm_d, wfx_d, &
+                                      kin_d, pot_d, ene_d, signoup_d, signodw_d, dwf_d, dphi_d)
+  wf_h = wf_d; wfhe4_h = wfhe4_d; wfhe3_h = wfhe3_d; wfm_h = wfm_d; wfx_h = wfx_d
+  kin_h = kin_d; pot_h = pot_d; ene_h = ene_d
+  signoup_h = signoup_d; signodw_h = signodw_d
+  dwf_h = dwf_d; dphi_h = dphi_d
+
+  errmax = 0.0d0
+  do iw = 1, n_walk
+    call allocatewalker(w1, n_atom)
+    call valibre(w1)
+
+    write(*,*)
+    write(*,'(a,i0)') '--- walker ', iw
+    write(*,'(a,f18.10,a,f18.10)') '  wf     CPU=', real(w1%lw%wf,r8), '   GPU=', wf_h(iw)
+    write(*,'(a,f18.10,a,f18.10)') '  wfhe4  CPU=', real(w1%lw%wfhe4,r8), '   GPU=', wfhe4_h(iw)
+    write(*,'(a,f18.10,a,f18.10)') '  wfhe3  CPU=', real(w1%lw%wfhe3,r8), '   GPU=', wfhe3_h(iw)
+    write(*,'(a,f18.10,a,f18.10)') '  wfm    CPU=', real(w1%lw%wfm,r8), '   GPU=', wfm_h(iw)
+    write(*,'(a,f18.10,a,f18.10)') '  wfx    CPU=', real(w1%lw%wfx,r8), '   GPU=', wfx_h(iw)
+    write(*,'(a,f18.10,a,f18.10)') '  kin    CPU=', w1%lw%kin, '   GPU=', kin_h(iw)
+    write(*,'(a,f18.10,a,f18.10)') '  pot    CPU=', w1%lw%pot, '   GPU=', pot_h(iw)
+    write(*,'(a,f18.10,a,f18.10)') '  ene    CPU=', w1%lw%ene, '   GPU=', ene_h(iw)
+    write(*,'(a,i0,a,i0)')         '  signoup CPU=', w1%lw%signoup, '   GPU=', signoup_h(iw)
+    write(*,'(a,i0,a,i0)')         '  signodw CPU=', w1%lw%signodw, '   GPU=', signodw_h(iw)
+
+    err = abs(wf_h(iw) - real(w1%lw%wf,r8))
+    err = max(err, abs(wfhe4_h(iw) - real(w1%lw%wfhe4,r8)))
+    err = max(err, abs(wfhe3_h(iw) - real(w1%lw%wfhe3,r8)))
+    err = max(err, abs(wfm_h(iw) - real(w1%lw%wfm,r8)))
+    err = max(err, abs(wfx_h(iw) - real(w1%lw%wfx,r8)))
+    err = max(err, abs(kin_h(iw) - w1%lw%kin))
+    err = max(err, abs(pot_h(iw) - w1%lw%pot))
+    err = max(err, abs(ene_h(iw) - w1%lw%ene))
+    if (signoup_h(iw) /= w1%lw%signoup) err = max(err, 1.0d0)
+    if (signodw_h(iw) /= w1%lw%signodw) err = max(err, 1.0d0)
+
+    do ia = 1, n_atom
+      err = max(err, abs(dwf_h(1,ia,iw) - w1%dwf(ia)%comp(1)))
+      err = max(err, abs(dwf_h(2,ia,iw) - w1%dwf(ia)%comp(2)))
+      err = max(err, abs(dwf_h(3,ia,iw) - w1%dwf(ia)%comp(3)))
+    enddo
+    err = max(err, abs(dphi_h(1,iw) - w1%dphi(1)))
+    err = max(err, abs(dphi_h(2,iw) - w1%dphi(2)))
+
+    write(*,'(a,es10.2)') '  |err| max=', err
+    errmax = max(errmax, err)
+  enddo
+
+  write(*,*)
+  if (errmax < 1.0d-8) then
+    write(*,*) 'PASA: GPU y CPU coinciden dentro de tolerancia'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_valibre

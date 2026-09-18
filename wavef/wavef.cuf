@@ -1,0 +1,502 @@
+module mwavef_gpu
+ ! Se llama mwavef_gpu y NO mwavef: el original (mwavef.f90) ya define
+ ! "module mwavef", y dos modulos con el mismo nombre en la misma
+ ! compilacion generan el mismo mwavef.mod y chocan -- mismo problema
+ ! de fondo que el de He_dihydrogen/ccuerpo, pero aqui a nivel de
+ ! MODULO en vez de subrutina suelta.
+ use mtipos, only: vec3
+ use mparametros, only: nfermax
+ use der_wavefhe4, only: wavefhe4
+ use der_wavefx, only: wavefx, nhe4, nhe3, ngatom, natom, impureza
+ ! rij**pmix(2): exponente REAL (nu de mezclas, in.mcv), mismo motivo
+ ! que en d_uhex4.cuf/der_wavefx.cuf/der_wavefhe4.cuf. Ver
+ ! docs-kernels/glibc_math.md Parte 4.
+ use glibc_pow_mod, only: mypow
+ ! exp(ujas) en wavefm/wavefhe3: mismo riesgo fast/precise (__fd_exp_1
+ ! vs __pd_exp_1) confirmado para acos/pow -- ver docs-kernels/wavef.md.
+ use glibc_exp_mod, only: myexp
+
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! umax/umin: PARAMETER de verdad en el original, igual que en
+ ! der_wavefhe4 -- no hace falta copia device.
+ real(kind=r8), parameter :: umax = 200.0_r8, umin = -200.0_r8
+
+ ! pmix, phe3: variables reales de mparametros.f90 (publicas, sin
+ ! parameter), mismo tratamiento que phe4/pxhe4. nhe3up/nhe3dw: idem,
+ ! las calcula mentradatos.f90 una vez a partir de nhe3 al leer in.mcv.
+ real(kind=r8), device :: pmix(3), phe3(4)
+ integer(kind=i4), device :: nhe3up, nhe3dw
+
+ ! mhe4, mhe3, mx: masas, variables reales de mparametros.f90, hacen
+ ! falta para getcm (el centro de masas que usa wavefhe3).
+ real(kind=r8), device :: mhe4, mhe3, mx
+
+contains
+
+! ---- wavefm: mismo patron que wavefhe4/wavefx (doble bucle simple,
+! sin ningun array local de tamano variable) -- se porta entera pese a
+! que con nhe3=0 (fijo en esta simulacion) el bucle interno "jatom=
+! nhe4+1,ngatom" tiene 0 iteraciones y da siempre wfm=1.0. Mismo
+! criterio que duhe3x/uhe3x en der_wavefx.cuf: el codigo existe y
+! compila igual, la llamada esta ahi en wavef/derananum. ----
+attributes(host, device) subroutine wavefm(atom, wfm)
+  type(vec3), intent (in)  :: atom(ngatom)
+  real(kind=r8), intent (out) :: wfm
+  type(vec3) :: rtemp
+  real(kind=r8) :: ujas, rij
+  integer(kind=i4) :: iatom, jatom
+
+    ujas = 0.0_r8
+    do iatom = 1, nhe4
+      do jatom = nhe4+1, ngatom
+        rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+        rij = sqrt(dot_product(rtemp%comp, rtemp%comp))
+        ujas = ujas - pmix(1)/mypow(rij,pmix(2))
+        ujas = ujas - pmix(3)*rij
+      enddo
+    enddo
+
+    wfm = myexp(ujas)
+
+end subroutine wavefm
+
+! ---- getcm: centro de masas, necesario para wavefhe3. Sin cambios de
+! fondo frente al original salvo recibir atom(natom) suelto en vez de w1. ----
+attributes(host, device) subroutine getcm(atom, rcm)
+  type(vec3), intent (in) :: atom(natom)
+  real(kind=r8), intent (out) :: rcm(3)
+  integer(kind=i4) :: iatom
+
+    rcm = 0.0_r8
+    do iatom = 1, nhe4
+      rcm = rcm + mhe4*atom(iatom)%comp
+    enddo
+    do iatom = nhe4+1, ngatom
+      rcm = rcm + mhe3*atom(iatom)%comp
+    enddo
+    if (impureza) then
+      rcm = rcm + mx*atom(natom)%comp
+      rcm = rcm / (nhe4*mhe4 + nhe3*mhe3 + mx)
+    else
+      rcm = rcm / (nhe4*mhe4 + nhe3*mhe3)
+    endif
+
+end subroutine getcm
+
+! ---- slaterdet, RECORTADA a la unica rama alcanzable en esta
+! simulacion (npart<=1): con nhe3=0 fijo, nhe3up=nhe3dw=0 siempre, y
+! slaterdet(0,...) en el original entra directo por
+! "if(npart.le.1) then slater=1.0; return endif" -- la rama que
+! construye la matriz y llama a det() (determinante NxN de
+! mlineal.f90, con pivotaje parcial y un array local de tamano
+! variable) NUNCA se ejecuta. A diferencia de wavefm/wavefhe3 (que son
+! baratas de portar enteras aunque den un resultado trivial), esa rama
+! es autentico codigo muerto -- mismo estatus que aziz_nuevo/vatomol/
+! azizgen en vpot -- y ademas cara de portar (determinante generico en
+! device). No se porta; se documenta aqui y en docs-kernels/wavef.md.
+! Si nhe3up o nhe3dw superasen 1 algun dia, esta rutina dejaria de ser
+! valida y habria que portar la matriz+det() de verdad. ----
+attributes(host, device) subroutine slaterdet_trivial(npart, slater)
+  integer(kind=i4), intent (in) :: npart
+  real(kind=r8), intent (out) :: slater
+
+    slater = 1.0_r8
+
+end subroutine slaterdet_trivial
+
+! ---- wavefhe3: parte Jastrow (rb + los dos bucles pairwise) portada
+! entera -- misma forma que wavefm, sin numerica complicada. rb(3,n)
+! era un array local de tamano nhe3 (variable en tiempo de ejecucion)
+! en el original: se sustituye por un buffer de tamano fijo
+! 2*nfermax, reutilizando el mismo limite (nfermax=20, PARAMETER real
+! en mparametros.f90) que ya usa slaterdet en el original para su
+! propia matriz. El signoup/signodw del original (bookkeeping de
+! cruces de nodo del determinante) se omite aqui a proposito: con
+! slaterdet recortada a npart<=1 el signo es siempre +1, no aporta
+! nada mientras nhe3up/nhe3dw<=1; si algun dia hiciera falta el
+! determinante completo, habria que recuperarlos tambien. ----
+attributes(host, device) subroutine wavefhe3(atom, wfhe3)
+  type(vec3), intent (in) :: atom(natom)
+  real(kind=r8), intent (out) :: wfhe3
+  type(vec3) :: rtemp
+  real(kind=r8) :: rcm(3)
+  real(kind=r8) :: rb(3, 2*nfermax)
+  real(kind=r8) :: ujas, rij, etaij
+  real(kind=r8) :: slaterup, slaterdw
+  integer(kind=i4) :: iatom, jatom, ihe3, jhe3
+
+    call getcm(atom, rcm)
+
+    do iatom = nhe4+1, ngatom
+      ihe3 = iatom - nhe4
+      rb(:,ihe3) = atom(iatom)%comp - rcm(:)
+    enddo
+
+    ujas = 0.0_r8
+    do iatom = nhe4+1, ngatom-1
+      ihe3 = iatom - nhe4
+      do jatom = iatom+1, ngatom
+        jhe3 = jatom - nhe4
+        rtemp%comp = atom(iatom)%comp - atom(jatom)%comp
+        rij = sqrt(dot_product(rtemp%comp, rtemp%comp))
+        ujas = ujas - phe3(1)/mypow(rij,phe3(2))
+        etaij = phe3(4)/(rij*rij*rij)
+        rb(:,ihe3) = rb(:,ihe3) + etaij*rtemp%comp
+        rb(:,jhe3) = rb(:,jhe3) - etaij*rtemp%comp
+      enddo
+    enddo
+
+    do ihe3 = 1, nhe3-1
+      do jhe3 = ihe3+1, nhe3
+        rtemp%comp = rb(:,ihe3) - rb(:,jhe3)
+        ujas = ujas - phe3(3)*sqrt(dot_product(rtemp%comp, rtemp%comp))
+      enddo
+    enddo
+
+    call slaterdet_trivial(nhe3up, slaterup)
+    call slaterdet_trivial(nhe3dw, slaterdw)
+
+    ujas = min(ujas, umax)
+    ujas = max(ujas, umin)
+
+    wfhe3 = myexp(ujas) * slaterup * slaterdw
+
+end subroutine wavefhe3
+
+! ---- wavef: w1 se descompone en atom(natom)/sprop3, igual que en
+! wavefx/wavefhe4. Devuelve wf como escalar en vez de escribir en
+! w1%lw%wf. atom(1:nhe4) y atom(1:ngatom) son secciones contiguas (el
+! primer tramo de un array 1D), a diferencia de sprop_d(3,:) --
+! validas para pasarlas directas a una llamada device. ----
+attributes(host, device) subroutine wavef(atom, sprop3, wf)
+  type(vec3), intent (in) :: atom(natom)
+  type(vec3), intent (in) :: sprop3
+  real(kind=r8), intent (out) :: wf
+  real(kind=r8) :: wfhe4, wfhe3, wfm, wfx
+
+    call wavefhe4(atom(1:nhe4), wfhe4)
+    call wavefhe3(atom, wfhe3)
+    call wavefm(atom(1:ngatom), wfm)
+    call wavefx(atom, sprop3, wfx)
+
+    wf = wfhe4*wfhe3*wfm*wfx
+
+end subroutine wavef
+
+attributes(global) subroutine k_wavef(n, atom, sprop, wf)
+  ! sprop(3,n) se recibe ENTERO y se indexa dentro del kernel --
+  ! pasar una seccion no contigua como sprop_d(3,:) en la llamada
+  ! (fijando el primer indice) hizo segfault en der_wavefx (ver
+  ! der_wavefx.md); aqui se evita desde el principio.
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in)  :: atom(natom,n), sprop(3,n)
+  real(kind=r8), device, intent (out) :: wf(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call wavef(atom(:,i), sprop(3,i), wf(i))
+  endif
+end subroutine k_wavef
+
+! ---- kernels de prueba directa de wavefhe3/wavefm, al margen de
+! k_wavef -- para poder ejercitarlas con nhe3>0 sin arrastrar sprop/
+! impureza (que solo hacen falta para wavefx). Mismo motivo que
+! k_duhe3x/k_uhe3x en der_wavefx.cuf. ----
+attributes(global) subroutine k_wavefhe3(n, atom, wfhe3_out)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in) :: atom(natom,n)
+  real(kind=r8), device, intent (out) :: wfhe3_out(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call wavefhe3(atom(:,i), wfhe3_out(i))
+  endif
+end subroutine k_wavefhe3
+
+attributes(global) subroutine k_wavefm(n, atom, wfm_out)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in) :: atom(ngatom,n)
+  real(kind=r8), device, intent (out) :: wfm_out(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call wavefm(atom(:,i), wfm_out(i))
+  endif
+end subroutine k_wavefm
+
+end module mwavef_gpu
+
+
+program test_wavef
+ ! CPU de confianza: wavef/wavefhe3/wavefm de mwavef.f90 ORIGINAL, sin
+ ! tocar (reciben el type(walker) completo).
+ use mwavef, only: wavef_cpu => wavef, wavefhe3_cpu => wavefhe3, wavefm_cpu => wavefm
+ use mtipos, only: vec3, walker, allocatewalker
+ use mparametros, only: nhe4_real => nhe4, nhe3_real => nhe3, ngatom_real => ngatom, &
+                         natom_real => natom, impureza_real => impureza, impurmol_real => impurmol, &
+                         lxhe4_real => lxhe4, pxhe4_real => pxhe4, lxhe3_real => lxhe3, pxhe3_real => pxhe3, &
+                         phe4_real => phe4, phe3_real => phe3, pmix_real => pmix, &
+                         nhe3up_real => nhe3up, nhe3dw_real => nhe3dw, &
+                         mhe4_real => mhe4, mhe3_real => mhe3, mx_real => mx
+ use mwavef_gpu
+ use d_uhex4, only: lxhe4, pxhe4, impurmol
+ use der_wavefhe4, only: nhe4_he4 => nhe4, phe4
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ integer(kind=i4), parameter :: n_he4  = 4
+ integer(kind=i4), parameter :: n_atom = n_he4 + 1
+ integer(kind=i4), parameter :: n_walk = 3
+
+ real(kind=r8), parameter :: bxhe4(0:4)    = (/ 1.680309d0, 0.000000d0, 3.033954d0, 0.000000d0, 0.732198d0 /)
+ real(kind=r8), parameter :: nuxhe4(0:4)   = (/ 9.763290d0, 1.000000d0, 3.155952d0, 1.000000d0, 11.036848d0 /)
+ real(kind=r8), parameter :: alfaxhe4(0:4) = (/ 0.643208d0, 0.000000d0, 0.004908d0, 0.000000d0, 0.078598d0 /)
+ real(kind=r8), parameter :: p4xhe4(0:4)   = (/ 0.129298d0, 0.000000d0, 0.084248d0, 0.000000d0, 0.096948d0 /)
+ real(kind=r8), parameter :: p5xhe4(0:4)   = (/ 13.568705d0, 0.000000d0, 0.000706d0, 0.000000d0, 0.020823d0 /)
+ real(kind=r8), parameter :: bhe4 = 3.139383d0, nuhe4 = 4.725025d0, alfahe4 = 0.009428d0
+
+ type(vec3) :: atom_h(n_atom,n_walk), sprop_h(3,n_walk)
+ type(vec3), device :: atom_d(n_atom,n_walk), sprop_d(3,n_walk)
+ real(kind=r8) :: wf_cpu(n_walk), wf_h(n_walk)
+ real(kind=r8), device :: wf_d(n_walk)
+
+ type(walker) :: w1
+ integer(kind=i4) :: iw, ia, threads, blocks
+ real(kind=r8) :: err, errmax
+
+  ! ---- copias device (GPU), modulos ya portados ----
+  nhe4 = n_he4
+  nhe3 = 0
+  ngatom = n_he4
+  natom = n_atom
+  impureza = .true.
+  impurmol = .true.
+  lxhe4 = 4
+  do ia = 0, 4
+    pxhe4(1,ia) = 0.50_r8*(bxhe4(ia)**nuxhe4(ia))
+    pxhe4(2,ia) = nuxhe4(ia)
+    pxhe4(3,ia) = alfaxhe4(ia)
+    pxhe4(4,ia) = p4xhe4(ia)
+    pxhe4(5,ia) = p5xhe4(ia)
+  enddo
+  ! lxhe3/pxhe3 (device, de d_uhex4) no se tocan aqui: con nhe3=0 el
+  ! bucle de wavefx que las leeria (via uhe3x) tiene 0 iteraciones, no
+  ! influyen en el resultado -- ver der_wavefx.md.
+
+  nhe4_he4 = n_he4          ! copia device SEPARADA que tiene der_wavefhe4
+  phe4(1) = 0.50_r8*(bhe4**nuhe4)
+  phe4(2) = nuhe4
+  phe4(3) = alfahe4
+
+  ! phe3/pmix/nhe3up/nhe3dw/masas: con nhe3=0 no influyen en el
+  ! resultado (wavefhe3/wavefm dan siempre 1.0), se fijan solo para que
+  ! la comparacion con la CPU (que si los lee, aunque de forma trivial)
+  ! no dependa de basura sin inicializar.
+  phe3 = 0.0_r8
+  pmix = 0.0_r8
+  nhe3up = 0
+  nhe3dw = 0
+  mhe4 = 4.00260_r8
+  mhe3 = 3.01604_r8
+  mx   = 2.01565006_r8
+
+  ! ---- copias reales (CPU), mparametros.f90, para el wavef ORIGINAL ----
+  nhe4_real = n_he4
+  nhe3_real = 0
+  ngatom_real = n_he4
+  natom_real = n_atom
+  impureza_real = .true.
+  impurmol_real = .true.
+  lxhe4_real = 4
+  pxhe4_real(:,0:4) = pxhe4(:,0:4)
+  lxhe3_real = 0
+  pxhe3_real = 0.0_r8
+  phe4_real = phe4
+  phe3_real = phe3
+  pmix_real = pmix
+  nhe3up_real = 0
+  nhe3dw_real = 0
+  mhe4_real = mhe4
+  mhe3_real = mhe3
+  mx_real   = mx
+
+  atom_h(1,1)%comp = (/  0.0d0,  0.0d0,  0.0d0 /)
+  atom_h(2,1)%comp = (/  3.5d0,  0.0d0,  0.0d0 /)
+  atom_h(3,1)%comp = (/  0.0d0,  4.0d0,  1.0d0 /)
+  atom_h(4,1)%comp = (/ -2.0d0, -3.0d0,  2.5d0 /)
+  atom_h(5,1)%comp = (/  1.0d0,  1.0d0,  1.0d0 /)
+
+  atom_h(1,2)%comp = (/  1.0d0,  1.0d0,  1.0d0 /)
+  atom_h(2,2)%comp = (/ -1.0d0,  2.0d0,  0.5d0 /)
+  atom_h(3,2)%comp = (/  2.5d0, -1.5d0,  3.0d0 /)
+  atom_h(4,2)%comp = (/  0.0d0,  0.0d0, -4.0d0 /)
+  atom_h(5,2)%comp = (/  0.5d0, -0.5d0,  0.5d0 /)
+
+  atom_h(1,3)%comp = (/  5.0d0,  0.0d0,  0.0d0 /)
+  atom_h(2,3)%comp = (/  0.0d0,  5.0d0,  0.0d0 /)
+  atom_h(3,3)%comp = (/  0.0d0,  0.0d0,  5.0d0 /)
+  atom_h(4,3)%comp = (/  2.0d0,  2.0d0,  2.0d0 /)
+  atom_h(5,3)%comp = (/  1.5d0,  1.5d0,  1.5d0 /)
+
+  sprop_h(1,1)%comp = (/ 2.0d0, 0.0d0, 0.0d0 /)
+  sprop_h(2,1)%comp = (/ 0.0d0, 1.5d0, 0.0d0 /)
+  sprop_h(3,1)%comp = (/ 0.3d0, 0.4d0, 1.2d0 /)
+
+  sprop_h(1,2)%comp = (/ 1.0d0, 0.2d0, 0.0d0 /)
+  sprop_h(2,2)%comp = (/ 0.0d0, 1.0d0, 0.3d0 /)
+  sprop_h(3,2)%comp = (/ 0.5d0, 0.0d0, 1.0d0 /)
+
+  sprop_h(1,3)%comp = (/ 0.7d0, 0.7d0, 0.0d0 /)
+  sprop_h(2,3)%comp = (/ -0.7d0, 0.7d0, 0.0d0 /)
+  sprop_h(3,3)%comp = (/ 0.0d0, 0.0d0, 2.0d0 /)
+
+  atom_d  = atom_h
+  sprop_d = sprop_h
+
+  threads = 32
+  blocks = (n_walk + threads - 1) / threads
+  call k_wavef<<<blocks,threads>>>(n_walk, atom_d, sprop_d, wf_d)
+  wf_h = wf_d
+
+  write(*,*) '=== caso real de la simulacion: nhe3=0 ==='
+  errmax = 0.0d0
+  do iw = 1, n_walk
+    call allocatewalker(w1, n_atom)
+    do ia = 1, n_atom
+      w1%atom(ia) = atom_h(ia,iw)
+    enddo
+    w1%sprop(1) = sprop_h(1,iw)
+    w1%sprop(2) = sprop_h(2,iw)
+    w1%sprop(3) = sprop_h(3,iw)
+
+    call wavef_cpu(w1)
+    wf_cpu(iw) = w1%lw%wf
+
+    write(*,*)
+    write(*,'(a,i0)') '--- walker ', iw
+    write(*,'(a,f20.12,a,f20.12)') '  wf CPU=', wf_cpu(iw), '   GPU=', wf_h(iw)
+    write(*,'(a,es24.17,a,es24.17)') '  HP wf CPU=', wf_cpu(iw), '   GPU=', wf_h(iw)
+    err = abs(wf_h(iw) - wf_cpu(iw))
+    write(*,'(a,es10.2)') '  |err| max=', err
+    errmax = max(errmax, err)
+  enddo
+
+  ! ---- prueba directa de wavefhe3/wavefm con nhe3=2, para que sus
+  ! bucles pairwise iteren de verdad (con nhe3=0 dan siempre 1.0) ----
+  ! 3 casos: normal, y dos extremos que fuerzan el rij He3-He3 (el que
+  ! usa phe3(2)/mypow en wavefhe3, distinto del rij He4-He3 de pmix(2)
+  ! ya cubierto en derananum/test_wavefm.cuf) a contacto muy cercano y
+  ! largo alcance.
+  block
+    integer(kind=i4), parameter :: n_he4b = 4, n_he3b = 2, n_gatomb = n_he4b+n_he3b
+    integer(kind=i4), parameter :: n_caseb = 3
+    real(kind=r8), parameter :: bhe3 = 3.0d0, nuhe3 = 5.0d0, alfahe3 = 0.5d0, bback = 0.2d0
+    real(kind=r8), parameter :: bmix = 2.5d0, numix = 4.0d0, alfamix = 0.3d0
+
+    type(vec3) :: atomb_h(n_gatomb,n_caseb)
+    type(vec3), device :: atomb_d(n_gatomb,n_caseb)
+    real(kind=r8) :: wfhe3_cpu(n_caseb), wfm_cpu(n_caseb), wfhe3_h(n_caseb), wfm_h(n_caseb)
+    real(kind=r8), device :: wfhe3_d(n_caseb), wfm_d(n_caseb)
+    type(walker) :: wb
+    integer(kind=i4) :: ia2, icb
+    real(kind=r8) :: errb
+
+     nhe4 = n_he4b
+     nhe3 = n_he3b
+     ngatom = n_gatomb
+     natom = n_gatomb        ! impureza=.false. en esta prueba directa
+     impureza = .false.
+     nhe4_he4 = n_he4b
+
+     phe3(1) = 0.50_r8*(bhe3**nuhe3)
+     phe3(2) = nuhe3
+     phe3(3) = alfahe3
+     phe3(4) = bback
+     pmix(1) = 0.50_r8*(bmix**numix)
+     pmix(2) = numix
+     pmix(3) = alfamix
+     nhe3up = 1
+     nhe3dw = 1
+
+     nhe4_real = n_he4b
+     nhe3_real = n_he3b
+     ngatom_real = n_gatomb
+     natom_real = n_gatomb
+     impureza_real = .false.
+     phe3_real = phe3
+     pmix_real = pmix
+     nhe3up_real = 1
+     nhe3dw_real = 1
+     mhe4_real = mhe4
+     mhe3_real = mhe3
+
+     ! caso 1: geometria "normal"
+     atomb_h(1,1)%comp = (/  0.0d0,  0.0d0,  0.0d0 /)
+     atomb_h(2,1)%comp = (/  3.5d0,  0.0d0,  0.0d0 /)
+     atomb_h(3,1)%comp = (/  0.0d0,  4.0d0,  1.0d0 /)
+     atomb_h(4,1)%comp = (/ -2.0d0, -3.0d0,  2.5d0 /)
+     atomb_h(5,1)%comp = (/  1.5d0,  1.5d0,  1.5d0 /)   ! He3 #1
+     atomb_h(6,1)%comp = (/ -1.0d0,  2.2d0, -0.8d0 /)   ! He3 #2
+
+     ! caso 2 (extremo): par He3-He3 (atomos 5,6) a contacto muy
+     ! cercano (rij~0.05) -- el rij que usa phe3(2)/mypow en wavefhe3
+     atomb_h(1,2)%comp = (/  0.0d0,  0.0d0,  0.0d0 /)
+     atomb_h(2,2)%comp = (/  3.5d0,  0.0d0,  0.0d0 /)
+     atomb_h(3,2)%comp = (/  0.0d0,  4.0d0,  1.0d0 /)
+     atomb_h(4,2)%comp = (/ -2.0d0, -3.0d0,  2.5d0 /)
+     atomb_h(5,2)%comp = (/  1.5d0,  1.5d0,  1.5d0 /)
+     atomb_h(6,2)%comp = (/  1.5d0,  1.5d0,  1.55d0 /)  ! rij(5,6)~0.05
+
+     ! caso 3 (extremo): par He3-He3 a largo alcance (rij~1000)
+     atomb_h(1,3)%comp = (/  0.0d0,  0.0d0,  0.0d0 /)
+     atomb_h(2,3)%comp = (/  3.5d0,  0.0d0,  0.0d0 /)
+     atomb_h(3,3)%comp = (/  0.0d0,  4.0d0,  1.0d0 /)
+     atomb_h(4,3)%comp = (/ -2.0d0, -3.0d0,  2.5d0 /)
+     atomb_h(5,3)%comp = (/  1.5d0,  1.5d0,  1.5d0 /)
+     atomb_h(6,3)%comp = (/  1.5d0,  1.5d0,  1001.5d0 /) ! rij(5,6)~1000
+
+     atomb_d = atomb_h
+
+     call k_wavefhe3<<<1,32>>>(n_caseb, atomb_d, wfhe3_d)
+     call k_wavefm<<<1,32>>>(n_caseb, atomb_d, wfm_d)
+     wfhe3_h = wfhe3_d
+     wfm_h   = wfm_d
+
+     do icb = 1, n_caseb
+       call allocatewalker(wb, n_gatomb)
+       do ia2 = 1, n_gatomb
+         wb%atom(ia2) = atomb_h(ia2,icb)
+       enddo
+       call wavefhe3_cpu(wb)
+       wfhe3_cpu(icb) = wb%lw%wfhe3
+       call wavefm_cpu(wb)
+       wfm_cpu(icb) = wb%lw%wfm
+
+       write(*,*)
+       write(*,'(a,i0)') '=== prueba directa de wavefhe3/wavefm, nhe3=2, caso ', icb
+       write(*,'(a,f20.12,a,f20.12)') '  wfhe3 CPU=', wfhe3_cpu(icb), '   GPU=', wfhe3_h(icb)
+       write(*,'(a,f20.12,a,f20.12)') '  wfm   CPU=', wfm_cpu(icb),   '   GPU=', wfm_h(icb)
+       write(*,'(a,es24.17,a,es24.17)') '  HP wfhe3 CPU=', wfhe3_cpu(icb), '   GPU=', wfhe3_h(icb)
+       write(*,'(a,es24.17,a,es24.17)') '  HP wfm   CPU=', wfm_cpu(icb),   '   GPU=', wfm_h(icb)
+       errb = max(abs(wfhe3_h(icb)-wfhe3_cpu(icb)), abs(wfm_h(icb)-wfm_cpu(icb)))
+       write(*,'(a,es10.2)') '  |err| max=', errb
+       errmax = max(errmax, errb)
+     enddo
+  end block
+
+  write(*,*)
+  if (errmax < 1.0d-9) then
+    write(*,*) 'PASA: GPU y CPU coinciden dentro de tolerancia'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_wavef

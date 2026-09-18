@@ -1,0 +1,73 @@
+! test_glibc_acos.cuf
+!
+! Prueba myacos (glibc_acos.cuf) contra dacos intrinseca (CPU y GPU,
+! nvfortran) para valores que recorren TODAS las zonas de tabla del
+! algoritmo (8 zonas segun |x|, mas los bordes exactos x=+-1 y x=0).
+! Incluye los valores de fi reales encontrados en la bisección de
+! He_dihydrogen (walker 3, atomos 1/2/3/4) donde dacos DIVERGE entre
+! host y device de nvfortran (docs-kernels/He_dihydrogen.md Parte 4).
+!
+! Compilar y ejecutar: ver docs-kernels/glibc_math.md
+
+program test_glibc_acos
+ use glibc_acos_mod
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ integer(kind=i4), parameter :: n = 26
+ real(kind=r8) :: x_h(n)
+ real(kind=r8) :: acos_intrinsic(n)
+ real(kind=r8) :: acos_my_cpu(n)
+ real(kind=r8) :: acos_h(n)
+ real(kind=r8), device :: x_d(n), acos_d(n)
+ integer(kind=i4) :: i, threads, blocks
+ real(kind=r8) :: errmax, err
+
+  x_h = (/ &
+    0.0_r8, 1.0_r8, -1.0_r8, &                                  ! bordes exactos
+    0.05_r8, -0.05_r8, &                                        ! zona 1: |x|<0.125
+    0.3_r8, -0.3_r8, &                                           ! zona 2: 0.125<=|x|<0.5
+    0.6_r8, -0.6_r8, &                                           ! zona 3: 0.5<=|x|<0.75
+    0.8_r8, -0.8_r8, &                                           ! zona 4: 0.75<=|x|<0.921875
+    0.94_r8, -0.94_r8, &                                         ! zona 5: 0.921875<=|x|<0.953125
+    0.96_r8, -0.96_r8, &                                         ! zona 6: 0.953125<=|x|<0.96875
+    0.99_r8, -0.99_r8, 0.999999_r8, -0.999999_r8, &              ! zona 7: 0.96875<=|x|<1
+    ! valores reales de "fi" de He_dihydrogen (walker 1/2, atomos 1-4):
+    0.1052984383_r8, -0.1052984383_r8, &                         ! w1/w2, atomos 1-2
+    -0.4612990046_r8, -0.6666100579_r8, &                        ! w3, atomo 4 (rdih1/rdih2)
+    -0.5773502691896258_r8, &                                    ! w3, atomo 4, valor exacto que diverge (docs Parte 4)
+    1.0d-30, -1.0d-30 /)                                         ! zona 0: |x| < 2.78e-17
+
+  x_d = x_h
+  threads = 32
+  blocks = (n + threads - 1) / threads
+  call k_myacos<<<blocks,threads>>>(n, x_d, acos_d)
+  acos_h = acos_d
+
+  errmax = 0.0d0
+  do i = 1, n
+    acos_intrinsic(i) = dacos(x_h(i))
+    acos_my_cpu(i) = myacos(x_h(i))
+
+    write(*,*)
+    write(*,'(a,i0,a,es24.17)') '--- #', i, '  x=', x_h(i)
+    write(*,'(a,es24.17)') '  dacos intrinseca (CPU) =', acos_intrinsic(i)
+    write(*,'(a,es24.17)') '  myacos CPU              =', acos_my_cpu(i)
+    write(*,'(a,es24.17)') '  myacos GPU              =', acos_h(i)
+
+    err = abs(acos_my_cpu(i) - acos_intrinsic(i))
+    err = max(err, abs(acos_h(i) - acos_intrinsic(i)))
+    write(*,'(a,es10.2)') '  |err| max frente a la intrinseca=', err
+    errmax = max(errmax, err)
+  enddo
+
+  write(*,*)
+  if (errmax < 1.0d-300) then
+    write(*,*) 'PASA: myacos (CPU y GPU) coinciden EXACTOS con dacos intrinseca'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_glibc_acos

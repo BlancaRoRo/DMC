@@ -1,0 +1,177 @@
+! legendre_gpu.cuf
+!
+! Version GPU de calpleg/calderpleg (mlegendre.f90), mas un kernel y un
+! programa de prueba que compara contra la version CPU original.
+!
+! Compilar y ejecutar SIN tocar Makefile.gpu, como programa suelto:
+!
+!   nvfortran -cuda mlegendre.f90 legendre_gpu.cuf -o test_legendre
+!   ./test_legendre
+!
+! (mlegendre.f90 es el fichero CPU original, sin modificar, que ya
+!  tienes en esta carpeta: sirve de referencia de confianza)
+
+module mlegendre_gpu
+
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! Misma cota que mparametros.f90 (lmax=20). Solo se usa para reservar
+ ! el buffer local DENTRO del kernel -- la subrutina calplegd de abajo
+ ! no necesita conocer este numero, sigue trabajando con pl(0:l) igual
+ ! que la version CPU.
+ integer(kind=i4), parameter, public :: lmax_dev = 20
+
+contains
+
+ ! ---- version device/host de calpleg: MISMO cuerpo que mlegendre.f90 ----
+ attributes(host,device) subroutine calplegd(l, x, pl)
+  integer(kind=i4), intent(in) :: l
+  real(kind=r8), intent(in) :: x
+  real(kind=r8), intent(out) :: pl(0:l)
+  integer(kind=i4) :: il
+
+   pl(0) = 1.0_r8
+   if (l >= 1) pl(1) = x
+   do il = 1, l-1
+     pl(il+1) = ((2.0_r8*il+1.0_r8)*x*pl(il) - il*pl(il-1)) / (il+1.0_r8)
+   enddo
+
+ end subroutine calplegd
+
+ ! ---- version device/host de calderpleg: MISMO cuerpo que mlegendre.f90 ----
+ attributes(host,device) subroutine calderplegd(l, x, pl, d1pl, d2pl)
+  integer(kind=i4), intent(in) :: l
+  real(kind=r8), intent(in) :: x
+  real(kind=r8), intent(out) :: pl(0:l), d1pl(0:l), d2pl(0:l)
+  integer(kind=i4) :: il
+
+   pl(0) = 1.0_r8
+   if (l >= 1) pl(1) = x
+   d1pl(0) = 0.0_r8
+   if (l >= 1) d1pl(1) = 1.0_r8
+   d2pl(0) = 0.0_r8
+   if (l >= 1) d2pl(1) = 0.0_r8
+   do il = 1, l-1
+     pl(il+1)   = ((2.0_r8*il+1.0_r8)*x*pl(il) - il*pl(il-1)) / (il+1.0_r8)
+     d1pl(il+1) = (2.0_r8*il+1.0_r8)*pl(il) + d1pl(il-1)
+     d2pl(il+1) = (2.0_r8*il+1.0_r8)*d1pl(il) + d2pl(il-1)
+   enddo
+
+ end subroutine calderplegd
+
+ ! ---- kernel: un hilo = un valor de x = un pl(0:l) completo ----
+ attributes(global) subroutine k_calpleg(n, l, x, pl_out)
+  integer(kind=i4), value :: n, l
+  real(kind=r8), device, intent(in)  :: x(n)
+  real(kind=r8), device, intent(out) :: pl_out(0:lmax_dev, n)
+  real(kind=r8) :: pl_local(0:lmax_dev)
+  integer(kind=i4) :: i
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= n) then
+     call calplegd(l, x(i), pl_local(0:l))
+     pl_out(0:l, i) = pl_local(0:l)
+   endif
+
+ end subroutine k_calpleg
+
+ attributes(global) subroutine k_calderpleg(n, l, x, pl_out, d1pl_out, d2pl_out)
+  integer(kind=i4), value :: n, l
+  real(kind=r8), device, intent(in)  :: x(n)
+  real(kind=r8), device, intent(out) :: pl_out(0:lmax_dev, n)
+  real(kind=r8), device, intent(out) :: d1pl_out(0:lmax_dev, n)
+  real(kind=r8), device, intent(out) :: d2pl_out(0:lmax_dev, n)
+  real(kind=r8) :: pl_local(0:lmax_dev), d1_local(0:lmax_dev), d2_local(0:lmax_dev)
+  integer(kind=i4) :: i
+
+   i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (i <= n) then
+     call calderplegd(l, x(i), pl_local(0:l), d1_local(0:l), d2_local(0:l))
+     pl_out(0:l, i)   = pl_local(0:l)
+     d1pl_out(0:l, i) = d1_local(0:l)
+     d2pl_out(0:l, i) = d2_local(0:l)
+   endif
+
+ end subroutine k_calderpleg
+
+end module mlegendre_gpu
+
+
+program test_legendre
+ use mlegendre, only: calpleg_cpu => calpleg, calderpleg_cpu => calderpleg
+ use mlegendre_gpu
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ integer(kind=i4), parameter :: l = 4          ! como lxhe4 en in.mcv
+ integer(kind=i4), parameter :: n = 6          ! numero de walkers de prueba
+ real(kind=r8) :: x_h(n)
+ real(kind=r8) :: pl_cpu(0:l), d1_cpu(0:l), d2_cpu(0:l)
+
+ real(kind=r8), device :: x_d(n)
+ real(kind=r8), device :: pl_d(0:lmax_dev, n)
+ real(kind=r8), device :: d1_d(0:lmax_dev, n), d2_d(0:lmax_dev, n)
+ real(kind=r8) :: pl_h(0:lmax_dev, n), d1_h(0:lmax_dev, n), d2_h(0:lmax_dev, n)
+
+ integer(kind=i4) :: i
+ real(kind=r8) :: err_pl, err_d1, err_d2, errmax
+ integer(kind=i4) :: threads, blocks
+
+  ! valores de x de prueba: cubren el rango fisico de un coseno [-1,1],
+  ! incluyendo los casos con respuesta analitica conocida (-1 y 1)
+  x_h = (/ -1.0_r8, -0.5_r8, 0.0_r8, 0.3_r8, 0.7_r8, 1.0_r8 /)
+
+  x_d = x_h   ! copia CPU -> GPU
+
+  threads = 32
+  blocks = (n + threads - 1) / threads
+
+  call k_calpleg<<<blocks, threads>>>(n, l, x_d, pl_d)
+  call k_calderpleg<<<blocks, threads>>>(n, l, x_d, pl_d, d1_d, d2_d)
+
+  pl_h = pl_d   ! copia GPU -> CPU
+  d1_h = d1_d
+  d2_h = d2_d
+
+  errmax = 0.0_r8
+  do i = 1, n
+    call calpleg_cpu(l, x_h(i), pl_cpu)
+    call calderpleg_cpu(l, x_h(i), pl_cpu, d1_cpu, d2_cpu)
+
+    write(*,*)
+    write(*,'(a,i0,a,f8.4)') '--- walker ', i, '   x = ', x_h(i)
+    write(*,'(a,5f14.8)') '  pl   CPU:', pl_cpu
+    write(*,'(a,5f14.8)') '  pl   GPU:', pl_h(0:l,i)
+    write(*,'(a,5f14.8)') '  d1pl CPU:', d1_cpu
+    write(*,'(a,5f14.8)') '  d1pl GPU:', d1_h(0:l,i)
+    write(*,'(a,5f14.8)') '  d2pl CPU:', d2_cpu
+    write(*,'(a,5f14.8)') '  d2pl GPU:', d2_h(0:l,i)
+
+    err_pl = maxval(abs(pl_h(0:l,i) - pl_cpu))
+    err_d1 = maxval(abs(d1_h(0:l,i) - d1_cpu))
+    err_d2 = maxval(abs(d2_h(0:l,i) - d2_cpu))
+    write(*,'(a,es10.2,a,es10.2,a,es10.2)') &
+        '  max|err|  pl=', err_pl, '   d1pl=', err_d1, '   d2pl=', err_d2
+    write(*,'(a)') '  -- alta precision --'
+    write(*,'(a,5es24.17)') '  HP pl   CPU:', pl_cpu
+    write(*,'(a,5es24.17)') '  HP pl   GPU:', pl_h(0:l,i)
+    write(*,'(a,5es24.17)') '  HP d1pl CPU:', d1_cpu
+    write(*,'(a,5es24.17)') '  HP d1pl GPU:', d1_h(0:l,i)
+    write(*,'(a,5es24.17)') '  HP d2pl CPU:', d2_cpu
+    write(*,'(a,5es24.17)') '  HP d2pl GPU:', d2_h(0:l,i)
+
+    errmax = max(errmax, err_pl, err_d1, err_d2)
+  enddo
+
+  write(*,*)
+  if (errmax < 1.0d-12) then
+    write(*,*) 'PASA: GPU y CPU coinciden dentro de tolerancia'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_legendre

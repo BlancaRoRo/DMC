@@ -1,0 +1,28 @@
+module k_He_dihydrogen_mod
+ use mHe_dihydrogen, only: He_dihydrogen
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+contains
+
+! un hilo = un walker (su propio X(3*N)); r_dih/rHH/orHH son los mismos
+! para todos los walkers (solo dependen de dhcm, no de la configuracion)
+attributes(global) subroutine k_He_dihydrogen(n_walk, natoms, r_dih, rHH, orHH, &
+    X, V, energy1, energy2, energy3, gtest)
+ integer(kind=i4), value :: n_walk, natoms
+ logical, value :: gtest
+ real(kind=r8), device, intent(in) :: r_dih(3,2), rHH(3,1), orHH(3,1)
+ real(kind=r8), device, intent(in) :: X(3*natoms, n_walk)
+ real(kind=r8), device, intent(out) :: V(3*natoms, n_walk)
+ real(kind=r8), device, intent(out) :: energy1(n_walk), energy2(n_walk), energy3(n_walk)
+ integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n_walk) then
+    call He_dihydrogen(natoms, r_dih, rHH, orHH, X(:,i), V(:,i), &
+                        energy1(i), energy2(i), energy3(i), gtest)
+  endif
+end subroutine k_He_dihydrogen
+
+end module k_He_dihydrogen_mod

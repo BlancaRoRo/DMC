@@ -1,0 +1,565 @@
+module der_wavefx
+ use mtipos, only: vec3
+ ! duhe4x/uhe4x ya portados y probados en d_uhex4.cuf -- se reutilizan
+ ! junto con sus variables device (lxhe4, pxhe4, impurmol), en vez de
+ ! declarar copias separadas del mismo dato.
+ use d_uhex4, only: duhe4x, uhe4x, lxhe4, pxhe4, impurmol
+ use mlegendre_gpu, only: calpleg => calplegd, calderpleg => calderplegd, lmax_dev
+ ! rij**pxhe3(2,il)/rij**pxhe3(4,il): mismo motivo que en d_uhex4.cuf --
+ ! exponente REAL (nu/p4), pow() con implementaciones independientes en
+ ! host/device. Ver docs-kernels/glibc_math.md Parte 4.
+ use glibc_pow_mod, only: mypow
+ ! exp(ujas) en wavefx: mismo riesgo fast/precise (__fd_exp_1 vs
+ ! __pd_exp_1) confirmado para acos/pow/exp en el resto del arbol --
+ ! ver docs-kernels/wavef.md Parte 2 §10 y der_wavefx.md §9.
+ use glibc_exp_mod, only: myexp
+
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! nhe4, nhe3, ngatom, natom, impureza: variables reales de mparametros.f90
+ ! (publicas, sin "parameter"), mismo tratamiento que en duhe4x/wavefhe4.
+ integer(kind=i4), device :: nhe4, nhe3, ngatom, natom
+ logical, device :: impureza
+
+ ! lxhe3/pxhe3: analogas a lxhe4/pxhe4 pero para el termino He3-impureza.
+ ! En este proyecto nhe3=0, asi que duhe3x/uhe3x nunca se llegan a
+ ! ejecutar en tiempo de ejecucion (los bucles que los llaman quedan
+ ! vacios) -- pero el codigo tiene que existir y compilar igual, porque
+ ! la llamada esta ahi.
+ integer(kind=i4), device :: lxhe3
+ real(kind=r8), device :: pxhe3(5,0:lmax_dev)
+
+contains
+
+! ---- duhe3x/uhe3x: mismo patron exacto que duhe4x/uhe4x, con lxhe3/pxhe3 ----
+attributes(host, device) subroutine duhe3x(rivec, smol, d1ux, d2ux, d1zux, d2zux)
+  type(vec3), intent (in) :: rivec, smol(3)
+  type(vec3), intent (out) :: d1ux
+  real(kind=r8), intent (out) :: d2ux
+  real(kind=r8), intent (out) :: d1zux(2), d2zux
+  type(vec3) :: grz, grpl, grul
+  real(kind=r8) :: rij,cth,zpr,grz2,lapz
+  real(kind=r8) :: gpz(2),lpz,gpz2
+  real(kind=r8) :: ulx,ulxp,ulxs,lapl
+  real(kind=r8) :: rijp2,rijp4
+  real(kind=r8) :: pl(0:lmax_dev),d1pl(0:lmax_dev),d2pl(0:lmax_dev)
+  integer(kind=i4) :: il
+
+   rij=sqrt(dot_product(rivec%comp,rivec%comp))
+   if(impurmol) then
+     cth=dot_product(rivec%comp,smol(3)%comp)/rij
+     zpr=cth/rij
+     grz%comp=(smol(3)%comp-zpr*rivec%comp)/rij
+     grz2=dot_product(grz%comp,grz%comp)
+     lapz=-2.0_r8*zpr/rij
+     gpz(1)=-dot_product(rivec%comp,smol(2)%comp)/rij
+     gpz(2)= dot_product(rivec%comp,smol(1)%comp)/rij
+     gpz2=dot_product(gpz,gpz)
+     lpz=-cth-cth
+   else
+     cth=0.0_r8
+     grz%comp=0.0_r8
+     grz2=0.0_r8
+     lapz=0.0_r8
+     gpz=0.0_r8
+     lpz=0.0_r8
+   endif
+
+   call calderpleg(lxhe3,cth,pl(0:lxhe3),d1pl(0:lxhe3),d2pl(0:lxhe3))
+   do il=1,lxhe3
+     pl(il)=1.0_r8-pl(il)
+     d1pl(il)=-d1pl(il)
+     d2pl(il)=-d2pl(il)
+   enddo
+
+   d1ux%comp=0.0_r8
+   d2ux=0.0_r8
+   d1zux=0.0_r8
+   d2zux=0.0_r8
+   do il=0,lxhe3
+     rijp2=mypow(rij,pxhe3(2,il))
+     rijp4=mypow(rij,pxhe3(4,il))
+     ulx=  -pxhe3(1,il)/rijp2                                   &
+ &         -pxhe3(3,il)*rijp4-pxhe3(5,il)*log(rij)
+     ulxp=( pxhe3(1,il)*pxhe3(2,il)/rijp2                       &
+ &         -pxhe3(3,il)*pxhe3(4,il)*rijp4-pxhe3(5,il))/rij
+     ulxs=(-pxhe3(1,il)*pxhe3(2,il)*(pxhe3(2,il)+1.0_r8)/rijp2  &
+ &         -pxhe3(3,il)*pxhe3(4,il)*(pxhe3(4,il)-1.0_r8)*rijp4  &
+ &         +pxhe3(5,il))/rij**2
+     ulxs=ulxs+2.0_r8*ulxp/rij
+     grul%comp=ulxp/rij*rivec%comp
+     grpl%comp=d1pl(il)*grz%comp
+     lapl=lapz*d1pl(il)+grz2*d2pl(il)
+     d1ux%comp=d1ux%comp+pl(il)*grul%comp
+     d1ux%comp=d1ux%comp+ulx*grpl%comp
+     d2ux=d2ux+pl(il)*ulxs
+     d2ux=d2ux+ulx*lapl
+     d2ux=d2ux+2.0_r8*dot_product(grul%comp,grpl%comp)
+     d1zux(:)=d1zux(:)+ulx*d1pl(il)*gpz(:)
+     d2zux=d2zux+ulx*(d1pl(il)*lpz+d2pl(il)*gpz2)
+   enddo
+
+end subroutine duhe3x
+
+attributes(host, device) function uhe3x(rij, cth)
+  real(kind=r8) :: uhe3x
+  real(kind=r8), intent (in) :: rij,cth
+  real(kind=r8) :: pl(0:lmax_dev)
+  real(kind=r8) :: ul
+  integer(kind=i4) :: il
+
+   call calpleg(lxhe3,cth,pl(0:lxhe3))
+   do il=1,lxhe3
+     pl(il)=1.0_r8-pl(il)
+   enddo
+
+   uhe3x=0.0_r8
+   do il=0,lxhe3
+     ul=-pxhe3(1,il)/mypow(rij,pxhe3(2,il))-pxhe3(3,il)*mypow(rij,pxhe3(4,il))  &
+ &      -pxhe3(5,il)*log(rij)
+     uhe3x=uhe3x+ul*pl(il)
+   enddo
+
+end function uhe3x
+
+! ---- wavefx: la interfaz cambia de w1 a atom(natom)+sprop3 ----
+! Solo se lee w1%atom(:) y w1%sprop(3) (nunca sprop(1)/sprop(2)), y solo
+! se escribe w1%lw%wfx -- se extraen justo esas piezas.
+attributes(host, device) subroutine wavefx(atom, sprop3, wfx)
+  type (vec3), intent (in)  :: atom(natom)
+  type (vec3), intent (in)  :: sprop3
+  real (kind=r8), intent (out) :: wfx
+  type (vec3) :: rtemp
+  real (kind=r8) :: ujas
+  real (kind=r8) :: rij,cth
+  real (kind=r8) :: dnor
+  integer (kind=i4) :: jatom
+
+   if(impureza) then
+     cth=0.0_r8
+     ujas=0.0_r8
+     if(impurmol) dnor=sqrt(dot_product(sprop3%comp,sprop3%comp))
+     do jatom=1,nhe4
+       rtemp%comp=atom(jatom)%comp-atom(natom)%comp
+       rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+       if(impurmol) cth=dot_product(rtemp%comp,sprop3%comp)/(dnor*rij)
+       ujas=ujas+uhe4x(rij,cth)
+     enddo
+     do jatom=nhe4+1,ngatom
+       rtemp%comp=atom(jatom)%comp-atom(natom)%comp
+       rij=sqrt(dot_product(rtemp%comp,rtemp%comp))
+       if(impurmol) cth=dot_product(rtemp%comp,sprop3%comp)/(dnor*rij)
+       ujas=ujas+uhe3x(rij,cth)
+     enddo
+     wfx=myexp(ujas)
+   else
+     wfx=1.0_r8
+   endif
+
+ end subroutine wavefx
+
+! ---- derwavefx: cambia de w1 a atom(natom)+sprop(3) ----
+attributes(host, device) subroutine derwavefx(atom, sprop, d1wf, d2wf, d1zwf, d2zwf)
+  type(vec3), intent (in)  :: atom(natom)
+  type(vec3), intent (in)  :: sprop(3)
+  type(vec3), intent (out)   :: d1wf(natom)
+  real(kind=r8), intent (out) :: d2wf(natom)
+  real(kind=r8), intent (out) :: d1zwf(2),d2zwf
+  type(vec3) :: d1ux
+  real(kind=r8) :: d2ux
+  real(kind=r8) :: d1zux(2),d2zux
+  type(vec3) :: rtemp,smol(3)
+  real(kind=r8) :: dnor
+  integer(kind=i4) :: iatom,jatom,jhe3
+  integer(kind=i4) :: ic
+
+   do iatom=1,natom
+     d1wf(iatom)%comp(:)=0.0_r8
+     d2wf(iatom)=0.0_r8
+   enddo
+   d1zwf=0.0_r8
+   d2zwf=0.0_r8
+   if(.not.impureza) return
+
+   if(impurmol) then
+     do ic=1,3
+       dnor=sqrt(dot_product(sprop(ic)%comp,sprop(ic)%comp))
+       smol(ic)%comp(:)=sprop(ic)%comp(:)/dnor
+     enddo
+   endif
+
+   do jatom=1,nhe4
+     rtemp%comp=atom(jatom)%comp-atom(natom)%comp
+     call duhe4x(rtemp,smol,d1ux,d2ux,d1zux,d2zux)
+     d1wf(jatom)%comp(:)=d1ux%comp(:)
+     d1wf(natom)%comp(:)=d1wf(natom)%comp(:)-d1ux%comp(:)
+     d2wf(jatom)=d2ux
+     d2wf(natom)=d2wf(natom)+d2ux
+     d1zwf(:)=d1zwf(:)+d1zux(:)
+     d2zwf=d2zwf+d2zux
+   enddo
+
+   do jhe3=1,nhe3
+     jatom=nhe4+jhe3
+     rtemp%comp=atom(jatom)%comp-atom(natom)%comp
+     call duhe3x(rtemp,smol,d1ux,d2ux,d1zux,d2zux)
+     d1wf(jatom)%comp(:)=d1ux%comp(:)
+     d1wf(natom)%comp(:)=d1wf(natom)%comp(:)-d1ux%comp(:)
+     d2wf(jatom)=d2ux
+     d2wf(natom)=d2wf(natom)+d2ux
+     d1zwf(:)=d1zwf(:)+d1zux(:)
+     d2zwf=d2zwf+d2zux
+   enddo
+
+   do iatom=1,natom
+     d2wf(iatom)=d2wf(iatom)+dot_product(d1wf(iatom)%comp,d1wf(iatom)%comp)
+   enddo
+   d2zwf=d2zwf+dot_product(d1zwf,d1zwf)
+
+ end subroutine derwavefx
+
+! un hilo = un walker = un wfx
+attributes(global) subroutine k_wavefx(n, atom, sprop, wfx_out)
+  integer(kind=i4), value :: n
+  ! se recibe sprop(3,n) completo (no una seccion sprop(3,:) recortada
+  ! en el host) -- pasar una seccion con salto como argumento de un
+  ! lanzamiento de kernel dio un segmentation fault; indexar el
+  ! componente 3 dentro del kernel es un acceso normal, sin problema.
+  type(vec3), device, intent (in)  :: atom(natom,n), sprop(3,n)
+  real(kind=r8), device, intent (out) :: wfx_out(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call wavefx(atom(:,i), sprop(3,i), wfx_out(i))
+  endif
+end subroutine k_wavefx
+
+! un hilo = un walker = un (d1wf,d2wf,d1zwf,d2zwf) de natom componentes
+attributes(global) subroutine k_derwavefx(n, atom, sprop, d1wf, d2wf, d1zwf, d2zwf)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in)  :: atom(natom,n), sprop(3,n)
+  type(vec3), device, intent (out) :: d1wf(natom,n)
+  real(kind=r8), device, intent (out) :: d2wf(natom,n)
+  real(kind=r8), device, intent (out) :: d1zwf(2,n), d2zwf(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call derwavefx(atom(:,i), sprop(:,i), d1wf(:,i), d2wf(:,i), d1zwf(:,i), d2zwf(i))
+  endif
+end subroutine k_derwavefx
+
+! Kernels para probar duhe3x/uhe3x DIRECTAMENTE (no a traves de
+! wavefx/derwavefx, que con nhe3=0 nunca llegan a llamarlos). Mismo
+! patron que k_duhe4x/k_uhe4x en d_uhex4.cuf.
+attributes(global) subroutine k_duhe3x(n, rivec, smol, d1ux, d2ux, d1zux, d2zux)
+  integer(kind=i4), value :: n
+  type(vec3), device, intent (in)  :: rivec(n), smol(3)
+  type(vec3), device, intent (out) :: d1ux(n)
+  real(kind=r8), device, intent (out) :: d2ux(n)
+  real(kind=r8), device, intent (out) :: d1zux(2,n), d2zux(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call duhe3x(rivec(i), smol, d1ux(i), d2ux(i), d1zux(:,i), d2zux(i))
+  endif
+end subroutine k_duhe3x
+
+attributes(global) subroutine k_uhe3x(n, rij, cth, uhe3x_out)
+  integer(kind=i4), value :: n
+  real(kind=r8), device, intent (in)  :: rij(n), cth(n)
+  real(kind=r8), device, intent (out) :: uhe3x_out(n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    uhe3x_out(i) = uhe3x(rij(i), cth(i))
+  endif
+end subroutine k_uhe3x
+
+end module der_wavefx
+
+
+program test_derwavefx
+ use mwavef, only: wavefx_cpu => wavefx, derwavefx_cpu => derwavefx, &
+                    duhe3x_cpu => duhe3x, uhe3x_cpu => uhe3x
+ use mtipos, only: vec3, walker, allocatewalker
+ use mparametros, only: nhe4_real => nhe4, nhe3_real => nhe3, &
+                         ngatom_real => ngatom, natom_real => natom, &
+                         impureza_real => impureza, impurmol_real => impurmol, &
+                         lxhe4_real => lxhe4, pxhe4_real => pxhe4, &
+                         lxhe3_real => lxhe3, pxhe3_real => pxhe3
+ use der_wavefx
+ use d_uhex4, only: lxhe4, pxhe4, impurmol
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ integer(kind=i4), parameter :: n_he4  = 4   ! atomos de He4 de prueba
+ integer(kind=i4), parameter :: n_atom = n_he4 + 1   ! + la impureza (nhe3=0)
+ integer(kind=i4), parameter :: n_walk = 5   ! 3 normales + 2 extremos (contacto/largo alcance)
+
+ real(kind=r8), parameter :: bxhe4(0:4)    = (/ 1.680309d0, 0.000000d0, 3.033954d0, 0.000000d0, 0.732198d0 /)
+ real(kind=r8), parameter :: nuxhe4(0:4)   = (/ 9.763290d0, 1.000000d0, 3.155952d0, 1.000000d0, 11.036848d0 /)
+ real(kind=r8), parameter :: alfaxhe4(0:4) = (/ 0.643208d0, 0.000000d0, 0.004908d0, 0.000000d0, 0.078598d0 /)
+ real(kind=r8), parameter :: p4xhe4(0:4)   = (/ 0.129298d0, 0.000000d0, 0.084248d0, 0.000000d0, 0.096948d0 /)
+ real(kind=r8), parameter :: p5xhe4(0:4)   = (/ 13.568705d0, 0.000000d0, 0.000706d0, 0.000000d0, 0.020823d0 /)
+
+ type(vec3) :: atom_h(n_atom,n_walk), sprop_h(3,n_walk)
+ type(vec3), device :: atom_d(n_atom,n_walk), sprop_d(3,n_walk)
+
+ real(kind=r8) :: wfx_cpu(n_walk), wfx_h(n_walk)
+ type(vec3) :: d1wf_cpu(n_atom,n_walk), d1wf_h(n_atom,n_walk)
+ real(kind=r8) :: d2wf_cpu(n_atom,n_walk), d2wf_h(n_atom,n_walk)
+ real(kind=r8) :: d1zwf_cpu(2,n_walk), d1zwf_h(2,n_walk)
+ real(kind=r8) :: d2zwf_cpu(n_walk), d2zwf_h(n_walk)
+
+ real(kind=r8), device :: wfx_d(n_walk)
+ type(vec3), device :: d1wf_d(n_atom,n_walk)
+ real(kind=r8), device :: d2wf_d(n_atom,n_walk)
+ real(kind=r8), device :: d1zwf_d(2,n_walk), d2zwf_d(n_walk)
+
+ type(walker) :: w1
+ integer(kind=i4) :: iw, ia, threads, blocks
+ real(kind=r8) :: err, errmax
+
+ ! --- prueba directa de duhe3x/uhe3x (nhe3=0 hace que wavefx/derwavefx
+ ! nunca los llamen, asi que hay que ejercitarlos aparte) ---
+ integer(kind=i4), parameter :: n_he3test = 8
+ type(vec3) :: rivec3_h(n_he3test), smol3_h(3)
+ type(vec3), device :: rivec3_d(n_he3test), smol3_d(3)
+ type(vec3) :: d1ux3_cpu(n_he3test), d1ux3_h(n_he3test)
+ type(vec3), device :: d1ux3_d(n_he3test)
+ real(kind=r8) :: d2ux3_cpu(n_he3test), d1zux3_cpu(2,n_he3test), d2zux3_cpu(n_he3test)
+ real(kind=r8) :: d2ux3_h(n_he3test), d1zux3_h(2,n_he3test), d2zux3_h(n_he3test)
+ real(kind=r8), device :: d2ux3_d(n_he3test), d1zux3_d(2,n_he3test), d2zux3_d(n_he3test)
+ real(kind=r8) :: rij3_h(n_he3test), cth3_h(n_he3test)
+ real(kind=r8), device :: rij3_d(n_he3test), cth3_d(n_he3test)
+ real(kind=r8) :: uhe3x_cpu_v(n_he3test), uhe3x_h(n_he3test)
+ real(kind=r8), device :: uhe3x_d(n_he3test)
+ real(kind=r8) :: err3
+
+  nhe4 = n_he4
+  nhe3 = 0
+  ngatom = n_he4
+  natom = n_atom
+  impureza = .true.
+  lxhe4 = 4
+  do ia = 0, 4
+    pxhe4(1,ia) = 0.50_r8*(bxhe4(ia)**nuxhe4(ia))
+    pxhe4(2,ia) = nuxhe4(ia)
+    pxhe4(3,ia) = alfaxhe4(ia)
+    pxhe4(4,ia) = p4xhe4(ia)
+    pxhe4(5,ia) = p5xhe4(ia)
+  enddo
+  impurmol = .true.
+  ! lxhe3/pxhe3: valores reales del bloque He3-impureza de in.mcv
+  ! (b=0.5, nu=0, alfa=1, p4=1, p5=0, lxhe3=0 -- solo termino l=0).
+  ! wavefx/derwavefx no los llegan a leer nunca con nhe3=0/ngatom=nhe4,
+  ! asi que no afecta a esa parte de la prueba; se usan mas abajo para
+  ! probar duhe3x/uhe3x de forma independiente.
+  lxhe3 = 0
+  pxhe3 = 0.0_r8
+  pxhe3(1,0) = 0.50_r8*(0.5d0**0.0d0)
+  pxhe3(2,0) = 0.0d0
+  pxhe3(3,0) = 1.0d0
+  pxhe3(4,0) = 1.0d0
+  pxhe3(5,0) = 0.0d0
+
+  nhe4_real = n_he4
+  nhe3_real = 0
+  ngatom_real = n_he4
+  natom_real = n_atom
+  impureza_real = .true.
+  impurmol_real = .true.
+  lxhe4_real = 4
+  pxhe4_real(:,0:4) = pxhe4(:,0:4)
+  lxhe3_real = 0
+  pxhe3_real = 0.0_r8
+  pxhe3_real(:,0) = pxhe3(:,0)
+
+  atom_h(1,1)%comp = (/  0.0d0,  0.0d0,  0.0d0 /)
+  atom_h(2,1)%comp = (/  3.5d0,  0.0d0,  0.0d0 /)
+  atom_h(3,1)%comp = (/  0.0d0,  4.0d0,  1.0d0 /)
+  atom_h(4,1)%comp = (/ -2.0d0, -3.0d0,  2.5d0 /)
+  atom_h(5,1)%comp = (/  1.0d0,  1.0d0,  1.0d0 /)
+
+  atom_h(1,2)%comp = (/  1.0d0,  1.0d0,  1.0d0 /)
+  atom_h(2,2)%comp = (/ -1.0d0,  2.0d0,  0.5d0 /)
+  atom_h(3,2)%comp = (/  2.5d0, -1.5d0,  3.0d0 /)
+  atom_h(4,2)%comp = (/  0.0d0,  0.0d0, -4.0d0 /)
+  atom_h(5,2)%comp = (/  0.5d0, -0.5d0,  0.5d0 /)
+
+  atom_h(1,3)%comp = (/  5.0d0,  0.0d0,  0.0d0 /)
+  atom_h(2,3)%comp = (/  0.0d0,  5.0d0,  0.0d0 /)
+  atom_h(3,3)%comp = (/  0.0d0,  0.0d0,  5.0d0 /)
+  atom_h(4,3)%comp = (/  2.0d0,  2.0d0,  2.0d0 /)
+  atom_h(5,3)%comp = (/  1.5d0,  1.5d0,  1.5d0 /)
+
+  sprop_h(1,1)%comp = (/ 2.0d0, 0.0d0, 0.0d0 /)
+  sprop_h(2,1)%comp = (/ 0.0d0, 1.5d0, 0.0d0 /)
+  sprop_h(3,1)%comp = (/ 0.3d0, 0.4d0, 1.2d0 /)
+
+  sprop_h(1,2)%comp = (/ 1.0d0, 0.2d0, 0.0d0 /)
+  sprop_h(2,2)%comp = (/ 0.0d0, 1.0d0, 0.3d0 /)
+  sprop_h(3,2)%comp = (/ 0.5d0, 0.0d0, 1.0d0 /)
+
+  sprop_h(1,3)%comp = (/ 0.7d0, 0.7d0, 0.0d0 /)
+  sprop_h(2,3)%comp = (/ -0.7d0, 0.7d0, 0.0d0 /)
+  sprop_h(3,3)%comp = (/ 0.0d0, 0.0d0, 2.0d0 /)
+
+  ! walker 4 (extremo): impureza a contacto muy cercano de un atomo de
+  ! He4 (rij(1,5)~0.05) -- ujas se dispara muy negativo, wfx=exp(ujas)
+  ! satura a 0.0 exacto (comprobar que el suelo es identico en las 3 vias)
+  atom_h(1,4)%comp = (/  1.05d0,  1.0d0,  1.0d0 /)
+  atom_h(2,4)%comp = (/ -1.0d0,  2.0d0,  0.5d0 /)
+  atom_h(3,4)%comp = (/  2.5d0, -1.5d0,  3.0d0 /)
+  atom_h(4,4)%comp = (/  0.0d0,  0.0d0, -4.0d0 /)
+  atom_h(5,4)%comp = (/  1.0d0,  1.0d0,  1.0d0 /)
+  sprop_h(1,4)%comp = (/ 1.0d0, 0.2d0, 0.0d0 /)
+  sprop_h(2,4)%comp = (/ 0.0d0, 1.0d0, 0.3d0 /)
+  sprop_h(3,4)%comp = (/ 0.5d0, 0.0d0, 1.0d0 /)
+
+  ! walker 5 (extremo): impureza a largo alcance de los 4 atomos de He4
+  ! (rij~1000 en los 4 casos) -- ujas moderadamente negativo (~-380,
+  ! sin llegar a subdesbordar), zona de cola donde myexp aun da un
+  ! valor normal representable (~1E-166), buena para precision real.
+  atom_h(1,5)%comp = (/ 1000.0d0,    0.0d0,    0.0d0 /)
+  atom_h(2,5)%comp = (/    0.0d0, 1000.0d0,    0.0d0 /)
+  atom_h(3,5)%comp = (/    0.0d0,    0.0d0, 1000.0d0 /)
+  atom_h(4,5)%comp = (/-1000.0d0,    0.0d0,    0.0d0 /)
+  atom_h(5,5)%comp = (/    0.0d0,    0.0d0,    0.0d0 /)
+  sprop_h(1,5)%comp = (/ 0.7d0, 0.7d0, 0.0d0 /)
+  sprop_h(2,5)%comp = (/ -0.7d0, 0.7d0, 0.0d0 /)
+  sprop_h(3,5)%comp = (/ 0.0d0, 0.0d0, 2.0d0 /)
+
+  atom_d  = atom_h
+  sprop_d = sprop_h
+
+  threads = 32
+  blocks = (n_walk + threads - 1) / threads
+
+  call k_wavefx<<<blocks,threads>>>(n_walk, atom_d, sprop_d, wfx_d)
+  call k_derwavefx<<<blocks,threads>>>(n_walk, atom_d, sprop_d, d1wf_d, d2wf_d, d1zwf_d, d2zwf_d)
+
+  wfx_h   = wfx_d
+  d1wf_h  = d1wf_d
+  d2wf_h  = d2wf_d
+  d1zwf_h = d1zwf_d
+  d2zwf_h = d2zwf_d
+
+  errmax = 0.0d0
+  do iw = 1, n_walk
+    call allocatewalker(w1, n_atom)
+    do ia = 1, n_atom
+      w1%atom(ia) = atom_h(ia,iw)
+    enddo
+    w1%sprop(1) = sprop_h(1,iw)
+    w1%sprop(2) = sprop_h(2,iw)
+    w1%sprop(3) = sprop_h(3,iw)
+
+    call wavefx_cpu(w1)
+    wfx_cpu(iw) = w1%lw%wfx
+    call derwavefx_cpu(w1, d1wf_cpu(:,iw), d2wf_cpu(:,iw), d1zwf_cpu(:,iw), d2zwf_cpu(iw))
+
+    write(*,*)
+    write(*,'(a,i0)') '--- walker ', iw
+    write(*,'(a,f20.12,a,f20.12)') '  wfx CPU=', wfx_cpu(iw), '   GPU=', wfx_h(iw)
+    write(*,'(a,es24.17,a,es24.17)') '  HP wfx CPU=', wfx_cpu(iw), '   GPU=', wfx_h(iw)
+
+    err = abs(wfx_h(iw) - wfx_cpu(iw))
+    do ia = 1, n_atom
+      write(*,'(a,i0,a,3f16.8,a,f16.8)') '  atom ',ia,' d1wf CPU=', d1wf_cpu(ia,iw)%comp, '  d2wf CPU=', d2wf_cpu(ia,iw)
+      write(*,'(a,i0,a,3f16.8,a,f16.8)') '  atom ',ia,' d1wf GPU=', d1wf_h(ia,iw)%comp,   '  d2wf GPU=', d2wf_h(ia,iw)
+      write(*,'(a,i0,a,3es24.17,a,es24.17)') '  HP atom ',ia,' d1wf CPU=', d1wf_cpu(ia,iw)%comp, '  d2wf CPU=', d2wf_cpu(ia,iw)
+      write(*,'(a,i0,a,3es24.17,a,es24.17)') '  HP atom ',ia,' d1wf GPU=', d1wf_h(ia,iw)%comp,   '  d2wf GPU=', d2wf_h(ia,iw)
+      err = max(err, maxval(abs(d1wf_h(ia,iw)%comp - d1wf_cpu(ia,iw)%comp)))
+      err = max(err, abs(d2wf_h(ia,iw) - d2wf_cpu(ia,iw)))
+    enddo
+    write(*,'(a,2f16.8,a,2f16.8)') '  d1zwf CPU=', d1zwf_cpu(:,iw), '   GPU=', d1zwf_h(:,iw)
+    write(*,'(a,f16.8,a,f16.8)')   '  d2zwf CPU=', d2zwf_cpu(iw),   '   GPU=', d2zwf_h(iw)
+    write(*,'(a,2es24.17,a,2es24.17)') '  HP d1zwf CPU=', d1zwf_cpu(:,iw), '   GPU=', d1zwf_h(:,iw)
+    write(*,'(a,es24.17,a,es24.17)')   '  HP d2zwf CPU=', d2zwf_cpu(iw),   '   GPU=', d2zwf_h(iw)
+    err = max(err, maxval(abs(d1zwf_h(:,iw)-d1zwf_cpu(:,iw))), abs(d2zwf_h(iw)-d2zwf_cpu(iw)))
+
+    write(*,'(a,es10.2)') '  |err| max=', err
+    errmax = max(errmax, err)
+  enddo
+
+  ! --- prueba directa de duhe3x/uhe3x ---
+  ! marco molecular de prueba (no hace falta que coincida con ningun
+  ! sprop de los walkers de arriba)
+  smol3_h(1)%comp = (/ 1.0d0, 0.0d0, 0.0d0 /)
+  smol3_h(2)%comp = (/ 0.0d0, 1.0d0, 0.0d0 /)
+  smol3_h(3)%comp = (/ 0.0d0, 0.0d0, 1.0d0 /)
+
+  rivec3_h(1)%comp = (/ 3.0d0, 0.0d0, 0.0d0 /)
+  rivec3_h(2)%comp = (/ 0.0d0, 4.0d0, 1.0d0 /)
+  rivec3_h(3)%comp = (/ 2.0d0,-1.5d0, 2.2d0 /)
+  ! extremos: contacto muy cercano, largo alcance, cth=+1,-1,0 exactos
+  rivec3_h(4)%comp = (/  0.1d0,  0.0d0,  0.0d0 /)
+  rivec3_h(5)%comp = (/  0.0d0,  0.0d0, 1000.0d0 /)
+  rivec3_h(6)%comp = (/  0.0d0,  0.0d0,  5.0d0 /)
+  rivec3_h(7)%comp = (/  0.0d0,  0.0d0, -5.0d0 /)
+  rivec3_h(8)%comp = (/  5.0d0,  0.0d0,  0.0d0 /)
+
+  do ia = 1, n_he3test
+    rij3_h(ia) = sqrt(dot_product(rivec3_h(ia)%comp, rivec3_h(ia)%comp))
+    cth3_h(ia) = rivec3_h(ia)%comp(3) / rij3_h(ia)
+  enddo
+
+  smol3_d  = smol3_h
+  rivec3_d = rivec3_h
+  rij3_d   = rij3_h
+  cth3_d   = cth3_h
+
+  blocks = (n_he3test + threads - 1) / threads
+  call k_duhe3x<<<blocks,threads>>>(n_he3test, rivec3_d, smol3_d, d1ux3_d, d2ux3_d, d1zux3_d, d2zux3_d)
+  call k_uhe3x<<<blocks,threads>>>(n_he3test, rij3_d, cth3_d, uhe3x_d)
+
+  d1ux3_h  = d1ux3_d
+  d2ux3_h  = d2ux3_d
+  d1zux3_h = d1zux3_d
+  d2zux3_h = d2zux3_d
+  uhe3x_h  = uhe3x_d
+
+  write(*,*)
+  write(*,*) '=== prueba directa de duhe3x/uhe3x (nhe3=0 no las ejercita arriba) ==='
+  err3 = 0.0d0
+  do ia = 1, n_he3test
+    call duhe3x_cpu(rivec3_h(ia), smol3_h, d1ux3_cpu(ia), d2ux3_cpu(ia), d1zux3_cpu(:,ia), d2zux3_cpu(ia))
+    uhe3x_cpu_v(ia) = uhe3x_cpu(rij3_h(ia), cth3_h(ia))
+
+    write(*,*)
+    write(*,'(a,i0)') '--- rivec3 ', ia
+    write(*,'(a,3f16.8)') '  d1ux%comp CPU=', d1ux3_cpu(ia)%comp
+    write(*,'(a,3f16.8)') '  d1ux%comp GPU=', d1ux3_h(ia)%comp
+    write(*,'(a,f16.8,a,f16.8)') '  d2ux  CPU=', d2ux3_cpu(ia), '   GPU=', d2ux3_h(ia)
+    write(*,'(a,f16.8,a,f16.8)') '  uhe3x CPU=', uhe3x_cpu_v(ia), '   GPU=', uhe3x_h(ia)
+    write(*,'(a,3es24.17)') '  HP d1ux%comp CPU=', d1ux3_cpu(ia)%comp
+    write(*,'(a,3es24.17)') '  HP d1ux%comp GPU=', d1ux3_h(ia)%comp
+    write(*,'(a,es24.17,a,es24.17)') '  HP d2ux  CPU=', d2ux3_cpu(ia), '   GPU=', d2ux3_h(ia)
+    write(*,'(a,es24.17,a,es24.17)') '  HP uhe3x CPU=', uhe3x_cpu_v(ia), '   GPU=', uhe3x_h(ia)
+
+    err3 = max(err3, maxval(abs(d1ux3_h(ia)%comp - d1ux3_cpu(ia)%comp)))
+    err3 = max(err3, abs(d2ux3_h(ia) - d2ux3_cpu(ia)))
+    err3 = max(err3, maxval(abs(d1zux3_h(:,ia) - d1zux3_cpu(:,ia))))
+    err3 = max(err3, abs(d2zux3_h(ia) - d2zux3_cpu(ia)))
+    err3 = max(err3, abs(uhe3x_h(ia) - uhe3x_cpu_v(ia)))
+  enddo
+  write(*,'(a,es10.2)') '  |err| max duhe3x/uhe3x =', err3
+  errmax = max(errmax, err3)
+
+  write(*,*)
+  if (errmax < 1.0d-9) then
+    write(*,*) 'PASA: GPU y CPU coinciden dentro de tolerancia'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_derwavefx

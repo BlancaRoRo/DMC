@@ -1,0 +1,130 @@
+! test_getcm.cuf
+!
+! Prueba aislada de getcm (mwavef_gpu, wavef.cuf), pedida explicitamente
+! porque aunque solo tiene sumas de un termino por sentencia (ya en
+! forma "secuencial segura" en apariencia), no se habia verificado de
+! verdad -- se comprueba en vez de asumir. nhe4=20 (el valor REAL de la
+! simulacion, no 4 como en otras pruebas de este arbol) para que la
+! suma tenga tantos terminos como en la simulacion real, con posiciones
+! extremas (mezcla de valores muy grandes/muy pequenos/signos opuestos)
+! para forzar cancelacion.
+!
+! Compilar y ejecutar: ver docs-kernels/wavef.md
+
+module mtest_getcm_k
+ use mtipos, only: vec3
+ use mwavef_gpu, only: getcm
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+contains
+ attributes(global) subroutine k_getcm(n_atom, n_case, atom, rcm)
+  integer(kind=i4), value :: n_atom, n_case
+  type(vec3), device, intent (in) :: atom(n_atom,n_case)
+  real(kind=r8), device, intent (out) :: rcm(3,n_case)
+  integer(kind=i4) :: ic
+   ic = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+   if (ic <= n_case) call getcm(atom(:,ic), rcm(:,ic))
+ end subroutine k_getcm
+end module mtest_getcm_k
+
+program test_getcm
+ use mtest_getcm_k, only: k_getcm
+ use mwavef, only: getcm_cpu => getcm
+ use mtipos, only: vec3, walker, allocatewalker
+ use der_wavefx, only: nhe4, nhe3, ngatom, natom, impureza
+ use mwavef_gpu, only: mhe4, mhe3, mx
+ use mparametros, only: nhe4_real => nhe4, nhe3_real => nhe3, ngatom_real => ngatom, &
+                         natom_real => natom, impureza_real => impureza, &
+                         mhe4_real => mhe4, mhe3_real => mhe3, mx_real => mx
+ use cudafor
+ implicit none
+ integer, parameter :: i4 = selected_int_kind(9)
+ integer, parameter :: r8 = selected_real_kind(15,9)
+
+ integer(kind=i4), parameter :: n_he4 = 20   ! nhe4 REAL de la simulacion
+ integer(kind=i4), parameter :: n_atom = n_he4 + 1
+ integer(kind=i4), parameter :: n_case = 3
+
+ type(vec3) :: atom_h(n_atom,n_case)
+ type(vec3), device :: atom_d(n_atom,n_case)
+ real(kind=r8) :: rcm_cpu(3,n_case), rcm_h(3,n_case)
+ real(kind=r8), device :: rcm_d(3,n_case)
+
+ type(walker) :: w1
+ integer(kind=i4) :: ia, ic, threads, blocks
+ real(kind=r8) :: err, errmax
+
+  nhe4 = n_he4
+  nhe3 = 0
+  ngatom = n_he4
+  natom = n_atom
+  impureza = .true.
+  mhe4 = 4.00260_r8
+  mhe3 = 3.01604_r8
+  mx   = 2.01565006_r8
+
+  nhe4_real = n_he4
+  nhe3_real = 0
+  ngatom_real = n_he4
+  natom_real = n_atom
+  impureza_real = .true.
+  mhe4_real = mhe4
+  mhe3_real = mhe3
+  mx_real   = mx
+
+  ! caso 1: posiciones "normales" (referencia, sin nada extremo)
+  do ia = 1, n_atom
+    atom_h(ia,1)%comp = (/ 0.1d0*ia, -0.2d0*ia, 0.05d0*ia*ia /)
+  enddo
+
+  ! caso 2: extremo -- mezcla de valores MUY grandes y MUY pequenos,
+  ! signos alternos, para forzar cancelacion en la suma corrida
+  do ia = 1, n_atom
+    if (mod(ia,2)==0) then
+      atom_h(ia,2)%comp = (/  1.0d8*ia, -1.0d8*ia,  1.0d8 /)
+    else
+      atom_h(ia,2)%comp = (/ -1.0d8*ia,  1.0d8*ia, -1.0d8 /)
+    endif
+  enddo
+
+  ! caso 3: extremo -- todas las posiciones MUY pequenas (cerca de
+  ! underflow), para ver si la division final (por una masa total
+  ! "normal") se comporta igual en las 3 vias
+  do ia = 1, n_atom
+    atom_h(ia,3)%comp = (/ 1.0d-150*ia, -1.0d-150*ia, 1.0d-150 /)
+  enddo
+
+  atom_d = atom_h
+
+  threads = 32
+  blocks = (n_case + threads - 1) / threads
+  call k_getcm<<<blocks,threads>>>(n_atom, n_case, atom_d, rcm_d)
+  rcm_h = rcm_d
+
+  errmax = 0.0d0
+  do ic = 1, n_case
+    call allocatewalker(w1, n_atom)
+    do ia = 1, n_atom
+      w1%atom(ia) = atom_h(ia,ic)
+    enddo
+    call getcm_cpu(w1, rcm_cpu(:,ic))
+
+    write(*,*)
+    write(*,'(a,i0)') '--- caso ', ic
+    write(*,'(a,3es24.17)') '  HP rcm CPU=', rcm_cpu(:,ic)
+    write(*,'(a,3es24.17)') '  HP rcm GPU=', rcm_h(:,ic)
+
+    err = maxval(abs(rcm_h(:,ic) - rcm_cpu(:,ic)))
+    write(*,'(a,es10.2)') '  |err| max=', err
+    errmax = max(errmax, err)
+  enddo
+
+  write(*,*)
+  if (errmax < 1.0d-8) then
+    write(*,*) 'PASA: GPU y CPU coinciden dentro de tolerancia'
+  else
+    write(*,*) 'FALLA: diferencia maxima =', errmax
+  endif
+
+end program test_getcm
