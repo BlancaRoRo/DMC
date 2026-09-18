@@ -1,16 +1,43 @@
-# v4-cuda-pruebas
+# Fase 4: Pruebas
 
-Corridas de duración intermedia (minutos, no segundos) del pipeline GPU de producción (`v2-cuda-integracion/hibrido_instrumentado/`, ya con `GTEST` fijo + (a) + `nhe3` fijo migrados -- ver `v3-cuda-optimización/myexp-optimizacion/myexp-optimizacion.md`), para dos objetivos:
+Última fase del proyecto: con el pipeline GPU ya integrado (`fase2-integración`) y
+optimizado (`fase3-optimización`), aquí se mide su comportamiento real a escalas cada
+vez mayores -- desde encontrar el punto de cruce CPU/GPU hasta la corrida de
+producción completa del TFG -- y se explora un par de líneas de hardware aparte
+(V100 nativa, configuración inicial de referencia).
 
-1. **Escalar gradualmente** hacia una configuración de producción real (2000 walkers, 1 bloque equilibrio + 100 bloques cálculo, 10.000-100.000 pasos/bloque -- ver estimación en el hilo de conversación, entre ~14 horas y ~6 días según el extremo) sin saltar directamente ahí. Cada prueba aquí sube un poco la duración/escala respecto a la anterior, para detectar pronto cualquier problema que solo aparezca en corridas largas (deriva térmica sostenida, fugas de memoria, degradación progresiva, errores que solo se manifiestan tras muchos pasos) antes de comprometerse a una corrida de días.
-2. **Perfilado con Nsight Compute** (ocupación, registros, bloques residentes) sobre el pipeline de producción ya optimizado, en escalas realistas -- complementa el perfilado ya hecho en `v3-cuda-optimización/myexp-optimizacion/` (que se centró en registros/ocupación de kernels concretos, `k_derananum_t`/`k_vpot_t`, no en corridas completas de duración media).
+## Contenido
 
-## Estructura
+- **`conf-ini-GPU/`**: configuración inicial propuesta para el desarrollo de esta
+  simulación (`conf.20.00.HH`, `in.mcv`, `heh2m.pot`) -- el punto de partida común que
+  usan varias de las pruebas de esta carpeta.
+- **`cpu-gpu-ctfg/`**: investigación de en qué punto (número de walkers, de bloques,
+  de pasos) compensa usar la GPU frente a la CPU y en cuál es al revés -- el cruce
+  real de eficiencia entre las dos versiones, no solo "la GPU siempre gana".
+- **`prueba1-2000w-500pasos-bloque/`**: primera prueba de duración intermedia,
+  2000 walkers / 20 bloques / 500 pasos por bloque. Hallazgo clave: el cuello de
+  botella real es el tamaño del grid (0,33 oleadas/SM), no los registros.
+- **`prueba2-threads-por-bloque/`**: prueba de subir los hilos por bloque de 32 a 128.
+  Resultado negativo (empeora el tiempo real pese a mejorar la ocupación) -- no se
+  lleva a producción.
+- **`prueba3-2000w-1000pasos-50bloques/`**: sigue escalando por bloques/pasos en vez
+  de hilos. El ritmo por paso empeora un 5,8% respecto a la prueba 1 -- posible
+  deriva térmica en corridas largas, sin confirmar.
+- **`pruebas-sfu/`**: la batería grande de tiempos GPU vs. CPU (`test-walkers/`,
+  `test-bloques/`, `test-pasos/`), con la línea de reducción de instrucciones SFU ya
+  cerrada, más `test-tfg-final/`: la corrida de producción real del TFG (2000
+  walkers, 128 bloques, 100.000 pasos/bloque).
+- **`v100-fp64-nativo/`**: sondeo en la Tesla V100 de `fluid3` de si existe hardware
+  nativo para `exp`/`log` en doble precisión (a diferencia de la RTX 4060, que solo
+  lo tiene en `float`) -- para saber si el ratio float/double de rendimiento
+  encontrado en la RTX 4060 se mantiene en una GPU con mejor FP64 nativo.
 
-Una subcarpeta por prueba, cada una con su propio `.md` explicando: qué configuración se usó y por qué (dónde encaja en la escalada gradual), qué se esperaba ver, qué se vio de verdad (tiempos, energía, cualquier perfilado de `ncu`/`nsys` asociado), y las salidas completas guardadas (nunca se sobreescriben entre pruebas).
+## Objetivo original de prueba1-3
 
-## Pruebas
-
-- `prueba1-2000w-500pasos-bloque/`: primera prueba, 2000 walkers / 20 bloques / 500 pasos por bloque (10.000 pasos totales, ~8-9 min estimados) -- coincide con el extremo bajo de pasos/bloque del objetivo final, en una sola corrida corta. **Hallazgo clave**: el cuello de botella real es el tamaño del grid (0,33 oleadas/SM), no los registros -- ocupación conseguida muy por debajo de la teórica (5,5% vs 33,3%).
-- `prueba2-threads-por-bloque/`: sube los hilos/bloque de 32 (fijo desde siempre) a 128, siguiendo la pista de la Prueba 1. La ocupación conseguida mejora un 36% relativo, pero el tiempo real **empeora** en las 4 escalas probadas (500-3000w) -- resultado negativo, no se lleva a producción. Causa confirmada con `ncu`: con 128 hilos las SMs solo están ocupadas el 59,1% del tiempo total (frente al 79,4% con 32) -- efecto "cola larga" al repartir el mismo trabajo en menos bloques más grandes.
-- `prueba3-2000w-1000pasos-50bloques/`: sigue escalando por el eje bloques/pasos (no hilos, que quedó descartado) -- 50 bloques × 1000 pasos = 50.000 pasos totales, ~40,5 min. El ritmo por paso **empeora** un 5,8% respecto a la Prueba 1 (rompe la tendencia de mejora vista hasta 500 pasos/bloque) -- posible deriva térmica sostenida en una corrida mucho más larga (no confirmado, no se monitorizó la GPU durante la corrida -- lección para las siguientes pruebas largas).
+Antes de saltar directamente a la configuración de producción real (2000 walkers,
+1 bloque equilibrio + 100 bloques cálculo, 10.000-100.000 pasos/bloque), estas tres
+primeras pruebas escalan gradualmente la duración/escala respecto a la anterior, para
+detectar pronto cualquier problema que solo aparezca en corridas largas (deriva
+térmica sostenida, fugas de memoria, degradación progresiva) antes de comprometerse a
+una corrida de días. Cada subcarpeta de prueba tiene su propio `.md` explicando qué
+configuración se usó y por qué, qué se esperaba ver, y qué se vio de verdad.
