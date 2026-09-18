@@ -17,6 +17,17 @@ CUDA Fortran para acelerarlo con GPUs NVIDIA. El histórico completo del desarro
 fase a fase, está en las ramas `fase0-compilación` a `fase4-pruebas`; esta rama
 (`main`) contiene solo las dos versiones finales, listas para compilar y ejecutar.
 
+## Diagramas interactivos
+
+Cada uno vive en su rama correspondiente (GitHub no renderiza `.html` directamente,
+por eso el enlace pasa por [htmlpreview.github.io](https://htmlpreview.github.io)):
+
+- **Árbol de llamadas de `dmc2`** (`fase1-transcripción`, portado método a método):
+  [ver diagrama](https://htmlpreview.github.io/?https://raw.githubusercontent.com/BlancaRoRo/DMC/fase1-transcripci%C3%B3n/docs-kernels/dmc2-call-graph.html)
+- **Pipeline CPU↔GPU de un paso DMC** (`fase3-optimización`, con la fusión de fases
+  `k_fase_cd`/`k_fase_fgh` ya aplicada):
+  [ver diagrama](https://htmlpreview.github.io/?https://raw.githubusercontent.com/BlancaRoRo/DMC/fase3-optimizaci%C3%B3n/arquitectura-lanzamiento/fusion-fases-cd-fgh/pipeline-cpu-gpu.html)
+
 ## Las dos versiones
 
 - **`dmc-cpu/`**: el código **tal como se proporcionó inicialmente** (la versión
