@@ -1,0 +1,64 @@
+! rota.cuf
+!
+! Puerto a CUDA Fortran de rota (mrotaciones.f90:11-33): rota los ejes
+! `sprop` del walker un angulo `phi` alrededor del eje `i1` (usado por
+! erotacion/dphi en hpsi/mwavef.f90:762-774 para la derivada numerica
+! de la parte rotacional de la funcion de onda -- phi vale siempre
+! +da/-da, con da=1.d-4).
+!
+! cos(phi)/sin(phi) se reemplazan por mycos(phi)/mysin(phi) (puerto de
+! __cos/__sin de glibc 2.39, glibc_sincos.cuf) -- mismo motivo que en
+! todo el arbol: los intrinsecos de dispositivo de CUDA no coinciden
+! bit a bit con glibc, que es lo que usa gfortran en la CPU de
+! referencia. A diferencia de mypow (ver He_dihydrogen.md §27),
+! mycos/mysin ya soportan dominio negativo de forma nativa (usan
+! iand(high32_of(x),0x7fffffff) para la magnitud y sign() para la
+! paridad/imparidad dentro de la propia funcion) -- no hace falta
+! ningun parche abs()/SIGN() aqui, aunque phi tome ambos signos.
+
+module mrota
+ use mtipos, only: vec3
+ use glibc_sincos_mod, only: mycos, mysin
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+contains
+
+attributes(host, device) subroutine rota(i1, phi, ejes)
+  integer(kind=i4), intent (in) :: i1
+  real(kind=r8), intent (in) :: phi
+  type(vec3), intent (inout) :: ejes(3)
+  real(kind=r8) :: c, s, t
+  integer(kind=i4) :: j1, k1, ic
+
+    j1 = i1+1
+    if (j1.gt.3) j1 = 1
+    k1 = j1+1
+    if (k1.gt.3) k1 = 1
+
+    c = mycos(phi)
+    s = mysin(phi)
+
+    do ic = 1, 3
+      t                =  c*ejes(j1)%comp(ic)+s*ejes(k1)%comp(ic)
+      ejes(k1)%comp(ic) = -s*ejes(j1)%comp(ic)+c*ejes(k1)%comp(ic)
+      ejes(j1)%comp(ic) = t
+    enddo
+
+end subroutine rota
+
+attributes(global) subroutine k_rota(n, i1, phi, ejes)
+  integer(kind=i4), value :: n
+  integer(kind=i4), device, intent (in) :: i1(n)
+  real(kind=r8), device, intent (in) :: phi(n)
+  type(vec3), device, intent (inout) :: ejes(3,n)
+  integer(kind=i4) :: i
+
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    call rota(i1(i), phi(i), ejes(:,i))
+  endif
+end subroutine k_rota
+
+end module mrota

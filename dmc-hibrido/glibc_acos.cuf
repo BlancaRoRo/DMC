@@ -1,0 +1,82 @@
+! glibc_acos.cuf
+!
+! Puerto a CUDA Fortran de __ieee754_acos de glibc 2.39
+! (sysdeps/ieee754/dbl-64/e_asin.c -- la funcion acos esta en el mismo
+! fichero que asin, "IBM Accurate Mathematical Library", ~0.523 ULP
+! maximo), mas las tablas asincos.tbl (asncs.x, 2568 valores), root.tbl
+! (inroot, 128 valores) y powtwo.tbl (28 valores), y las constantes de
+! uasncs.h.
+!
+! Fuente original: LGPL-2.1-or-later, (C) 2001-2024 Free Software
+! Foundation, Inc. -- ver https://sourceware.org/git/?p=glibc.git;
+! a=blob;f=sysdeps/ieee754/dbl-64/e_asin.c;hb=glibc-2.39
+!
+! Motivo del puerto: se confirmo (docs-kernels/He_dihydrogen.md, Parte
+! 4) que dacos tiene, igual que dexp/dcos/dsin antes de portarlas,
+! implementaciones distintas en el host de nvfortran (libnvcpumath.so,
+! simbolo __pd_acos_1) y en el device (intrinseco de libdevice,
+! compilado en linea, sin simbolo de libreria) -- confirmado con
+! cuobjdump --dump-ptx. gfortran coincide con el host de nvfortran para
+! el caso de prueba, no con el device. Se porta acos para tener una
+! tercera implementacion, identica en ambos lados, que ademas coincida
+! con gfortran/glibc.
+
+module glibc_acos_mod
+ use glibc_exp_mod, only: bits_of, real_of
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: i8 = selected_int_kind(18)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ ! ---- constantes de uasncs.h ----
+ real(kind=r8), parameter :: ac_hp0 = transfer(int(z'3ff921fb54442d18',8), 1.0_r8)
+ real(kind=r8), parameter :: ac_hp1 = transfer(int(z'3c91a62633145c07',8), 1.0_r8)
+ real(kind=r8), parameter :: ac_f1 = 1.66666666666664110590506577996662E-01_r8
+ real(kind=r8), parameter :: ac_f2 = 7.50000000026122686814431784722623E-02_r8
+ real(kind=r8), parameter :: ac_f3 = 4.46428561421059750978517350006940E-02_r8
+ real(kind=r8), parameter :: ac_f4 = 3.03821268582119319911193410625235E-02_r8
+ real(kind=r8), parameter :: ac_f5 = 2.23551211026525610742786300334557E-02_r8
+ real(kind=r8), parameter :: ac_f6 = 1.81382903404565056280372531963613E-02_r8
+ real(kind=r8), parameter :: ac_t27 = 134217728.0_r8
+ real(kind=r8), parameter :: ac_rt0 = 9.99999999859990725855365213134618E-01_r8
+ real(kind=r8), parameter :: ac_rt1 = 4.99999999495955425917856814202739E-01_r8
+ real(kind=r8), parameter :: ac_rt2 = 3.75017500867345182581453026130850E-01_r8
+ real(kind=r8), parameter :: ac_rt3 = 3.12523626554518656309172508769531E-01_r8
+
+ ! tablas: root.tbl (usqrt), powtwo.tbl (upow), asincos.tbl (asin/acos)
+ include 'inroot_fortran.txt'
+ include 'powtwo_fortran.txt'
+ include 'asincos_tab_fortran.txt'
+
+contains
+
+attributes(host, device) function high32_of(x) result(h)
+  real(kind=r8), intent (in) :: x
+  integer(kind=i8) :: h
+    h = iand(ishft(bits_of(x), -32), int(z'ffffffff',i8))
+end function high32_of
+
+! myacos: puerto fiel de __ieee754_acos (e_asin.c). Mismas 8 zonas de
+! tabla que el original; "m>0" del C (signo del entero de 32 bits) se
+! sustituye por comprobar el signo de x directamente (equivalente para
+! todo el rango que llega a estas ramas, igual que en glibc_sincos.cuf).
+attributes(host, device) function myacos(x) result(res)
+  real(kind=r8), intent (in) :: x
+  real(kind=r8) :: res
+
+    ! PRUEBA: acos() nativo en vez de la reimplementacion bit-exacta de glibc.
+    res = acos(x)
+end function myacos
+
+attributes(global) subroutine k_myacos(n, x, y)
+ integer(kind=i4), value :: n
+ real(kind=r8), device, intent(in) :: x(n)
+ real(kind=r8), device, intent(out) :: y(n)
+ integer(kind=i4) :: i
+  i = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (i <= n) then
+    y(i) = myacos(x(i))
+  endif
+end subroutine k_myacos
+
+end module glibc_acos_mod

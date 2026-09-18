@@ -1,0 +1,189 @@
+! rand_gpu.cuf
+!
+! Puerto a CUDA Fortran de mrandom2.f90 (rand1/rand1p, dos LCG de 48
+! bits independientes) y mrandom.f90 (rn1/randv3/gauss3/fijasemilla),
+! con un cambio de fondo respecto al original: en la CPU, `irn` es una
+! unica variable de modulo (`private, save`) compartida por TODOS los
+! walkers, que se procesan uno a uno en un bucle secuencial (ver
+! msteps.f90: pasodmc/dmc2/pasomet) -- cada walker consume un numero
+! de sorteos que depende de datos (los `return` anticipados de dmc2
+! tras el test de aceptacion), asi que su posicion exacta en la
+! secuencia compartida solo se conoce ejecutando en orden.
+!
+! En la GPU los walkers se procesan en paralelo, no en orden -- no se
+! puede reproducir esa misma secuencia entrelazada. En su lugar, cada
+! walker recibe su PROPIO estado `irn`, independiente, pasado como
+! argumento explicito (en vez de la variable de modulo compartida).
+! Para decorrelacionar esos estados iniciales se reutiliza el MISMO
+! mecanismo que ya usa el codigo original para repartir semillas entre
+! procesos MPI/PVM (ver mmpi.f90:129-142, distribuyesemillas): la
+! semilla del walker k es rand1p aplicado k veces a partir de una
+! semilla maestra unica -- mismo algoritmo, generalizado de "indice de
+! proceso" a "indice de walker" (ver k_split_seeds).
+!
+! rand1/rand1p son aritmetica entera pura (iand/ishft/modulo) --
+! bit a bit identicos en cualquier plataforma IEEE, sin ningun riesgo
+! de ULP. cos/sin de gauss3 se sustituyen por mycos/mysin (mismo
+! motivo que en todo el arbol: los intrinsecos de dispositivo de CUDA
+! no coinciden bit a bit con glibc). log(rn) se deja como intrinseco
+! nativo por ahora, sin puerto propio -- mismo criterio que ya se uso
+! en duhe4x/uhe4x y derwavefx (d_uhex4.md/der_wavefx.md): no hay
+! garantia teorica de que coincida siempre, pero tampoco ha hecho
+! falta un mylog en ningun otro punto del arbol hasta ahora; se
+! comprueba de forma empirica con la bateria de pruebas (ver
+! mrandom.md) antes de decidir si hace falta portarlo.
+
+module mrandgpu
+ use glibc_sincos_mod, only: mycos, mysin
+ implicit none
+ integer, private, parameter :: i4 = selected_int_kind(9)
+ integer, private, parameter :: i8 = selected_int_kind(15)
+ integer, private, parameter :: r8 = selected_real_kind(15,9)
+
+ real(kind=r8), private, parameter :: pi = 3.1415926535897930_r8
+
+contains
+
+! ---- rand1/rand1p: transcripcion literal de mrandom2.f90, solo con
+! attributes(host,device) anadido -- aritmetica entera, sin cambios ----
+
+attributes(host, device) subroutine rand1_gpu(rn, irn)
+  integer(kind=i8), intent (inout) :: irn
+  real(kind=r8), intent (out) :: rn
+
+  integer(kind=i8) :: mask24, mask48
+  real(kind=r8),  parameter :: twom48=2.0_r8**(-48)
+  integer(kind=i8),  parameter :: mult1 = 44485709377909_i8
+  integer(kind=i8) :: m11, m12
+  integer(kind=i8),  parameter :: iadd1 = 96309754297_i8
+  integer(kind=i8) :: is1,is2
+
+   mask24 = ishft(1_i8, 24_i8) - 1_i8
+   mask48 = ishft(1_i8, 48_i8) - 1_i8
+   m11 = iand(mult1,mask24)
+   m12 = iand(ishft(mult1,-24_i8),mask24)
+
+   is2=iand(ishft(irn,-24_i8),mask24)
+   is1=iand(irn,mask24)
+   irn=iand(ishft(iand(is1*m12+is2*m11,mask24),24_i8)+is1*m11+iadd1,mask48)
+   rn=ior(irn,1_i8)*twom48
+
+end subroutine rand1_gpu
+
+attributes(host, device) subroutine rand1p_gpu(rn, irn)
+  integer(kind=i8), intent (inout) :: irn
+  real(kind=r8), intent (out) :: rn
+
+  integer(kind=i8) :: mask24, mask48
+  real(kind=r8), parameter :: twom48=2.0_r8**(-48)
+  integer(kind=i8), parameter :: mult2 = 34522712143931_i8
+  integer(kind=i8) :: m21, m22
+  integer(kind=i8), parameter :: iadd2 = 55789347517_i8
+  integer(kind=i8) :: is1,is2
+
+   mask24 = ishft(1_i8, 24_i8) - 1_i8
+   mask48 = ishft(1_i8, 48_i8) - 1_i8
+   m21 = iand(mult2,mask24)
+   m22 = iand(ishft(mult2,-24_i8),mask24)
+
+   is2=iand(ishft(irn,-24_i8),mask24)
+   is1=iand(irn,mask24)
+   irn=iand(ishft(iand(is1*m22+is2*m21,mask24),24_i8)+is1*m21+iadd2,mask48)
+   rn=ior(irn,1_i8)*twom48
+
+end subroutine rand1p_gpu
+
+! ---- fijasemilla: enmascara una semilla de entrada a 48 bits ----
+
+attributes(host, device) subroutine fijasemilla_gpu(irnin, irn)
+  integer(kind=i8), intent (in) :: irnin
+  integer(kind=i8), intent (out) :: irn
+  integer(kind=i8) :: mask48
+
+   mask48 = ishft(1_i8, 48_i8) - 1_i8
+   irn = iand(irnin, mask48)
+
+end subroutine fijasemilla_gpu
+
+! ---- rn1/randv3/gauss3: mismas formulas, `irn` explicito por walker
+! en vez de variable de modulo compartida ----
+
+attributes(host, device) subroutine rn1_gpu(irn, rn)
+  integer(kind=i8), intent (inout) :: irn
+  real(kind=r8), intent (out) :: rn
+
+    call rand1_gpu(rn, irn)
+
+end subroutine rn1_gpu
+
+attributes(host, device) subroutine randv3_gpu(irn, rn3)
+  integer(kind=i8), intent (inout) :: irn
+  real(kind=r8), intent (out) :: rn3(3)
+
+    call rand1_gpu(rn3(1), irn)
+    call rand1_gpu(rn3(2), irn)
+    call rand1_gpu(rn3(3), irn)
+
+end subroutine randv3_gpu
+
+attributes(host, device) subroutine gauss3_gpu(irn, gvar3)
+  integer(kind=i8), intent (inout) :: irn
+  real(kind=r8), intent (out) :: gvar3(3)
+  real(kind=r8) :: xl, arg, rn
+
+    call rand1_gpu(rn, irn)
+    arg = 2.0_r8*pi*rn
+    call rand1_gpu(rn, irn)
+    xl = sqrt(-2.0_r8*log(rn))
+    gvar3(1) = xl*mysin(arg)
+    gvar3(2) = xl*mycos(arg)
+    call rand1_gpu(rn, irn)
+    arg = 2.0_r8*pi*rn
+    call rand1_gpu(rn, irn)
+    xl = sqrt(-2.0_r8*log(rn))
+    gvar3(3) = xl*mysin(arg)
+
+end subroutine gauss3_gpu
+
+! ---- k_split_seeds: reparto de semillas por walker, mismo mecanismo
+! que distribuyesemillas (mmpi.f90:129-142) para repartir entre
+! procesos MPI/PVM -- la semilla del walker iw es rand1p aplicado
+! (iw-1) veces a partir de una semilla maestra unica (irnin, ya
+! enmascarada a 48 bits con fijasemilla_gpu). Cada hilo calcula su
+! propia semilla de forma independiente (sin dependencia entre hilos),
+! iterando desde el mismo punto de partida -- coste O(n) por hilo,
+! aceptable para los tamanos de poblacion de walkers de este proyecto
+! (no es un cuello de botella: se ejecuta una sola vez, al iniciar la
+! simulacion).
+!
+! v3-cuda-optimizacion/alineacion-semilla-walker1: (iw-1) en vez de
+! (iw) -- antes, el walker 1 recibia irnin avanzado 1 vez, dejandolo
+! desalineado respecto al walker 1 de la CPU (que usa irnin SIN avance
+! extra: distribuyesemillas, mmontecarlo.f90:657, ya avanzo la semilla
+! una vez a nivel de PROCESO antes de esto -- ese avance es compartido
+! e identico en CPU y GPU, no se toca). Con (iw-1), el walker 1 usa
+! irnin tal cual (0 avances de mas, igual que la CPU), y cada walker
+! posterior recibe la semilla que antes tenia el walker anterior --
+! mismo conjunto de 2*nwalkers semillas bien separadas entre si, solo
+! desplazado una posicion. Verificado bit a bit contra CPU (opcion=4)
+! con N=1 walker en alineacion-semilla-walker1.md. ----
+
+attributes(global) subroutine k_split_seeds(n, irnin, seeds)
+  integer(kind=i4), value :: n
+  integer(kind=i8), value :: irnin
+  integer(kind=i8), device, intent (out) :: seeds(n)
+  integer(kind=i8) :: irn
+  real(kind=r8) :: rn
+  integer(kind=i4) :: i, iw
+
+  iw = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+  if (iw <= n) then
+    irn = irnin
+    do i = 1, iw-1
+      call rand1p_gpu(rn, irn)
+    enddo
+    seeds(iw) = irn
+  endif
+end subroutine k_split_seeds
+
+end module mrandgpu
