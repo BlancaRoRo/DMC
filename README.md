@@ -38,6 +38,19 @@ por eso el enlace pasa por [htmlpreview.github.io](https://htmlpreview.github.io
 Ambas son solo código fuente + lo necesario para compilar y ejecutar (sin
 `.o`/`.mod`/binarios ni resultados de corridas anteriores).
 
+## Requisitos
+
+- **`gfortran`** para `dmc-cpu/` (viene con cualquier distribución de GCC).
+- **`nvfortran`**, del **NVIDIA HPC SDK**, para `dmc-hibrido/` (no viene con GCC, hay
+  que instalar el SDK de NVIDIA aparte), además de un driver de NVIDIA compatible.
+- **`liblapack` y `libblas`** en las dos versiones: el ajuste por mínimos cuadrados del
+  potencial (`kpcoef.f`, llamado desde `mkp_heco.f90`) usa `dgemv`/`dgemm` de BLAS
+  directamente, y los `Makefile` de ambas enlazan con `-llapack -lblas`. En
+  Debian/Ubuntu:
+  ```bash
+  sudo apt install liblapack-dev libblas-dev
+  ```
+
 ## `dmc-cpu/`
 
 El código proporcionado inicialmente, compilado con `gfortran`, **con el fix de `Vap`
