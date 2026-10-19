@@ -14,7 +14,7 @@ hay que editar a mano.
 La interfaz permite, desde el navegador:
 
 - **Configurar** la simulación con un formulario construido a partir de un
-  `in.mcv` de referencia, con validación de cada campo (números, opciones
+  `in.mcv` de plantilla, con validación de cada campo (números, opciones
   de los desplegables, símbolos químicos).
 - **Compilar** el simulador y ver la salida de la compilación en directo.
 - **Ejecutar** la simulación en segundo plano y seguir su progreso: bloque
@@ -63,6 +63,8 @@ gui-visualizacion/
 ├── pruebas/
 │   ├── test_api.py             # pruebas automáticas de la API
 │   └── sondeo_api.py           # sondeo exploratorio de la API
+├── plantilla/
+│   └── in.mcv                  # plantilla del in.mcv que edita el formulario
 ├── INVENTARIO_INTERACCIONES.md # interacciones de la interfaz y huecos detectados
 └── runs/                       # carpeta de las ejecuciones (se rellena al usarla)
 ```
@@ -85,7 +87,6 @@ archivos del simulador:
 |---|---|---|
 | `compilar_pipeline.sh` y el código fuente del simulador | Botón *Compilar* | No se puede compilar |
 | `qmccluster_pipeline` (binario que genera la compilación) y los potenciales `*.pot` | Botón *Ejecutar* | No se puede ejecutar |
-| `in.mcv` de referencia | Construir el formulario al abrir la página y comprobar la estructura de los `in.mcv` importados | El formulario no se puede cargar |
 | `conf.20.00.HH` | Configuración inicial de los *walkers*, que se copia a cada ejecución | No se puede ejecutar |
 
 Dónde están se indica en la interfaz, en la ventana **Ajustes** (icono
@@ -100,15 +101,21 @@ Dónde están se indica en la interfaz, en la ventana **Ajustes** (icono
 - **Carpeta donde se guardan las ejecuciones:** por defecto, `runs/`
   dentro de este repositorio. Se crea si no existe.
 
+### El `in.mcv`
+
+No hace falta aportarlo: la interfaz incluye una plantilla en
+`plantilla/in.mcv`. El formulario se construye a partir de ella y, al
+ejecutar, se genera el `in.mcv` de la ejecución sustituyendo en la
+plantilla solo los valores editados; el resto de líneas (separadores,
+comentarios y campos fijos) se copia tal cual, porque el simulador lee el
+fichero por posición de línea.
+
 Para partir de otra configuración, la página de configuración tiene el
 panel **Importar in.mcv**: se elige un `in.mcv` del equipo, el formulario
 se rellena con sus valores y ese fichero pasa a ser la base de la
-ejecución. Solo se aceptan ficheros con la misma estructura que el de
-referencia (mismo número de líneas y mismos `lmax` de la función de
+ejecución. Solo se aceptan ficheros con la misma estructura que la
+plantilla (mismo número de líneas y mismos `lmax` de la función de
 onda), para que cada campo se lea de la línea correcta.
-
-La ruta del `in.mcv` de referencia no se elige desde la interfaz: se
-indica al principio de `app.py`, en la variable `DEFAULT_INMCV`.
 
 ### Instalación
 
@@ -150,8 +157,7 @@ configuración que espera el simulador, y la ejecución fallará.
 ```
 
 Usan el cliente de pruebas de Flask con carpetas temporales: no lanzan el
-simulador ni modifican `settings.json` ni `runs/`. Necesitan el `in.mcv`
-de referencia.
+simulador ni modifican `settings.json` ni `runs/`.
 
 ### Seguridad
 

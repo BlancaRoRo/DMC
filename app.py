@@ -30,13 +30,10 @@ APP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = APP_DIR.parent
 HIBRIDO_DIR = REPO_ROOT / "v2-cuda-integracion" / "hibrido_instrumentado"
 CONF_NOMBRE = "conf.20.00.HH"
-DEFAULT_INMCV = (
-    REPO_ROOT
-    / "v3-cuda-optimización"
-    / "optimizacion-vpot"
-    / "fusion-v-vp-hehe"
-    / "in.mcv"
-)
+# plantilla del in.mcv: el formulario se construye a partir de ella y cada
+# ejecucion parte de ella (o de un in.mcv importado con su misma
+# estructura), sustituyendo solo las lineas editadas
+DEFAULT_INMCV = APP_DIR / "plantilla" / "in.mcv"
 DEFAULT_RUNS_DIR = APP_DIR / "runs"
 SETTINGS_PATH = APP_DIR / "settings.json"
 BINARY_NAME = "qmccluster_pipeline"
