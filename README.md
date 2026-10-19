@@ -85,7 +85,7 @@ archivos del simulador:
 |---|---|---|
 | `compilar_pipeline.sh` y el código fuente del simulador | Botón *Compilar* | No se puede compilar |
 | `qmccluster_pipeline` (binario que genera la compilación) y los potenciales `*.pot` | Botón *Ejecutar* | No se puede ejecutar |
-| `in.mcv` de referencia | Construir el formulario y servir de base al `in.mcv` de cada ejecución | El formulario no se puede cargar |
+| `in.mcv` de referencia | Construir el formulario al abrir la página y comprobar la estructura de los `in.mcv` importados | El formulario no se puede cargar |
 | `conf.20.00.HH` | Configuración inicial de los *walkers*, que se copia a cada ejecución | No se puede ejecutar |
 
 Dónde están se indica en la interfaz, en la ventana **Ajustes** (icono
@@ -99,9 +99,16 @@ Dónde están se indica en la interfaz, en la ventana **Ajustes** (icono
 - **Carpeta donde se guardan las ejecuciones:** por defecto, `runs/`
   dentro de este repositorio. Se crea si no existe.
 
-Las rutas del `in.mcv` de referencia y de `conf.20.00.HH` no se pueden
-cambiar desde la interfaz: se indican al principio de `app.py`, en las
-variables `DEFAULT_INMCV` y `CONF_FRESCO`.
+Para partir de otra configuración, la página de configuración tiene el
+panel **Importar in.mcv**: se elige un `in.mcv` del equipo, el formulario
+se rellena con sus valores y ese fichero pasa a ser la base de la
+ejecución. Solo se aceptan ficheros con la misma estructura que el de
+referencia (mismo número de líneas y mismos `lmax` de la función de
+onda), para que cada campo se lea de la línea correcta.
+
+El `in.mcv` de referencia y `conf.20.00.HH` no se eligen desde la
+interfaz: sus rutas se indican al principio de `app.py`, en las variables
+`DEFAULT_INMCV` y `CONF_FRESCO`.
 
 ### Instalación
 
