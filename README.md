@@ -94,8 +94,9 @@ Dónde están se indica en la interfaz, en la ventana **Ajustes** (icono
 - **Carpeta con los ficheros a compilar:** la que contiene
   `compilar_pipeline.sh` y el código fuente.
 - **Carpeta donde está el binario compilado:** la que contiene
-  `qmccluster_pipeline` y los `*.pot`. Normalmente es la misma que la
-  anterior, porque el script deja ahí el binario.
+  `qmccluster_pipeline`, los `*.pot` y `conf.20.00.HH`. Normalmente es la
+  misma que la anterior, porque el script deja ahí el binario. Si
+  `conf.20.00.HH` no está en esta carpeta, se busca en la de compilación.
 - **Carpeta donde se guardan las ejecuciones:** por defecto, `runs/`
   dentro de este repositorio. Se crea si no existe.
 
@@ -106,9 +107,8 @@ ejecución. Solo se aceptan ficheros con la misma estructura que el de
 referencia (mismo número de líneas y mismos `lmax` de la función de
 onda), para que cada campo se lea de la línea correcta.
 
-El `in.mcv` de referencia y `conf.20.00.HH` no se eligen desde la
-interfaz: sus rutas se indican al principio de `app.py`, en las variables
-`DEFAULT_INMCV` y `CONF_FRESCO`.
+La ruta del `in.mcv` de referencia no se elige desde la interfaz: se
+indica al principio de `app.py`, en la variable `DEFAULT_INMCV`.
 
 ### Instalación
 

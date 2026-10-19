@@ -5,9 +5,9 @@ walkers. Fase 1: usa solo datos que el simulador ya produce (histogramas
 finales, conf.*.HH final) -- no toca el codigo Fortran/CUDA.
 
 Cada ejecucion corre en su propio directorio aislado bajo runs/, con su
-propio conf.20.00.HH "fresco" copiado de Original/ (mismo
-criterio CONF_FRESCO ya establecido en el resto del proyecto) -- nunca se
-lanza nada dentro de hibrido_instrumentado/, que solo se usa para compilar.
+propio conf.20.00.HH "fresco" copiado de la carpeta del binario (o, si no
+esta ahi, de la de compilacion; ver buscar_conf_fresco) -- nunca se lanza
+nada dentro de hibrido_instrumentado/, que solo se usa para compilar.
 """
 import glob
 import json
@@ -29,7 +29,7 @@ from werkzeug.exceptions import HTTPException
 APP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = APP_DIR.parent
 HIBRIDO_DIR = REPO_ROOT / "v2-cuda-integracion" / "hibrido_instrumentado"
-CONF_FRESCO = REPO_ROOT / "Original" / "conf.20.00.HH"
+CONF_NOMBRE = "conf.20.00.HH"
 DEFAULT_INMCV = (
     REPO_ROOT
     / "v3-cuda-optimización"
@@ -217,6 +217,19 @@ def get_source_dir():
 
 def get_binary_dir():
     return Path(load_settings()["binary_dir"])
+
+
+def buscar_conf_fresco():
+    """Configuracion inicial que se copia a cada ejecucion. Como los .pot,
+    es un dato que se lee al EJECUTAR, asi que se busca primero junto al
+    binario y, si no esta ahi, junto a los ficheros a compilar. Las dos
+    carpetas se eligen en Ajustes, asi que no depende de donde este la
+    interfaz. Devuelve None si no esta en ninguna."""
+    for carpeta in (get_binary_dir(), get_source_dir()):
+        candidato = carpeta / CONF_NOMBRE
+        if candidato.is_file():
+            return candidato
+    return None
 
 
 def _pick_folder_dialog(initial_dir):
@@ -776,8 +789,10 @@ def run_simulation():
     binpath = binary_dir / BINARY_NAME
     if not binpath.exists():
         return jsonify({"error": "compila primero -- no existe " + BINARY_NAME + " en " + str(binary_dir)}), 400
-    if not CONF_FRESCO.exists():
-        return jsonify({"error": f"no se encuentra el conf fresco de referencia: {CONF_FRESCO}"}), 400
+    conf_fresco = buscar_conf_fresco()
+    if conf_fresco is None:
+        return jsonify({"error": f"no se encuentra {CONF_NOMBRE} ni en la carpeta del binario "
+                                 f"({binary_dir}) ni en la de compilacion ({get_source_dir()})"}), 400
 
     nombre = str(body.get("nombre", "")).strip().replace("\n", " ").replace("\r", "")[:80]
     if not nombre:
@@ -788,7 +803,7 @@ def run_simulation():
     run_dir.mkdir(parents=True, exist_ok=False)
 
     shutil.copy(binpath, run_dir / BINARY_NAME)
-    shutil.copy(CONF_FRESCO, run_dir / "conf.20.00.HH")
+    shutil.copy(conf_fresco, run_dir / CONF_NOMBRE)
     (run_dir / "in.mcv").write_text(inmcv_content)
     (run_dir / "nombre.txt").write_text(nombre)
     # ficheros de datos auxiliares (potenciales, etc.) que el binario lee

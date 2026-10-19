@@ -35,6 +35,7 @@ class Base(unittest.TestCase):
         self.bin.mkdir()
         (self.bin / gui.BINARY_NAME).write_bytes(b"binario falso")
         (self.bin / "potencial.pot").write_text("datos")
+        (self.bin / gui.CONF_NOMBRE).write_text("conf del binario")
         self.lanzados, self.guardados = [], []
         ajustes = {"runs_dir": str(self.runs), "source_dir": str(self.tmp), "binary_dir": str(self.bin)}
         for p in (
@@ -206,6 +207,24 @@ class TestEjecutar(Base):
     def test_binario_inexistente(self):
         (self.bin / gui.BINARY_NAME).unlink()
         self.assertError(self.post("/api/run", {"valores": {}}), 400, "compila primero")
+
+    def test_conf_se_copia_de_la_carpeta_del_binario(self):
+        (self.tmp / gui.CONF_NOMBRE).write_text("conf de compilacion")
+        self.assertEqual(self.post("/api/run", {"valores": {}}).status_code, 200)
+        d, _ = self.inmcv_generado()
+        self.assertEqual((d / gui.CONF_NOMBRE).read_text(), "conf del binario")
+
+    def test_conf_se_busca_en_compilacion_si_no_esta_junto_al_binario(self):
+        (self.bin / gui.CONF_NOMBRE).unlink()
+        (self.tmp / gui.CONF_NOMBRE).write_text("conf de compilacion")
+        self.assertEqual(self.post("/api/run", {"valores": {}}).status_code, 200)
+        d, _ = self.inmcv_generado()
+        self.assertEqual((d / gui.CONF_NOMBRE).read_text(), "conf de compilacion")
+
+    def test_conf_inexistente(self):
+        (self.bin / gui.CONF_NOMBRE).unlink()
+        self.assertError(self.post("/api/run", {"valores": {}}), 400, gui.CONF_NOMBRE)
+        self.assertEqual(list(self.runs.iterdir()), [])
 
     def test_compilar_sin_script(self):
         with mock.patch.object(gui, "get_source_dir", lambda: Path("/no/existe/fuentes")):
