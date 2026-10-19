@@ -78,35 +78,30 @@ gui-visualizacion/
 
 ### Archivos necesarios
 
-La interfaz no incluye el simulador. Espera encontrarlo junto a ella, en
-la carpeta padre de `gui-visualizacion/`:
-
-```
-<carpeta del proyecto>/
-├── gui-visualizacion/                         # este repositorio
-├── v3-cuda-optimización/optimizacion-vpot/fusion-v-vp-hehe/
-│   └── in.mcv                                 # in.mcv de referencia para el formulario
-├── Original/
-│   └── conf.20.00.HH                          # configuración inicial que se copia a cada ejecución
-└── v2-cuda-integracion/hibrido_instrumentado/
-    ├── compilar_pipeline.sh                   # script de compilación
-    ├── *.f, *.f90, *.cuf                      # código fuente del simulador
-    ├── *.pot                                  # potenciales, se copian a cada ejecución
-    └── qmccluster_pipeline                    # binario (lo genera compilar_pipeline.sh)
-```
+La interfaz no incluye el simulador. Para usarla se necesitan estos
+archivos del simulador:
 
 | Archivo | Para qué se usa | Si falta |
 |---|---|---|
+| `compilar_pipeline.sh` y el código fuente del simulador | Botón *Compilar* | No se puede compilar |
+| `qmccluster_pipeline` (binario que genera la compilación) y los potenciales `*.pot` | Botón *Ejecutar* | No se puede ejecutar |
 | `in.mcv` de referencia | Construir el formulario y servir de base al `in.mcv` de cada ejecución | El formulario no se puede cargar |
-| `conf.20.00.HH` | Configuración inicial de los *walkers* | No se puede ejecutar |
-| `compilar_pipeline.sh` y el código fuente | Botón *Compilar* | No se puede compilar |
-| `qmccluster_pipeline` y los `*.pot` | Botón *Ejecutar* | No se puede ejecutar |
+| `conf.20.00.HH` | Configuración inicial de los *walkers*, que se copia a cada ejecución | No se puede ejecutar |
 
-Las rutas del código fuente, del binario y de la carpeta de ejecuciones
-se pueden cambiar desde la ventana **Ajustes** de la interfaz, que las
-guarda en `settings.json`. Las rutas del `in.mcv` de referencia y de
-`conf.20.00.HH` están fijadas al principio de `app.py` (`DEFAULT_INMCV` y
-`CONF_FRESCO`).
+Dónde están se indica en la interfaz, en la ventana **Ajustes** (icono
+⚙), que guarda las rutas en `settings.json`:
+
+- **Carpeta con los ficheros a compilar:** la que contiene
+  `compilar_pipeline.sh` y el código fuente.
+- **Carpeta donde está el binario compilado:** la que contiene
+  `qmccluster_pipeline` y los `*.pot`. Normalmente es la misma que la
+  anterior, porque el script deja ahí el binario.
+- **Carpeta donde se guardan las ejecuciones:** por defecto, `runs/`
+  dentro de este repositorio. Se crea si no existe.
+
+Las rutas del `in.mcv` de referencia y de `conf.20.00.HH` no se pueden
+cambiar desde la interfaz: se indican al principio de `app.py`, en las
+variables `DEFAULT_INMCV` y `CONF_FRESCO`.
 
 ### Instalación
 
