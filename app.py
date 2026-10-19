@@ -282,8 +282,9 @@ def _parse_valor_comentario(linea):
 #     CUDA (ndih=2, arrays r_dih(3,2) en todos los kernels de
 #     He_dihydrogen construidos esta sesion) -- cambiarlo rompe los
 #     limites de esos arrays.
-#   - opcion debe ser 7: es la unica que ejecuta el pipeline GPU con
-#     CUDA Graph que compila este binario.
+#   - opcion debe ser 5 (dmc-gpu-pipeline): es la unica que ejecuta el
+#     pipeline GPU de la version final (dmc-hibrido). En las carpetas de
+#     desarrollo anteriores (hibrido_instrumentado) esa via era opcion=7.
 #   - lmax (impureza-He4/He3) cambia cuantos bloques de parametros
 #     tiene el fichero -- no es un simple cambio de valor.
 #   - ncadapvm solo se usa con PVM, no con el pipeline GPU.
@@ -677,17 +678,30 @@ def binary_status():
     return jsonify({"exists": exists, "mtime": mtime, "path": str(binpath)})
 
 
+def orden_de_compilacion(source_dir):
+    """La version final del simulador (dmc-hibrido en la rama main) se
+    compila con su Makefile; las carpetas de desarrollo anteriores
+    (hibrido_instrumentado) traen compilar_pipeline.sh. Las dos generan
+    BINARY_NAME. Devuelve la orden a ejecutar, o None si no hay ninguna."""
+    if (source_dir / "Makefile").is_file():
+        return ["make"]
+    if (source_dir / COMPILE_SCRIPT).is_file():
+        return ["bash", COMPILE_SCRIPT]
+    return None
+
+
 @app.route("/api/compile", methods=["POST"])
 def compile_pipeline():
     source_dir = get_source_dir()
-    if not (source_dir / COMPILE_SCRIPT).exists():
-        return jsonify({"error": f"no existe {COMPILE_SCRIPT} en {source_dir}"}), 400
+    orden = orden_de_compilacion(source_dir)
+    if orden is None:
+        return jsonify({"error": f"no hay Makefile ni {COMPILE_SCRIPT} en {source_dir}"}), 400
 
     def generate():
         job_id = time.strftime("compile_%Y%m%d_%H%M%S")
         yield sse("started", {"job_id": job_id})
-        yield sse("log", {"line": f"$ bash {COMPILE_SCRIPT}  (cwd={source_dir})"})
-        yield from stream_subprocess(["bash", COMPILE_SCRIPT], cwd=str(source_dir), job_id=job_id)
+        yield sse("log", {"line": f"$ {' '.join(orden)}  (cwd={source_dir})"})
+        yield from stream_subprocess(orden, cwd=str(source_dir), job_id=job_id)
 
     return Response(generate(), mimetype="text/event-stream")
 

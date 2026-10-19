@@ -28,7 +28,7 @@ heh2m.pot
 !#2: DATOS MONTE CARLO                                                                    
 !----------------------                                                                   
 0000000000000011      !semilla aleatoria                                                  
-7   !opcion  0=test der, 1=mcv, 2 optimiza, 3 optimiza correlated, 4=dmc, 5=dmc-gpu, 6=dmc-cpu-secuencial-con-semillas-gpu
+5   !opcion  0=test der, 1=mcv, 2 optimiza, 3 optimiza correlated, 4=dmc, 5=dmc-gpu-pipeline
 .T.                   !.T. se minimiza la energia ||  .F. se minimiza la varianza         
   0.96                !delta pasos metropolis he4                                         
   1.00                !delta pasos metropolis he3                                         

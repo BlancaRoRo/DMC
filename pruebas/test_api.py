@@ -230,6 +230,16 @@ class TestEjecutar(Base):
         with mock.patch.object(gui, "get_source_dir", lambda: Path("/no/existe/fuentes")):
             self.assertError(self.post("/api/compile"), 400, gui.COMPILE_SCRIPT)
 
+    def test_orden_de_compilacion(self):
+        carpeta = self.tmp / "fuentes"
+        carpeta.mkdir()
+        self.assertIsNone(gui.orden_de_compilacion(carpeta))
+        (carpeta / gui.COMPILE_SCRIPT).write_text("#!/bin/bash\n")
+        self.assertEqual(gui.orden_de_compilacion(carpeta), ["bash", gui.COMPILE_SCRIPT])
+        # la version final (dmc-hibrido) trae Makefile: tiene prioridad
+        (carpeta / "Makefile").write_text("all:\n")
+        self.assertEqual(gui.orden_de_compilacion(carpeta), ["make"])
+
 
 class TestProteccionDePeticiones(Base):
     def test_origen_ajeno_se_rechaza(self):

@@ -80,23 +80,30 @@ gui-visualizacion/
 
 ### Archivos necesarios
 
-La interfaz no incluye el simulador. Para usarla se necesitan estos
-archivos del simulador:
+La interfaz no incluye el simulador. Su versión final está en la carpeta
+`dmc-hibrido/` del repositorio [BlancaRoRo/DMC](https://github.com/BlancaRoRo/DMC)
+(rama `main`), que ya trae todo lo necesario:
+
+```bash
+git clone https://github.com/BlancaRoRo/DMC.git
+```
 
 | Archivo | Para qué se usa | Si falta |
 |---|---|---|
-| `compilar_pipeline.sh` y el código fuente del simulador | Botón *Compilar* | No se puede compilar |
+| `Makefile` y el código fuente del simulador | Botón *Compilar* (ejecuta `make`) | No se puede compilar |
 | `qmccluster_pipeline` (binario que genera la compilación) y los potenciales `*.pot` | Botón *Ejecutar* | No se puede ejecutar |
 | `conf.20.00.HH` | Configuración inicial de los *walkers*, que se copia a cada ejecución | No se puede ejecutar |
 
 Dónde están se indica en la interfaz, en la ventana **Ajustes** (icono
-⚙), que guarda las rutas en `settings.json`:
+⚙), que guarda las rutas en `settings.json`. Con el repositorio del
+simulador, las dos primeras apuntan a la misma carpeta, `DMC/dmc-hibrido`:
 
-- **Carpeta con los ficheros a compilar:** la que contiene
-  `compilar_pipeline.sh` y el código fuente.
+- **Carpeta con los ficheros a compilar:** la que contiene el `Makefile`
+  y el código fuente. También se aceptan las carpetas de desarrollo
+  anteriores, que se compilan con `compilar_pipeline.sh`.
 - **Carpeta donde está el binario compilado:** la que contiene
   `qmccluster_pipeline`, los `*.pot` y `conf.20.00.HH`. Normalmente es la
-  misma que la anterior, porque el script deja ahí el binario. Si
+  misma que la anterior, porque la compilación deja ahí el binario. Si
   `conf.20.00.HH` no está en esta carpeta, se busca en la de compilación.
 - **Carpeta donde se guardan las ejecuciones:** por defecto, `runs/`
   dentro de este repositorio. Se crea si no existe.
