@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>DMC · Resultados</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">He</span>
+      <div>
+        <div class="brand-title">DMC · CUDA</div>
+        <div class="brand-sub">Panel de control</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <a href="/" class="nav-item">
+        <span class="nav-icon">&#9881;</span> Configuración
+      </a>
+      <a href="/resultados" class="nav-item active">
+        <span class="nav-icon">&#9737;</span> Resultados
+      </a>
+    </nav>
+    <div class="sidebar-footer">
+      <button id="btn-toggle-settings" class="link-button full">Ajustes</button>
+    </div>
+  </aside>
+
+  <main class="wide">
+    <div class="page-head results-head">
+      <h1>Resultados <span id="results-run-id" class="hint"></span></h1>
+      <div class="results-head-controls">
+        <select id="run-selector" class="run-selector-big"><option value="">(elige una ejecución)</option></select>
+      </div>
+    </div>
+
+    <section class="panel">
+      <div id="estado-run" class="estado-run" role="status" hidden></div>
+      <div id="results-tabs-wrap" hidden>
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="tab-nube">NUBE</button>
+          <button class="tab-btn" data-tab="tab-angulares">ANGULARES</button>
+          <button class="tab-btn" data-tab="tab-radiales">RADIALES</button>
+          <button class="tab-btn" data-tab="tab-numericos">NUMÉRICOS</button>
+        </div>
+
+        <div class="results-frame">
+          <div id="tab-nube" class="tab-content active">
+            <div class="walker-controls">
+              <label for="walker-select">Walker:</label>
+              <select id="walker-select">
+                <option value="all">todos (nube)</option>
+              </select>
+            </div>
+            <div id="plot-walkers" class="plot"></div>
+          </div>
+
+          <div id="tab-angulares" class="tab-content">
+            <div id="plots-angular" class="plot-grid-6"></div>
+          </div>
+
+          <div id="tab-radiales" class="tab-content">
+            <div id="plots-radial" class="plot-grid-6"></div>
+          </div>
+
+          <div id="tab-numericos" class="tab-content">
+            <div class="numericos-scroll">
+              <div class="numericos-layout">
+                <div id="stats-cards" class="stats-cards"></div>
+                <div class="stats-charts-col">
+                  <div id="plot-growth" class="plot"></div>
+                  <div id="plot-poblacion" class="plot"></div>
+                </div>
+              </div>
+              <details class="stats-tabla-wrap">
+                <summary>Tabla completa por bloque</summary>
+                <div id="stats-tabla"></div>
+              </details>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="no-run-msg" class="empty-state" hidden>
+        <div class="empty-state-title">Todavía no hay resultados</div>
+        <p class="hint">
+          Ejecuta una simulación desde la página de <a href="/">Configuración</a>
+          o elige una ejecución anterior arriba.
+        </p>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="settings-modal" class="modal-overlay" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+    <div class="modal-head">
+      <h2 id="settings-modal-title"><span class="panel-icon">&#9881;</span> Ajustes</h2>
+      <button id="btn-close-settings" class="modal-close" type="button" aria-label="Cerrar">&times;</button>
+    </div>
+
+    <div class="form-row">
+      <label for="input-runs-dir">Carpeta donde se guardan las ejecuciones</label>
+      <div class="input-with-button">
+        <input type="text" id="input-runs-dir" placeholder="/ruta/a/una/carpeta">
+        <button class="btn-pick-folder" type="button" data-campo="runs_dir">Elegir carpeta&hellip;</button>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <label for="input-source-dir">Carpeta con los ficheros a compilar</label>
+      <div class="input-with-button">
+        <input type="text" id="input-source-dir" placeholder="/ruta/a/una/carpeta">
+        <button class="btn-pick-folder" type="button" data-campo="source_dir">Elegir carpeta&hellip;</button>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <label for="input-binary-dir">Carpeta donde está el binario compilado</label>
+      <div class="input-with-button">
+        <input type="text" id="input-binary-dir" placeholder="/ruta/a/una/carpeta">
+        <button class="btn-pick-folder" type="button" data-campo="binary_dir">Elegir carpeta&hellip;</button>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="btn-save-settings" class="primary">Guardar ajustes</button>
+    </div>
+    <p id="settings-msg" class="hint"></p>
+  </div>
+</div>
+
+<script src="app-settings.js"></script>
+<script src="app-results.js"></script>
+</body>
+</html>

@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>DMC · Configuración</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">He</span>
+      <div>
+        <div class="brand-title">DMC · CUDA</div>
+        <div class="brand-sub">Panel de control</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <a href="/" class="nav-item active">
+        <span class="nav-icon">&#9881;</span> Configuración
+      </a>
+      <a href="/resultados" class="nav-item">
+        <span class="nav-icon">&#9737;</span> Resultados
+      </a>
+    </nav>
+    <div class="sidebar-footer">
+      <div id="binary-status" class="status">comprobando binario&hellip;</div>
+      <button id="btn-toggle-settings" class="link-button full">Ajustes</button>
+    </div>
+  </aside>
+
+  <main class="wide">
+    <div class="page-head">
+      <h1>Configuración de la simulación</h1>
+      <p class="hint">
+        Editable = parámetro real de la simulación. Fijo = requerido por cómo está
+        construido el pipeline GPU/CUDA de este TFG (cambiarlo rompería la
+        compilación o los límites de los kernels).
+      </p>
+    </div>
+
+    <section class="panel" id="panel-import">
+      <h2><span class="panel-icon">&#8593;</span> Importar in.mcv</h2>
+      <p class="hint">
+        Carga un in.mcv existente (misma estructura -- mismo lmax de función de
+        onda que esta interfaz) para precargar todo el formulario con sus valores.
+      </p>
+      <div class="actions">
+        <input type="file" id="input-importar-inmcv" accept=".mcv,text/plain">
+      </div>
+      <p id="import-msg" class="hint"></p>
+    </section>
+
+    <section class="panel" id="panel-config">
+      <div class="tabs" id="config-tabs">
+        <button class="tab-btn active" data-tab="cfg-tab-1">1 · Datos del sistema</button>
+        <button class="tab-btn" data-tab="cfg-tab-2">2 · Datos Monte Carlo</button>
+        <button class="tab-btn" data-tab="cfg-tab-3">3 · Función de onda</button>
+        <button class="tab-btn" data-tab="cfg-tab-4">4 · Cálculo paralelo</button>
+      </div>
+
+      <div class="config-frame">
+        <div id="cfg-tab-1" class="tab-content active">
+          <div class="form-row" id="row-nombre-run">
+            <label for="input-nombre-run">Nombre de la ejecución</label>
+            <input type="text" id="input-nombre-run" placeholder="por defecto: la fecha y la hora">
+          </div>
+          <div id="seccion-1" class="field-grid"></div>
+          <div class="tab-next">
+            <button type="button" class="tab-next-btn primary" data-next="cfg-tab-2">Siguiente: Datos Monte Carlo &rarr;</button>
+          </div>
+        </div>
+
+        <div id="cfg-tab-2" class="tab-content">
+          <div class="field-columns">
+            <div>
+              <h4>Parámetros Monte Carlo</h4>
+              <div id="seccion-2-mc"></div>
+            </div>
+            <div>
+              <h4>Pasos y bloques</h4>
+              <div id="seccion-2-pasos"></div>
+            </div>
+          </div>
+          <div class="tab-next">
+            <button type="button" class="tab-next-btn primary" data-next="cfg-tab-3">Siguiente: Función de onda &rarr;</button>
+          </div>
+        </div>
+
+        <div id="cfg-tab-3" class="tab-content">
+          <div id="seccion-3"></div>
+          <div class="tab-next">
+            <button type="button" class="tab-next-btn primary" data-next="cfg-tab-4">Siguiente: Cálculo paralelo &rarr;</button>
+          </div>
+        </div>
+
+        <div id="cfg-tab-4" class="tab-content">
+          <div id="seccion-4" class="field-grid"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel sticky-actions">
+      <div id="run-progress" class="run-progress" hidden>
+        <span class="run-progress-dot"></span>
+        <span id="run-progress-text"></span>
+      </div>
+      <div class="actions">
+        <button id="btn-compile">Compilar</button>
+        <button id="btn-run" class="primary">Ejecutar</button>
+        <button id="btn-stop" class="danger" hidden>Parar</button>
+      </div>
+    </section>
+
+    <section class="panel" id="panel-log">
+      <h2><span class="panel-icon">&#9636;</span> Registro en vivo</h2>
+      <pre id="log"></pre>
+    </section>
+  </main>
+</div>
+
+<div id="settings-modal" class="modal-overlay" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+    <div class="modal-head">
+      <h2 id="settings-modal-title"><span class="panel-icon">&#9881;</span> Ajustes</h2>
+      <button id="btn-close-settings" class="modal-close" type="button" aria-label="Cerrar">&times;</button>
+    </div>
+
+    <div class="form-row">
+      <label for="input-runs-dir">Carpeta donde se guardan las ejecuciones</label>
+      <div class="input-with-button">
+        <input type="text" id="input-runs-dir" placeholder="/ruta/a/una/carpeta">
+        <button class="btn-pick-folder" type="button" data-campo="runs_dir">Elegir carpeta&hellip;</button>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <label for="input-source-dir">Carpeta con los ficheros a compilar</label>
+      <div class="input-with-button">
+        <input type="text" id="input-source-dir" placeholder="/ruta/a/una/carpeta">
+        <button class="btn-pick-folder" type="button" data-campo="source_dir">Elegir carpeta&hellip;</button>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <label for="input-binary-dir">Carpeta donde está el binario compilado</label>
+      <div class="input-with-button">
+        <input type="text" id="input-binary-dir" placeholder="/ruta/a/una/carpeta">
+        <button class="btn-pick-folder" type="button" data-campo="binary_dir">Elegir carpeta&hellip;</button>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="btn-save-settings" class="primary">Guardar ajustes</button>
+    </div>
+    <p id="settings-msg" class="hint"></p>
+  </div>
+</div>
+
+<script src="app-settings.js"></script>
+<script src="app-config.js"></script>
+</body>
+</html>
