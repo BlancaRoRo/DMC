@@ -19,3 +19,12 @@ nsys_*.log
 nsys_*_stdout.log
 *.bak
 *.cubin
+
+# Productos de compilacion de las dos versiones (make / compilar_gfortran.sh,
+# tambien al pulsar "Compilar" en la interfaz)
+dmc-cpu/*.o
+dmc-cpu/*.mod
+dmc-cpu/qmccluster
+dmc-hibrido/*.o
+dmc-hibrido/*.mod
+dmc-hibrido/qmccluster_pipeline

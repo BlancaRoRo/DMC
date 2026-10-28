@@ -38,6 +38,9 @@ por eso el enlace pasa por [htmlpreview.github.io](https://htmlpreview.github.io
 Ambas son solo código fuente + lo necesario para compilar y ejecutar (sin
 `.o`/`.mod`/binarios ni resultados de corridas anteriores).
 
+Además, **`gui-visualizacion/`** contiene una interfaz web para configurar,
+compilar, ejecutar y ver los resultados de `dmc-hibrido` (ver más abajo).
+
 ## Requisitos
 
 - **`gfortran`** para `dmc-cpu/` (viene con cualquier distribución de GCC).
@@ -97,3 +100,23 @@ make
 ```
 
 (Mismo `<` que en `dmc-cpu`: la configuración se lee por entrada estándar.)
+
+## `gui-visualizacion/`
+
+Interfaz web (Python + Flask en el servidor, HTML/CSS/JavaScript y Plotly en el
+navegador) para configurar el `in.mcv` con un formulario validado, compilar y lanzar
+`dmc-hibrido`, seguir la ejecución en directo y visualizar sus resultados (nube 3D de
+*walkers*, histogramas radiales y angulares, energías y población por bloque).
+
+Por defecto usa `../dmc-hibrido` para compilar y ejecutar, y guarda cada ejecución en
+`gui-visualizacion/runs/`, así que funciona nada más clonar el repositorio:
+
+```bash
+cd gui-visualizacion
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+./venv/bin/python3 app.py      # abrir http://127.0.0.1:5057
+```
+
+Los detalles (uso, pruebas y seguridad) están en
+[`gui-visualizacion/README.md`](gui-visualizacion/README.md).
