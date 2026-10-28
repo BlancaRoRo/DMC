@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>DMC · Panel de control</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>DMC &middot; panel de control</h1>
+  <div id="binary-status" class="status">comprobando binario&hellip;</div>
+</header>
+
+<main>
+  <section class="panel" id="panel-config">
+    <h2>1. Configuraci&oacute;n (in.mcv)</h2>
+    <textarea id="inmcv" spellcheck="false"></textarea>
+    <div class="actions">
+      <button id="btn-reset-preset">Cargar preset por defecto</button>
+      <button id="btn-compile">Compilar</button>
+      <button id="btn-run" class="primary">Ejecutar</button>
+    </div>
+  </section>
+
+  <section class="panel" id="panel-log">
+    <h2>2. Registro en vivo</h2>
+    <pre id="log"></pre>
+  </section>
+
+  <section class="panel" id="panel-runs">
+    <h2>3. Corridas anteriores</h2>
+    <ul id="runs-list"></ul>
+  </section>
+
+  <section class="panel" id="panel-results" hidden>
+    <h2>4. Resultados <span id="results-run-id"></span></h2>
+
+    <h3>Configuraci&oacute;n final de walkers</h3>
+    <div id="plot-walkers" class="plot plot-large"></div>
+
+    <h3>Histogramas radiales</h3>
+    <div id="plots-radial" class="plot-grid"></div>
+
+    <h3>Histogramas angulares</h3>
+    <div id="plots-angular" class="plot-grid"></div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
