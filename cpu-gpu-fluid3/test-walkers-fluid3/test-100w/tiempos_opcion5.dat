@@ -1,0 +1,21 @@
+reparto de tiempos, opcion=5 (GPU, pipeline de 7 fases)
+tiempo total (bucle bloques+pasos), s =        12.9545
+ 
+-- dentro de pasodmc_gpu_pipeline --
+sincroniza_globales_gpu                                     0.0770 s  (  0.595 % del total)
+empaquetar AoS->SoA (host)                                  0.3583 s  (  2.766 % del total)
+copia host->device (H2D)                                    0.8841 s  (  6.825 % del total)
+lanza_pipeline (grafo CUDA, device)                         7.4743 s  ( 57.697 % del total)
+copia device->host (D2H)                                    1.6664 s  ( 12.863 % del total)
+desempaquetar SoA->AoS (host)                               0.8281 s  (  6.393 % del total)
+reparticion/compactacion                                    0.5054 s  (  3.902 % del total)
+ 
+-- fuera de pasodmc_gpu_pipeline, en el bucle de pasos --
+dmcsumapaso (energias)                                      0.0055 s  (  0.042 % del total)
+denssumapaso (densidades, O(natom^2)/walker)                0.0569 s  (  0.439 % del total)
+difussumapaso (difusion, solo primeros ndifus pasos)        0.1098 s  (  0.847 % del total)
+ 
+CONVERSION AoS<->SoA total (pack+H2D+D2H+unpack)            3.7369 s  ( 28.846 % del total)
+ESTADISTICAS total (dmcsuma+denssuma+difussuma)             0.1721 s  (  1.329 % del total)
+pasodmc_gpu_pipeline completo                              12.1825 s  ( 94.041 % del total)
+otros (E/S por bloque, promedios...)                        0.5999 s  (  4.631 % del total)

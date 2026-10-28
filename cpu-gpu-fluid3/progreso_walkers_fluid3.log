@@ -1,0 +1,58 @@
+[2026-10-28 10:06:14] ===== test-walkers (fluid3): INICIO -- walkers: 1 5 10 15 20 25 30 40 50 75 100 150 250 500; repeticiones: 1 =====
+[2026-10-28 10:06:14] INICIO test-1w [gpu] r1 w=1 bloq=100 pasos=100
+[2026-10-28 10:06:15] FALLO  test-1w [gpu] r1 wall=0.928671122s rc=1 -- ver /home/bromero/CUDA/repo_DMC/test-walkers-fluid3/test-1w/salida-test-1w-gpu-r1.log
+[2026-10-28 10:06:15] INICIO test-1w [cpu] r1 w=1 bloq=100 pasos=100
+[2026-10-28 10:06:15] FIN    test-1w [cpu] r1 wall=0.371290207s
+[2026-10-28 10:06:15] INICIO test-5w [gpu] r1 w=5 bloq=100 pasos=100
+[2026-10-28 10:06:25] FIN    test-5w [gpu] r1 wall=10.210783958s
+[2026-10-28 10:06:25] INICIO test-5w [cpu] r1 w=5 bloq=100 pasos=100
+[2026-10-28 10:06:32] FIN    test-5w [cpu] r1 wall=6.711608410s
+[2026-10-28 10:06:32] INICIO test-10w [gpu] r1 w=10 bloq=100 pasos=100
+[2026-10-28 10:06:43] FIN    test-10w [gpu] r1 wall=10.438135386s
+[2026-10-28 10:06:43] INICIO test-10w [cpu] r1 w=10 bloq=100 pasos=100
+[2026-10-28 10:06:56] FIN    test-10w [cpu] r1 wall=13.154635668s
+[2026-10-28 10:06:56] INICIO test-15w [gpu] r1 w=15 bloq=100 pasos=100
+[2026-10-28 10:07:07] FIN    test-15w [gpu] r1 wall=10.599796295s
+[2026-10-28 10:07:07] INICIO test-15w [cpu] r1 w=15 bloq=100 pasos=100
+[2026-10-28 10:07:26] FIN    test-15w [cpu] r1 wall=19.663455725s
+[2026-10-28 10:07:26] INICIO test-20w [gpu] r1 w=20 bloq=100 pasos=100
+[2026-10-28 10:07:37] FIN    test-20w [gpu] r1 wall=10.825919628s
+[2026-10-28 10:07:37] INICIO test-20w [cpu] r1 w=20 bloq=100 pasos=100
+[2026-10-28 10:08:03] FIN    test-20w [cpu] r1 wall=26.199506521s
+[2026-10-28 10:08:04] INICIO test-25w [gpu] r1 w=25 bloq=100 pasos=100
+[2026-10-28 10:08:15] FIN    test-25w [gpu] r1 wall=11.010959148s
+[2026-10-28 10:08:15] INICIO test-25w [cpu] r1 w=25 bloq=100 pasos=100
+[2026-10-28 10:08:47] FIN    test-25w [cpu] r1 wall=32.093620777s
+[2026-10-28 10:08:47] INICIO test-30w [gpu] r1 w=30 bloq=100 pasos=100
+[2026-10-28 10:08:58] FIN    test-30w [gpu] r1 wall=11.225654125s
+[2026-10-28 10:08:58] INICIO test-30w [cpu] r1 w=30 bloq=100 pasos=100
+[2026-10-28 10:09:37] FIN    test-30w [cpu] r1 wall=39.168218374s
+[2026-10-28 10:09:37] INICIO test-40w [gpu] r1 w=40 bloq=100 pasos=100
+[2026-10-28 10:09:49] FIN    test-40w [gpu] r1 wall=11.570172787s
+[2026-10-28 10:09:49] INICIO test-40w [cpu] r1 w=40 bloq=100 pasos=100
+[2026-10-28 10:10:41] FIN    test-40w [cpu] r1 wall=52.458742619s
+[2026-10-28 10:10:42] INICIO test-50w [gpu] r1 w=50 bloq=100 pasos=100
+[2026-10-28 10:10:53] FIN    test-50w [gpu] r1 wall=11.839114904s
+[2026-10-28 10:10:53] INICIO test-50w [cpu] r1 w=50 bloq=100 pasos=100
+[2026-10-28 10:11:58] FIN    test-50w [cpu] r1 wall=64.998280764s
+[2026-10-28 10:11:59] INICIO test-75w [gpu] r1 w=75 bloq=100 pasos=100
+[2026-10-28 10:12:11] FIN    test-75w [gpu] r1 wall=12.735245705s
+[2026-10-28 10:12:11] INICIO test-75w [cpu] r1 w=75 bloq=100 pasos=100
+[2026-10-28 10:13:50] FIN    test-75w [cpu] r1 wall=98.200727701s
+[2026-10-28 10:13:50] INICIO test-100w [gpu] r1 w=100 bloq=100 pasos=100
+[2026-10-28 10:14:03] FIN    test-100w [gpu] r1 wall=13.114346504s
+[2026-10-28 10:14:03] INICIO test-100w [cpu] r1 w=100 bloq=100 pasos=100
+[2026-10-28 10:16:13] FIN    test-100w [cpu] r1 wall=129.958727360s
+[2026-10-28 10:16:13] INICIO test-150w [gpu] r1 w=150 bloq=100 pasos=100
+[2026-10-28 10:16:28] FIN    test-150w [gpu] r1 wall=15.014517069s
+[2026-10-28 10:16:28] INICIO test-150w [cpu] r1 w=150 bloq=100 pasos=100
+[2026-10-28 10:19:43] FIN    test-150w [cpu] r1 wall=195.360056400s
+[2026-10-28 10:19:43] INICIO test-250w [gpu] r1 w=250 bloq=100 pasos=100
+[2026-10-28 10:20:02] FIN    test-250w [gpu] r1 wall=18.098282814s
+[2026-10-28 10:20:02] INICIO test-250w [cpu] r1 w=250 bloq=100 pasos=100
+[2026-10-28 10:25:28] FIN    test-250w [cpu] r1 wall=326.536304951s
+[2026-10-28 10:25:28] INICIO test-500w [gpu] r1 w=500 bloq=100 pasos=100
+[2026-10-28 10:25:52] FIN    test-500w [gpu] r1 wall=23.746237040s
+[2026-10-28 10:25:52] INICIO test-500w [cpu] r1 w=500 bloq=100 pasos=100
+[2026-10-28 10:36:52] FIN    test-500w [cpu] r1 wall=659.610878468s
+[2026-10-28 10:36:52] ===== test-walkers (fluid3): TERMINADO =====

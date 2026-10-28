@@ -1,0 +1,8 @@
+# De cada corrida solo se versionan los ficheros ligeros que respaldan las
+# tablas: logs (con el tiempo wall=... al final), in.mcv usados y tiempos
+# internos. Binarios copiados, histogramas y configuraciones finales
+# (~7 MB por carpeta) se regeneran volviendo a ejecutar la bateria.
+test-walkers-*/test-*/*
+!test-walkers-*/test-*/salida-*.log
+!test-walkers-*/test-*/in.mcv-*
+!test-walkers-*/test-*/tiempos_opcion*.dat

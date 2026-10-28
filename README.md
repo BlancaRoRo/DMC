@@ -14,6 +14,9 @@ producción completa del TFG -- y se explora un par de líneas de hardware apart
 - **`cpu-gpu-ctfg/`**: investigación de en qué punto (número de walkers, de bloques,
   de pasos) compensa usar la GPU frente a la CPU y en cuál es al revés -- el cruce
   real de eficiencia entre las dos versiones, no solo "la GPU siempre gana".
+- **`cpu-gpu-fluid3/`**: la misma batería de walkers de `cpu-gpu-ctfg/` (bloques y
+  pasos fijos en 100, de 1 a 500 walkers) repetida en la Tesla V100 de `fluid3`, para
+  comparar el punto de cruce CPU/GPU entre las dos máquinas.
 - **`prueba1-2000w-500pasos-bloque/`**: primera prueba de duración intermedia,
   2000 walkers / 20 bloques / 500 pasos por bloque. Hallazgo clave: el cuello de
   botella real es el tamaño del grid (0,33 oleadas/SM), no los registros.
