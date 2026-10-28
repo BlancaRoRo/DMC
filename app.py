@@ -1,13 +1,13 @@
 """
-Interfaz web para compilar/ejecutar el pipeline DMC (v2-cuda-integracion/
-hibrido_instrumentado) y visualizar histogramas + la configuracion final de
-walkers. Fase 1: usa solo datos que el simulador ya produce (histogramas
+Interfaz web para compilar/ejecutar el pipeline DMC (dmc-hibrido, en la
+misma rama main del repositorio) y visualizar histogramas + la configuracion
+final de walkers. Fase 1: usa solo datos que el simulador ya produce (histogramas
 finales, conf.*.HH final) -- no toca el codigo Fortran/CUDA.
 
 Cada ejecucion corre en su propio directorio aislado bajo runs/, con su
 propio conf.20.00.HH "fresco" copiado de la carpeta del binario (o, si no
 esta ahi, de la de compilacion; ver buscar_conf_fresco) -- nunca se lanza
-nada dentro de hibrido_instrumentado/, que solo se usa para compilar.
+nada dentro de dmc-hibrido/, que solo se usa para compilar.
 """
 import glob
 import json
@@ -28,7 +28,9 @@ from werkzeug.exceptions import HTTPException
 
 APP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = APP_DIR.parent
-HIBRIDO_DIR = REPO_ROOT / "v2-cuda-integracion" / "hibrido_instrumentado"
+# la interfaz vive en el repositorio DMC junto al simulador:
+# DMC/gui-visualizacion/ y DMC/dmc-hibrido/
+HIBRIDO_DIR = REPO_ROOT / "dmc-hibrido"
 CONF_NOMBRE = "conf.20.00.HH"
 # plantilla del in.mcv: el formulario se construye a partir de ella y cada
 # ejecucion parte de ella (o de un in.mcv importado con su misma
@@ -46,7 +48,7 @@ COMPILE_SCRIPT = "compilar_pipeline.sh"
 # "Compilar", binary_dir/BINARY_NAME es lo que ejecuta "Ejecutar" --
 # separadas para poder apuntar "Ejecutar" a un binario ya compilado en
 # otro sitio sin tener que recompilar. Por defecto las dos son
-# HIBRIDO_DIR, que es donde compilar_pipeline.sh deja el binario.
+# HIBRIDO_DIR, que es donde make deja el binario.
 SETTINGS_KEYS = {
     "runs_dir": {"default": DEFAULT_RUNS_DIR, "create": True},
     "source_dir": {"default": HIBRIDO_DIR, "create": False},
@@ -869,6 +871,21 @@ def _run_dir_or_404(run_id):
     d = get_runs_dir() / run_id
     return d if d.is_dir() else None
 
+def _tiempo_transcurrido(run_dir, estado):
+    """Tiempo real (de reloj) de la ejecucion en segundos: desde que se
+    lanzo (meta.json) hasta que termino (returncode), o hasta ahora si sigue
+    corriendo. No es el 'tiempo de CPU' que imprime el binario (cpu_time)."""
+    inicio = _meta_run(run_dir).get("inicio")
+    if inicio is None:
+        return None
+    if estado["estado"] == "terminada":
+        return (run_dir / "returncode").stat().st_mtime - inicio
+    if estado["estado"] == "corriendo":
+        return time.time() - inicio
+    log = run_dir / "salida.log"
+    return (log.stat().st_mtime - inicio) if log.exists() else 0.0
+
+
 @app.route("/api/runs/<run_id>/seguimiento")
 def run_seguimiento(run_id):
     """Estado de la ejecucion + el trozo de salida.log posterior al byte
@@ -892,16 +909,7 @@ def run_seguimiento(run_id):
         if estado["estado"] == "corriendo":
             datos = datos[: datos.rfind(b"\n") + 1]
 
-    meta = _meta_run(run_dir)
-    inicio = meta.get("inicio")
-    if inicio is None:
-        elapsed = None
-    elif estado["estado"] == "terminada":
-        elapsed = (run_dir / "returncode").stat().st_mtime - inicio
-    elif estado["estado"] == "corriendo":
-        elapsed = time.time() - inicio
-    else:
-        elapsed = (log.stat().st_mtime - inicio) if log.exists() else 0.0
+    elapsed = _tiempo_transcurrido(run_dir, estado)
 
     bloques = {"eq": 0, "ca": 0}
     try:
@@ -1155,6 +1163,15 @@ def parse_salida_log(texto):
             tiempo_cpu_s = float(m.group(1))
             continue
 
+    # con opot=4, dmcescrfin (mdmcpromedia.f90) divide TODOS los promedios
+    # por k2mev para pasar de meV a K, poblacion y estadistica incluidas, y
+    # las dos lineas sueltas del final salen ya divididas (2189 -> 25422).
+    # El valor bueno es el del bloque "Resultados en meV", escrito antes.
+    if "Poblacion media" in resumen["meV"]:
+        poblacion_media = resumen["meV"]["Poblacion media"]
+    if "Estadistica" in resumen["meV"]:
+        estadistica = resumen["meV"]["Estadistica"]
+
     return {
         "bloques": bloques,
         "resumen": resumen,
@@ -1186,7 +1203,8 @@ def run_stats(run_id):
     log_path = run_dir / "salida.log"
     if not log_path.exists():
         return jsonify({"error": "esta ejecución no tiene salida.log guardada (ejecuciones anteriores a esta funcion)"}), 404
-    return jsonify(parse_salida_log(log_path.read_text()))
+    return jsonify({**parse_salida_log(log_path.read_text()),
+                    "tiempo_real_s": _tiempo_transcurrido(run_dir, estado_run(run_dir))})
 
 
 @app.route("/api/runs/<run_id>/log")

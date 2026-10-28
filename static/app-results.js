@@ -253,6 +253,16 @@ function fmt(n, dec) {
   return typeof n === "number" ? n.toFixed(dec === undefined ? 4 : dec) : "--";
 }
 
+function formatoDuracion(segundos) {
+  segundos = Math.max(0, Math.round(segundos));
+  const h = Math.floor(segundos / 3600);
+  const m = Math.floor((segundos % 3600) / 60);
+  const s = segundos % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
 function tarjetaHero(etiqueta, valor, unidad, error) {
   const div = document.createElement("div");
   div.className = "stat-hero";
@@ -333,11 +343,14 @@ function renderStatsCards(stats) {
   if (stats.poblacion_media) {
     chips.appendChild(chip("Población media", fmt(stats.poblacion_media.valor, 1) + " ± " + fmt(stats.poblacion_media.error, 1)));
   }
+  // "walkers finales" no se muestra: el binario imprime nwsim, que nunca se
+  // actualiza con la poblacion real (nwpaso) y siempre vale nwalkers
   if (stats.walkers_iniciales !== null) {
-    chips.appendChild(chip("Walkers", stats.walkers_iniciales + " → " + stats.walkers_finales));
+    chips.appendChild(chip("Walkers iniciales", String(stats.walkers_iniciales)));
   }
-  if (stats.tiempo_cpu_s !== null) {
-    chips.appendChild(chip("Tiempo de CPU", fmt(stats.tiempo_cpu_s, 2) + " s"));
+  // tiempo real (de reloj) medido por el servidor, no el tiempo de CPU del binario
+  if (stats.tiempo_real_s !== null) {
+    chips.appendChild(chip("Duración de la simulación", formatoDuracion(stats.tiempo_real_s)));
   }
 }
 
@@ -371,9 +384,10 @@ function renderStatsCharts(bloques) {
       { type: "scatter", mode: "lines", name: "cálculo", x: xCa, y: calculo.map((b) => b.poblacion), line: { color: "#4fd58d" } },
     ],
     plotlyDarkLayout({
-      title: "Walkers (población) por bloque",
+      // <Poblacion> del binario: media acumulada desde el inicio de la fase
+      title: "Población media acumulada por bloque",
       xaxis: { title: "bloque (equilibrio → cálculo)", color: "#8891a5" },
-      yaxis: { title: "walkers", color: "#8891a5" },
+      yaxis: { title: "walkers (media acumulada)", color: "#8891a5" },
       legend: { orientation: "h" },
     }),
     { responsive: true }
@@ -385,7 +399,7 @@ function renderStatsTabla(bloques) {
   const table = document.createElement("table");
   table.className = "static-table";
   const thead = document.createElement("thead");
-  thead.innerHTML = "<tr><th>fase</th><th>bloque</th><th>E_bloque</th><th>E_calculo</th><th>E_growth</th><th>Población</th></tr>";
+  thead.innerHTML = "<tr><th>fase</th><th>bloque</th><th>E_bloque</th><th>E_calculo</th><th>E_growth</th><th>Población (media acum.)</th></tr>";
   table.appendChild(thead);
   const tbody = document.createElement("tbody");
   for (const b of bloques) {
@@ -425,10 +439,18 @@ function renderRadial(radial) {
     const div = document.createElement("div");
     div.className = "plot";
     container.appendChild(div);
+    // mdensidades.f90: 2000 celdas de 0.01 A hasta 20 A; cada valor es el
+    // numero medio de pares (por walker) con distancia en esa celda, asi
+    // que la curva suma el numero de pares (N(N-1)/2, o N con la impureza)
     Plotly.newPlot(
       div,
       [{ type: "scatter", mode: "lines", x: h.x, y: h.y, line: { color: "#5b8cff" } }],
-      plotlyDarkLayout({ title: h.label }),
+      plotlyDarkLayout({
+        title: h.label,
+        margin: { l: 60, r: 10, t: 30, b: 45 },
+        xaxis: { title: { text: "r, distancia entre las dos partículas (Å)" }, color: "#8891a5" },
+        yaxis: { title: { text: "pares por intervalo de 0,01 Å" }, color: "#8891a5" },
+      }),
       { responsive: true }
     );
   }
@@ -446,6 +468,14 @@ function renderAngular(angular) {
     const div = document.createElement("div");
     div.className = "plot";
     container.appendChild(div);
+    // mdensidades.f90: x = z a lo largo del eje molecular, y = rho = r*sin(theta)
+    // (d2d*, >= 0) o rho con el signo de la componente y del sistema
+    // molecular (d2yd*); distancias siempre en A (las de entrada en ua se
+    // pasan a A). z del mapa: cuentas/muestra pesadas con 1/sin(theta), sin
+    // dividir por el volumen de la celda -> unidades arbitrarias.
+    const ejeY = key.startsWith("d2yd")
+      ? "y, distancia al eje con signo (Å)"
+      : "ρ, distancia al eje (Å)";
     Plotly.newPlot(
       div,
       [
@@ -455,9 +485,15 @@ function renderAngular(angular) {
           y: h.y,
           z: h.z,
           colorscale: "Viridis",
+          colorbar: { title: { text: "densidad<br>(u. arb.)", side: "right" } },
         },
       ],
-      plotlyDarkLayout({ title: h.label }),
+      plotlyDarkLayout({
+        title: h.label,
+        margin: { l: 60, r: 10, t: 30, b: 45 },
+        xaxis: { title: { text: "z, eje molecular (Å)" }, color: "#8891a5" },
+        yaxis: { title: { text: ejeY }, color: "#8891a5" },
+      }),
       { responsive: true }
     );
   }

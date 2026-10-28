@@ -39,20 +39,31 @@ mezclan entre sí ni con el código fuente.
 | Servidor | **Python 3** con **Flask** (≥ 3.1) |
 | Interfaz | **HTML**, **CSS** y **JavaScript** sin *frameworks* |
 | Gráficas | **Plotly** 2.35.2, cargado desde CDN |
-| Simulador (externo a este repositorio) | **Fortran** y **CUDA Fortran**, compilado con `nvfortran` |
+| Simulador (`../dmc-hibrido/`) | **Fortran** y **CUDA Fortran**, compilado con `nvfortran` |
 
 El navegador y el servidor se comunican mediante una API HTTP que
 intercambia JSON. La salida de la compilación llega en directo mediante
 *Server-Sent Events*, y el progreso de una ejecución se consulta
 periódicamente (`/api/runs/<run_id>/seguimiento`).
 
-### Estructura de este repositorio
+### Estructura de esta carpeta
+
+La interfaz está en la rama `main` del repositorio
+[BlancaRoRo/DMC](https://github.com/BlancaRoRo/DMC), al mismo nivel que el
+simulador:
+
+```
+DMC/
+├── dmc-cpu/                    # versión original (CPU)
+├── dmc-hibrido/                # versión acelerada (CPU+GPU), la que usa la interfaz
+└── gui-visualizacion/
+```
 
 ```
 gui-visualizacion/
 ├── app.py                      # servidor Flask: API, validación y gestión de ejecuciones
 ├── requirements.txt            # dependencias de Python
-├── settings.json               # rutas configurables (se editan desde "Ajustes")
+├── settings.json               # rutas elegidas en "Ajustes" (local, no se sube al repositorio)
 ├── static/
 │   ├── config.html             # página de configuración, compilación y ejecución
 │   ├── results.html            # página de resultados
@@ -80,12 +91,13 @@ gui-visualizacion/
 
 ### Archivos necesarios
 
-La interfaz no incluye el simulador. Su versión final está en la carpeta
-`dmc-hibrido/` del repositorio [BlancaRoRo/DMC](https://github.com/BlancaRoRo/DMC)
-(rama `main`), que ya trae todo lo necesario:
+No hay que descargar nada aparte: la versión final del simulador está en
+`../dmc-hibrido/`, en el mismo repositorio, y ya trae todo lo necesario.
+Nada más clonar, las rutas por defecto apuntan ahí:
 
 ```bash
 git clone https://github.com/BlancaRoRo/DMC.git
+cd DMC/gui-visualizacion
 ```
 
 | Archivo | Para qué se usa | Si falta |
@@ -94,9 +106,11 @@ git clone https://github.com/BlancaRoRo/DMC.git
 | `qmccluster_pipeline` (binario que genera la compilación) y los potenciales `*.pot` | Botón *Ejecutar* | No se puede ejecutar |
 | `conf.20.00.HH` | Configuración inicial de los *walkers*, que se copia a cada ejecución | No se puede ejecutar |
 
-Dónde están se indica en la interfaz, en la ventana **Ajustes** (icono
-⚙), que guarda las rutas en `settings.json`. Con el repositorio del
-simulador, las dos primeras apuntan a la misma carpeta, `DMC/dmc-hibrido`:
+Las rutas se pueden cambiar en la ventana **Ajustes** (icono ⚙), que las
+guarda en `settings.json`. Si ese fichero no existe (como ocurre nada más
+clonar), se usan los valores por defecto: las dos primeras apuntan a
+`../dmc-hibrido` y la tercera a `runs/`. Para volver a los valores por
+defecto basta con borrar `settings.json`.
 
 - **Carpeta con los ficheros a compilar:** la que contiene el `Makefile`
   y el código fuente. También se aceptan las carpetas de desarrollo
@@ -127,7 +141,7 @@ onda), para que cada campo se lea de la línea correcta.
 ### Instalación
 
 ```bash
-cd gui-visualizacion
+cd DMC/gui-visualizacion
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 ```

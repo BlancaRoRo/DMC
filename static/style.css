@@ -406,6 +406,24 @@ pre#log {
   margin: 0;
 }
 
+/* cabecera de la tabla de bloques, fija encima del log mientras corre */
+pre#log-cabecera {
+  background: #0a0c12;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  padding: 0.5rem 0.85rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--accent);
+  white-space: pre-wrap;
+  margin: 0;
+}
+pre#log-cabecera:not([hidden]) + pre#log {
+  border-top-style: dashed;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+
 /* ---------------- tables (funcion de onda) ---------------- */
 
 .static-table-wrap { margin-bottom: 1.5rem; overflow-x: auto; }

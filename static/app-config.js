@@ -57,6 +57,40 @@ const RE_LINEA_BLOQUE = /^\s*(\d+)\s+\d+\s+\d+\s+-?\d+\.\d+\s+-?\d+\.\d+\s+-?\d+
 
 let progreso = null;
 
+// ---- columnas redundantes de la tabla de bloques ----
+// El binario es la version serie (mserie.f90, ncpar=1): "Blq/Proc" siempre
+// coincide con "Bloque" y "Proceso" siempre vale 1, asi que se quitan del
+// log mostrado (salida.log no se toca). La cabecera usa '(3a10,...)': se
+// recortan sus columnas 2 y 3. Una linea de bloque solo se recorta si de
+// verdad es redundante; si no (p. ej. un binario paralelo), se deja tal cual.
+const RE_CABECERA_BLOQUES = /^\s*Bloque\s+Blq\/Proc\s+Proceso/;
+const RE_COLUMNAS_BLOQUE = /^(\s*\d+)\s+(\d+)\s+(\d+)(\s+-?\d+\.\d+.*)$/;
+// la cabecera original ('a15') no cae encima de los datos ('i8,3f16.8,f10.2'):
+// se reescribe con los anchos de las columnas de datos
+const CABECERA_ALINEADA = "Bloque".padStart(8) +
+  ["<E_bloque>", "<E_calculo>", "<E_growth>"].map((t) => t.padStart(16)).join("") +
+  " <Poblacion>";  // un caracter mas ancho que 'f10.2' para no pegarse a <E_growth>
+
+// la ultima cabecera de bloques vista se copia a #log-cabecera, que queda
+// fija encima del log aunque este siga avanzando
+const logCabeceraEl = document.getElementById("log-cabecera");
+
+function fijarCabecera(lineas) {
+  for (const linea of lineas) {
+    if (RE_CABECERA_BLOQUES.test(linea)) {
+      logCabeceraEl.textContent = quitarColumnasRedundantes(linea);
+      logCabeceraEl.hidden = false;
+    }
+  }
+}
+
+function quitarColumnasRedundantes(linea) {
+  if (RE_CABECERA_BLOQUES.test(linea)) return CABECERA_ALINEADA;
+  const m = RE_COLUMNAS_BLOQUE.exec(linea);
+  if (m && m[1].trim() === m[2] && m[3] === "1") return m[1] + m[4];
+  return linea;
+}
+
 function formatoDuracion(segundos) {
   segundos = Math.max(0, Math.round(segundos));
   const h = Math.floor(segundos / 3600);
@@ -146,6 +180,7 @@ async function seguirEjecucion(runId, recargarLog) {
   currentRunId = runId;
   logOffset = 0;
   if (recargarLog) logEl.textContent = "";
+  logCabeceraEl.hidden = true;
   btnCompile.disabled = true;
   btnRun.disabled = true;
   btnStop.hidden = false;
@@ -172,7 +207,9 @@ async function sondearEjecucion() {
   else progreso.t0 = Date.now() - (j.elapsed_s || 0) * 1000;
 
   if (j.texto) {
-    logEl.textContent += j.texto;
+    const lineas = j.texto.split("\n");
+    fijarCabecera(lineas);
+    logEl.textContent += lineas.map(quitarColumnasRedundantes).join("\n");
     logEl.scrollTop = logEl.scrollHeight;
     for (const linea of j.texto.split("\n")) procesarLineaProgreso(linea);
     logOffset = j.siguiente;

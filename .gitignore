@@ -2,4 +2,6 @@ venv/
 runs/*
 !runs/.gitkeep
 __pycache__/
+# rutas locales elegidas en Ajustes; sin el fichero se usan las de por defecto
+settings.json
 *.pyc
