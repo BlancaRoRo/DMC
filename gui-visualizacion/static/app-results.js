@@ -66,8 +66,8 @@ function plotlyDarkLayout(extra) {
     {
       paper_bgcolor: "#161923",
       plot_bgcolor: "#0c0e13",
-      font: { color: "#e4e7ee", size: 11 },
-      margin: { l: 40, r: 10, t: 30, b: 35 },
+      font: { color: "#e4e7ee", size: 14 },
+      margin: { l: 70, r: 15, t: 45, b: 60 },
     },
     extra || {}
   );
@@ -354,41 +354,92 @@ function renderStatsCards(stats) {
   }
 }
 
+// explicacion de cada serie de la grafica de energia, que sale al pasar el
+// raton por su entrada de la leyenda. Ver dmcescrblo/dmcsumablo en
+// mdmcpromedia.f90: E_bloque es la media de ESE bloque; E_calculo y
+// E_growth son medias acumuladas desde el primer bloque de la fase (se
+// reinician al pasar de equilibrio a calculo).
+const EXPLICACION_LEYENDA = {
+  "E_bloque": "<b>Energía del bloque.</b> Energía total media de los walkers en los pasos de " +
+    "<i>ese bloque solo</i>, no acumulada. Por eso es la que más oscila.",
+  "E_calculo": "<b>Energía acumulada.</b> Media de todos los E_bloque desde el primer bloque de " +
+    "cálculo hasta este. Es la estimación de la energía, y se estabiliza al avanzar.",
+  "E_growth": "<b>Energía de crecimiento.</b> Se calcula a partir de cómo cambia el número de " +
+    "walkers en cada paso: E_trial − ln(N<sub>nuevo</sub>/N<sub>anterior</sub>)/dτ. Media acumulada " +
+    "desde el primer bloque de cálculo. Debe coincidir con E_calculo si la simulación es estable.",
+};
+
+const leyendaTooltip = document.createElement("div");
+leyendaTooltip.className = "leyenda-tooltip";
+leyendaTooltip.hidden = true;
+document.body.appendChild(leyendaTooltip);
+
+// Plotly redibuja la leyenda (al redimensionar, al ocultar una serie...),
+// asi que se escucha en el contenedor de la grafica y se mira si el raton
+// esta sobre una entrada de la leyenda, en vez de engancharse a sus nodos
+function explicarLeyenda(div, explicaciones) {
+  div.addEventListener("mousemove", (e) => {
+    const entrada = e.target.closest && e.target.closest(".legend .traces");
+    const texto = entrada && entrada.querySelector(".legendtext");
+    const html = texto && explicaciones[texto.textContent];
+    if (!html) {
+      leyendaTooltip.hidden = true;
+      return;
+    }
+    leyendaTooltip.innerHTML = html;
+    leyendaTooltip.hidden = false;
+    // al lado del raton, sin salirse de la ventana
+    const margen = 14;
+    const ancho = leyendaTooltip.offsetWidth;
+    const alto = leyendaTooltip.offsetHeight;
+    let x = e.clientX + margen;
+    let y = e.clientY + margen;
+    if (x + ancho > window.innerWidth - 8) x = e.clientX - ancho - margen;
+    if (y + alto > window.innerHeight - 8) y = e.clientY - alto - margen;
+    leyendaTooltip.style.left = Math.max(8, x) + "px";
+    leyendaTooltip.style.top = Math.max(8, y) + "px";
+  });
+  div.addEventListener("mouseleave", () => { leyendaTooltip.hidden = true; });
+}
+
 function renderStatsCharts(bloques) {
-  const equilibrio = bloques.filter((b) => b.fase === "equilibrio");
+  // solo la fase de calculo en las dos graficas: con pocos bloques de
+  // equilibrio (normalmente 1) su serie es un punto suelto que no se
+  // dibuja como linea
   const calculo = bloques.filter((b) => b.fase === "calculo");
-
-  const xEq = equilibrio.map((b, i) => i);
-  const xCa = calculo.map((b, i) => equilibrio.length + i);
-
+  const xBloque = calculo.map((b, i) => i + 1);
+  const divEnergia = document.getElementById("plot-growth");
   Plotly.newPlot(
-    document.getElementById("plot-growth"),
+    divEnergia,
     [
-      { type: "scatter", mode: "lines", name: "equilibrio", x: xEq, y: equilibrio.map((b) => b.e_growth), line: { color: "#8f6cff" } },
-      { type: "scatter", mode: "lines", name: "cálculo", x: xCa, y: calculo.map((b) => b.e_growth), line: { color: "#6c8fff" } },
-      { type: "scatter", mode: "lines", name: "E_bloque (cálculo)", x: xCa, y: calculo.map((b) => b.e_bloque), line: { color: "#4a5064", width: 1 }, opacity: 0.6 },
+      { type: "scatter", mode: "lines", name: "E_bloque", x: xBloque, y: calculo.map((b) => b.e_bloque), line: { color: "#8891a5", width: 1 }, opacity: 0.7 },
+      { type: "scatter", mode: "lines", name: "E_calculo", x: xBloque, y: calculo.map((b) => b.e_calculo), line: { color: "#6c8fff", width: 2.5 } },
+      { type: "scatter", mode: "lines", name: "E_growth", x: xBloque, y: calculo.map((b) => b.e_growth), line: { color: "#4fd58d", width: 2.5 } },
     ],
     plotlyDarkLayout({
-      title: "Crecimiento de la energía por bloque (E_growth)",
-      xaxis: { title: "bloque (equilibrio → cálculo)", color: "#8891a5" },
+      title: "Energía por bloque de cálculo",
+      xaxis: { title: "bloque de cálculo", color: "#8891a5" },
       yaxis: { title: "meV", color: "#8891a5" },
       legend: { orientation: "h" },
     }),
     { responsive: true }
   );
+  if (!divEnergia.dataset.leyendaExplicada) {
+    explicarLeyenda(divEnergia, EXPLICACION_LEYENDA);
+    divEnergia.dataset.leyendaExplicada = "1";
+  }
 
   Plotly.newPlot(
     document.getElementById("plot-poblacion"),
     [
-      { type: "scatter", mode: "lines", name: "equilibrio", x: xEq, y: equilibrio.map((b) => b.poblacion), line: { color: "#8f6cff" } },
-      { type: "scatter", mode: "lines", name: "cálculo", x: xCa, y: calculo.map((b) => b.poblacion), line: { color: "#4fd58d" } },
+      { type: "scatter", mode: "lines", name: "cálculo", x: xBloque, y: calculo.map((b) => b.poblacion), line: { color: "#4fd58d" } },
     ],
     plotlyDarkLayout({
       // <Poblacion> del binario: media acumulada desde el inicio de la fase
-      title: "Población media acumulada por bloque",
-      xaxis: { title: "bloque (equilibrio → cálculo)", color: "#8891a5" },
+      title: "Población media acumulada por bloque de cálculo",
+      xaxis: { title: "bloque de cálculo", color: "#8891a5" },
       yaxis: { title: "walkers (media acumulada)", color: "#8891a5" },
-      legend: { orientation: "h" },
+      showlegend: false,
     }),
     { responsive: true }
   );
@@ -427,6 +478,13 @@ async function loadNumericos(runId) {
 
 const SIN_HISTOGRAMAS = "No hay histogramas para esta ejecución (puede que siga en curso o que no haya terminado).";
 
+// el CSS reparte las graficas segun cuantas haya (data-n): sin un tipo de
+// helio quedan dos, una a la izquierda y otra a la derecha
+function marcarNumeroDeGraficas(container, n) {
+  container.dataset.n = n;
+  container.style.setProperty("--n", n);
+}
+
 function renderRadial(radial) {
   const container = document.getElementById("plots-radial");
   container.innerHTML = "";
@@ -434,6 +492,7 @@ function renderRadial(radial) {
     container.textContent = SIN_HISTOGRAMAS;
     return;
   }
+  marcarNumeroDeGraficas(container, Object.keys(radial).length);
   for (const key of Object.keys(radial)) {
     const h = radial[key];
     const div = document.createElement("div");
@@ -447,7 +506,6 @@ function renderRadial(radial) {
       [{ type: "scatter", mode: "lines", x: h.x, y: h.y, line: { color: "#5b8cff" } }],
       plotlyDarkLayout({
         title: h.label,
-        margin: { l: 60, r: 10, t: 30, b: 45 },
         xaxis: { title: { text: "r, distancia entre las dos partículas (Å)" }, color: "#8891a5" },
         yaxis: { title: { text: "pares por intervalo de 0,01 Å" }, color: "#8891a5" },
       }),
@@ -463,6 +521,7 @@ function renderAngular(angular) {
     container.textContent = SIN_HISTOGRAMAS;
     return;
   }
+  marcarNumeroDeGraficas(container, Object.keys(angular).length);
   for (const key of Object.keys(angular)) {
     const h = angular[key];
     const div = document.createElement("div");
@@ -490,7 +549,6 @@ function renderAngular(angular) {
       ],
       plotlyDarkLayout({
         title: h.label,
-        margin: { l: 60, r: 10, t: 30, b: 45 },
         xaxis: { title: { text: "z, eje molecular (Å)" }, color: "#8891a5" },
         yaxis: { title: { text: ejeY }, color: "#8891a5" },
       }),

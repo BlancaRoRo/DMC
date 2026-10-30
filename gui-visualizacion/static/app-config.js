@@ -18,6 +18,20 @@ let baseInmcvText = null;
 const inputImportar = document.getElementById("input-importar-inmcv");
 const importMsgEl = document.getElementById("import-msg");
 
+// configuracion inicial (.HH) elegida en el navegador o recuperada del
+// historial: su texto se manda al ejecutar (parametro conf de /api/run) y
+// el servidor la copia a la carpeta de la ejecucion. null = no se manda.
+let confText = null;
+// nombre del fichero (.HH) cargado: el servidor comprueba que es el que
+// abre el simulador con el in.mcv de la ejecucion
+let confNombre = null;
+
+const inputImportarConf = document.getElementById("input-importar-conf");
+const btnQuitarConf = document.getElementById("btn-quitar-conf");
+const confMsgEl = document.getElementById("conf-msg");
+const selectHistorial = document.getElementById("select-historial");
+const historialMsgEl = document.getElementById("historial-msg");
+
 function logLine(text) {
   logEl.textContent += text + "\n";
   logEl.scrollTop = logEl.scrollHeight;
@@ -474,14 +488,12 @@ function renderConfigSchema(schema) {
   const sec2mc = document.getElementById("seccion-2-mc");
   const sec2pasos = document.getElementById("seccion-2-pasos");
   const sec3 = document.getElementById("seccion-3");
-  const sec4 = document.getElementById("seccion-4");
 
   for (const linea of Object.keys(inputsPorLinea)) delete inputsPorLinea[linea];
   sec1.innerHTML = "";
   sec2mc.innerHTML = "";
   sec2pasos.innerHTML = "";
   sec3.innerHTML = "";
-  sec4.innerHTML = "";
 
   for (const campo of schema.secciones[0].campos) sec1.appendChild(crearFilaCampo(campo));
   for (const campo of schema.secciones[1].campos) {
@@ -493,8 +505,8 @@ function renderConfigSchema(schema) {
   sec3.appendChild(crearTablaPares(tablas[0]));
   sec3.appendChild(crearTablaL(tablas[1]));
   sec3.appendChild(crearTablaL(tablas[2]));
-
-  for (const campo of schema.secciones[3].campos) sec4.appendChild(crearFilaCampo(campo));
+  // la seccion 4 (calculo paralelo, solo ncadapvm, fijo) no se muestra:
+  // el pipeline GPU no usa PVM
 }
 
 async function loadConfigSchema() {
@@ -557,6 +569,8 @@ btnRun.onclick = async () => {
       body: JSON.stringify({
         valores: recogerValores(),
         base_inmcv: baseInmcvText,
+        conf: confText,
+        conf_nombre: confNombre,
         nombre: inputNombreRun.value.trim(),
       }),
     });
@@ -567,6 +581,11 @@ btnRun.onclick = async () => {
     btnCompile.disabled = false;
     btnRun.disabled = false;
     return;
+  }
+  if (j.conf) {
+    logLine("Usando la configuración inicial " + j.conf);
+  } else {
+    logLine("Creando configuraciones");
   }
   logLine("run_id=" + j.run_id + " -- la simulación corre en segundo plano: puedes recargar o cerrar esta página");
   await seguirEjecucion(j.run_id, false);
@@ -603,7 +622,84 @@ inputImportar.onchange = async () => {
   if (!ok) inputImportar.value = "";
 };
 
+function fijarConf(texto, nombreFichero, origenLabel) {
+  confText = texto;
+  confNombre = texto === null ? null : nombreFichero;
+  btnQuitarConf.hidden = texto === null;
+  if (texto === null) {
+    confMsgEl.textContent = "sin configuración inicial: el simulador creará las configuraciones";
+    confMsgEl.className = "hint";
+  } else {
+    confMsgEl.textContent = "configuración inicial " + nombreFichero + " cargada desde " +
+      (origenLabel || "el equipo") + " -- se copiará a la carpeta de la ejecución";
+    confMsgEl.className = "hint ok-text";
+  }
+}
+
+inputImportarConf.onchange = async () => {
+  const file = inputImportarConf.files[0];
+  if (!file) return;
+  fijarConf(await file.text(), file.name);
+};
+
+btnQuitarConf.onclick = () => {
+  inputImportarConf.value = "";
+  fijarConf(null);
+};
+
+// ---- historial: valores de entrada + configuracion inicial guardados
+// en cada ejecucion (in.mcv y conf_inicial.HH de su carpeta) ----
+async function refreshHistorial() {
+  try {
+    const r = await fetch("/api/runs");
+    const j = await r.json();
+    selectHistorial.innerHTML = '<option value="">(cargar del historial)</option>';
+    for (const run of j.runs) {
+      const opt = document.createElement("option");
+      opt.value = run.run_id;
+      opt.textContent = run.nombre;
+      selectHistorial.appendChild(opt);
+    }
+  } catch (e) { /* sin servidor: el historial queda vacio */ }
+}
+
+async function cargarDeHistorial(runId, origenLabel) {
+  const r = await fetch(`/api/runs/${encodeURIComponent(runId)}/inmcv`);
+  const j = await r.json();
+  if (!r.ok) {
+    historialMsgEl.textContent = "no se pudo cargar " + origenLabel + ": " + j.error;
+    historialMsgEl.className = "hint err-text";
+    return false;
+  }
+  if (!(await importarInmcv(j.content, origenLabel))) return false;
+  inputImportar.value = "";
+
+  inputImportarConf.value = "";
+  const rc = await fetch(`/api/runs/${encodeURIComponent(runId)}/conf-inicial`);
+  const jc = await rc.json();
+  if (rc.ok) {
+    fijarConf(jc.content, jc.nombre, origenLabel);
+    historialMsgEl.textContent = "cargados los valores de entrada y la configuración inicial de " + origenLabel;
+  } else {
+    fijarConf(null);
+    historialMsgEl.textContent = "cargados los valores de entrada de " + origenLabel +
+      " (sin configuración inicial: " + jc.error + ")";
+  }
+  historialMsgEl.className = "hint ok-text";
+  return true;
+}
+
+// como el selector de Resultados: carga en cuanto se elige
+selectHistorial.onchange = async () => {
+  const runId = selectHistorial.value;
+  if (!runId) return;
+  const opt = selectHistorial.selectedOptions[0];
+  await cargarDeHistorial(runId, "la ejecución " + opt.textContent);
+};
+
 refreshBinaryStatus();
+refreshHistorial();
+fijarConf(null);
 
 // si hay una simulacion en marcha (p. ej. tras recargar la pagina), seguirla
 (async function reengancharEjecucionActiva() {
@@ -623,13 +719,6 @@ refreshBinaryStatus();
 (async function initConfig() {
   const params = new URLSearchParams(window.location.search);
   const recrearId = params.get("recrear");
-  if (recrearId) {
-    const r = await fetch(`/api/runs/${encodeURIComponent(recrearId)}/inmcv`);
-    const j = await r.json();
-    if (r.ok) {
-      await importarInmcv(j.content, "la ejecución " + recrearId);
-      return;
-    }
-  }
+  if (recrearId && (await cargarDeHistorial(recrearId, "la ejecución " + recrearId))) return;
   loadConfigSchema();
 })();

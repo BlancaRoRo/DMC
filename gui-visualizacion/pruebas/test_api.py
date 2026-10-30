@@ -26,6 +26,13 @@ REF_LINEAS = len(gui.DEFAULT_INMCV.read_text().splitlines())
 CONF_VALIDO = "2\n" + "".join(f"  {i}.0  {i}.5  {i}.9\n" for i in range(4))  # 2 walkers x 2 atomos
 
 
+def conf_he4(nhe4, nwalkers=2):
+    """conf.* como lo escribe el simulador para nhe4 He4 + la impureza H2:
+    por walker, nhe4+1 lineas x y z y una de orientacion con la norma."""
+    walker = "  0.1E+01  0.2E+01  0.3E+01\n" * (nhe4 + 1) + "  0.1E+00  0.5E+00 -0.6E+00  1.00000000\n"
+    return f"{nwalkers:10d}\n" + walker * nwalkers
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -35,7 +42,6 @@ class Base(unittest.TestCase):
         self.bin.mkdir()
         (self.bin / gui.BINARY_NAME).write_bytes(b"binario falso")
         (self.bin / "potencial.pot").write_text("datos")
-        (self.bin / gui.CONF_NOMBRE).write_text("conf del binario")
         self.lanzados, self.guardados = [], []
         ajustes = {"runs_dir": str(self.runs), "source_dir": str(self.tmp), "binary_dir": str(self.bin)}
         for p in (
@@ -208,23 +214,90 @@ class TestEjecutar(Base):
         (self.bin / gui.BINARY_NAME).unlink()
         self.assertError(self.post("/api/run", {"valores": {}}), 400, "compila primero")
 
-    def test_conf_se_copia_de_la_carpeta_del_binario(self):
-        (self.tmp / gui.CONF_NOMBRE).write_text("conf de compilacion")
-        self.assertEqual(self.post("/api/run", {"valores": {}}).status_code, 200)
+    def test_sin_conf_cargado_no_se_usa_el_de_la_carpeta_del_binario(self):
+        # aunque exista conf.20.00.HH junto al binario, sin conf cargado el
+        # simulador crea las configuraciones
+        r = self.post("/api/run", {"valores": {}})
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(r.get_json()["conf"])
         d, _ = self.inmcv_generado()
-        self.assertEqual((d / gui.CONF_NOMBRE).read_text(), "conf del binario")
+        self.assertEqual(list(d.glob("conf*")), [])
 
-    def test_conf_se_busca_en_compilacion_si_no_esta_junto_al_binario(self):
-        (self.bin / gui.CONF_NOMBRE).unlink()
-        (self.tmp / gui.CONF_NOMBRE).write_text("conf de compilacion")
-        self.assertEqual(self.post("/api/run", {"valores": {}}).status_code, 200)
+    def test_conf_cargado_que_corresponde_se_copia(self):
+        # con 1 He4 el simulador abre conf.01.00.HH; el fichero puede venir
+        # de cualquier carpeta, solo cuenta su nombre (y su contenido)
+        r = self.post("/api/run", {"valores": {"7": "1"}, "conf": conf_he4(1),
+                                   "conf_nombre": "/otra/carpeta/conf.01.00.HH"})
+        self.assertEqual(r.get_json()["conf"], "conf.01.00.HH")
         d, _ = self.inmcv_generado()
-        self.assertEqual((d / gui.CONF_NOMBRE).read_text(), "conf de compilacion")
+        self.assertEqual((d / "conf.01.00.HH").read_text(), conf_he4(1))
 
-    def test_conf_inexistente(self):
-        (self.bin / gui.CONF_NOMBRE).unlink()
-        self.assertError(self.post("/api/run", {"valores": {}}), 400, gui.CONF_NOMBRE)
+    def test_conf_cargado_con_nombre_que_no_corresponde_se_rechaza(self):
+        # un .HH de 1 He4 para una ejecucion de 2 He4: no se renombra
+        r = self.post("/api/run", {"valores": {"7": "2"}, "conf": conf_he4(1),
+                                   "conf_nombre": "conf.01.00.HH"})
+        self.assertError(r, 400, "conf.02.00.HH")
+        self.assertIn("no corresponde", r.get_json()["error"])
         self.assertEqual(list(self.runs.iterdir()), [])
+
+    def test_conf_cargado_con_contenido_que_no_corresponde_se_rechaza(self):
+        # un .HH de 1 He4 renombrado a conf.02.00.HH: el simulador leeria
+        # las coordenadas descolocadas sin avisar
+        r = self.post("/api/run", {"valores": {"7": "2"}, "conf": conf_he4(1),
+                                   "conf_nombre": "conf.02.00.HH"})
+        self.assertError(r, 400, "contenido")
+        self.assertIn("4 líneas por walker", r.get_json()["error"])
+        self.assertEqual(list(self.runs.iterdir()), [])
+
+    def test_validar_contenido_conf(self):
+        inmcv2 = gui.build_inmcv({"7": "2"})
+        self.assertIsNone(gui.validar_contenido_conf(conf_he4(2), inmcv2))
+        # orientacion sin la norma (3 numeros) tambien vale
+        self.assertIsNone(gui.validar_contenido_conf(conf_he4(2).replace("  1.00000000", ""), inmcv2))
+        self.assertIn("vacío", gui.validar_contenido_conf("", inmcv2))
+        self.assertIn("número de walkers", gui.validar_contenido_conf("hola\n", inmcv2))
+        self.assertIn("líneas de coordenadas", gui.validar_contenido_conf(conf_he4(3), inmcv2))
+        # mismo numero total de lineas pero con la orientacion fuera de sitio
+        descolocado = conf_he4(2).splitlines()
+        descolocado[1], descolocado[4] = descolocado[4], descolocado[1]
+        self.assertIn("línea 2", gui.validar_contenido_conf("\n".join(descolocado), inmcv2))
+        self.assertIn("no son números", gui.validar_contenido_conf(conf_he4(2).replace("0.2E+01", "abc", 1), inmcv2))
+
+    def test_conf_cargado_sin_nombre(self):
+        self.assertError(self.post("/api/run", {"valores": {}, "conf": "x"}), 400, "'conf_nombre'")
+
+    def test_potencial_y_opcion_salen_de_la_plantilla_aunque_se_importe_otro(self):
+        # un in.dmc de la version de CPU: ruta al potencial de su arbol y opcion=4
+        ref = gui.DEFAULT_INMCV.read_text().splitlines()
+        base = list(ref)
+        base[23] = "../../../../param_potencial/heh2m.pot"
+        base[30] = "  4                   !opcion"
+        base = "\n".join(base) + "\n"
+        schema = self.post("/api/parse-inmcv", {"content": base}).get_json()
+        self.assertEqual(schema["base_inmcv"].splitlines()[23], ref[23])
+        self.assertEqual(self.post("/api/run", {"valores": {}, "base_inmcv": base}).status_code, 200)
+        _, lineas = self.inmcv_generado()
+        self.assertEqual(lineas[23], ref[23])
+        self.assertEqual(lineas[30], ref[30])
+
+    def test_conf_subido_se_guarda_como_inicial(self):
+        r = self.post("/api/run", {"valores": {"7": "2"}, "conf": conf_he4(2),
+                                   "conf_nombre": "conf.02.00.HH"})
+        self.assertEqual(r.status_code, 200, r.get_data(as_text=True))
+        d, _ = self.inmcv_generado()
+        self.assertEqual((d / "conf.02.00.HH").read_text(), conf_he4(2))
+        self.assertEqual((d / gui.CONF_INICIAL).read_text(), conf_he4(2))
+        # desde el historial se recupera con su nombre original
+        j = self.c.get(f"/api/runs/{d.name}/conf-inicial").get_json()
+        self.assertEqual(j["content"], conf_he4(2))
+        self.assertEqual(j["nombre"], "conf.02.00.HH")
+
+    def test_conf_subido_no_texto(self):
+        self.assertError(self.post("/api/run", {"valores": {}, "conf": 3}), 400, "'conf'")
+
+    def test_conf_inicial_inexistente(self):
+        d = self.crear_run("run_20260101_000000")
+        self.assertError(self.c.get(f"/api/runs/{d.name}/conf-inicial"), 404, "configuración inicial")
 
     def test_compilar_sin_script(self):
         with mock.patch.object(gui, "get_source_dir", lambda: Path("/no/existe/fuentes")):
@@ -355,6 +428,19 @@ class TestResultados(Base):
         self.assertEqual((j["estado"], j["returncode"]), ("terminada", 0))
         self.assertIn("dhe4he4", j["omitidos"])
         self.assertEqual(j["radial"], {})
+
+    def test_histogramas_omiten_el_tipo_de_helio_que_falta(self):
+        inmcv = gui.DEFAULT_INMCV.read_text().splitlines()
+        inmcv[6] = "3   ! nhe4"
+        inmcv[7] = "0   ! nhe3"
+        d = self.crear_run(self.ID, returncode=0, meta={"pid": 1, "inicio": 0}, inmcv="\n".join(inmcv) + "\n")
+        for prefijo in ("dhe4he4", "dhe3he3", "dhe4he3", "dihe4", "dihe3", "dihe"):
+            (d / f"{prefijo}.03.00.HH").write_text("0.0 1.0\n0.1 2.0\n")
+        for prefijo in ("d2dhe", "d2dhe4", "d2dhe3"):
+            (d / f"{prefijo}.03.00.HH").write_text("0.0 0.0 1.0\n")
+        j = self.get("histograms").get_json()
+        self.assertEqual(sorted(j["radial"]), ["dhe4he4", "dihe4"])
+        self.assertEqual(sorted(j["angular"]), ["d2dhe4"])
 
     def test_estadisticas(self):
         self.crear_run(self.ID)

@@ -4,10 +4,11 @@ misma rama main del repositorio) y visualizar histogramas + la configuracion
 final de walkers. Fase 1: usa solo datos que el simulador ya produce (histogramas
 finales, conf.*.HH final) -- no toca el codigo Fortran/CUDA.
 
-Cada ejecucion corre en su propio directorio aislado bajo runs/, con su
-propio conf.20.00.HH "fresco" copiado de la carpeta del binario (o, si no
-esta ahi, de la de compilacion; ver buscar_conf_fresco) -- nunca se lanza
-nada dentro de dmc-hibrido/, que solo se usa para compilar.
+Cada ejecucion corre en su propio directorio aislado bajo runs/, con la
+configuracion inicial (.HH) que se haya cargado en la interfaz, copiada
+con el nombre que abre el simulador; si no se carga ninguna, el simulador
+las genera -- nunca se lanza nada dentro de dmc-hibrido/, que solo se usa
+para compilar.
 """
 import glob
 import json
@@ -31,7 +32,10 @@ REPO_ROOT = APP_DIR.parent
 # la interfaz vive en el repositorio DMC junto al simulador:
 # DMC/gui-visualizacion/ y DMC/dmc-hibrido/
 HIBRIDO_DIR = REPO_ROOT / "dmc-hibrido"
-CONF_NOMBRE = "conf.20.00.HH"
+# copia de la configuracion inicial que se guarda en cada ejecucion para
+# poder recargarla desde el historial (no empieza por "conf." para que no
+# se confunda con la configuracion final, ver run_final_config)
+CONF_INICIAL = "conf_inicial.HH"
 # plantilla del in.mcv: el formulario se construye a partir de ella y cada
 # ejecucion parte de ella (o de un in.mcv importado con su misma
 # estructura), sustituyendo solo las lineas editadas
@@ -71,6 +75,26 @@ ANGULAR_HISTS = [
     ("d2ydhe4", "Angular-Y impureza-He4"),
     ("d2ydhe3", "Angular-Y impureza-He3"),
 ]
+# minimo de (He4, He3) que necesita cada histograma para mostrarse: el
+# simulador escribe todos los ficheros aunque falte un tipo de helio (y
+# entonces salen a cero), asi que la interfaz no los muestra. Los pares del
+# mismo tipo necesitan al menos dos atomos. Los de impureza-He (helio
+# total) solo se muestran con los dos tipos: con uno solo son iguales al
+# de ese tipo.
+HIST_MINIMOS = {
+    "dihe": (1, 1),
+    "d2dhe": (1, 1),
+    "d2ydhe": (1, 1),
+    "dhe4he4": (2, 0),
+    "dhe3he3": (0, 2),
+    "dhe4he3": (1, 1),
+    "dihe4": (1, 0),
+    "dihe3": (0, 1),
+    "d2dhe4": (1, 0),
+    "d2dhe3": (0, 1),
+    "d2ydhe4": (1, 0),
+    "d2ydhe3": (0, 1),
+}
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 
@@ -218,16 +242,78 @@ def get_binary_dir():
     return Path(load_settings()["binary_dir"])
 
 
-def buscar_conf_fresco():
-    """Configuracion inicial que se copia a cada ejecucion. Como los .pot,
-    es un dato que se lee al EJECUTAR, asi que se busca primero junto al
-    binario y, si no esta ahi, junto a los ficheros a compilar. Las dos
-    carpetas se eligen en Ajustes, asi que no depende de donde este la
-    interfaz. Devuelve None si no esta en ninguna."""
-    for carpeta in (get_binary_dir(), get_source_dir()):
-        candidato = carpeta / CONF_NOMBRE
-        if candidato.is_file():
-            return candidato
+def _numeros_de_atomos(inmcv_texto):
+    """(nhe4, nhe3, namol) de las lineas 7-9 del in.mcv, o None si no son enteros."""
+    lineas = inmcv_texto.splitlines()
+    try:
+        return tuple(int(_parse_valor_comentario(lineas[i])[0]) for i in (6, 7, 8))
+    except (ValueError, IndexError):
+        return None
+
+
+def nombre_conf(inmcv_texto):
+    """Nombre del conf.* que el simulador abre para un in.mcv dado. Copia
+    lo que hace mentradatos.f90: "conf." + numero de He4 y de He3 con dos
+    cifras + los simbolos de los atomos de la impureza seguidos (o "Pura"
+    si no hay impureza) -- p.ej. conf.20.00.HH o conf.01.00.HH. Devuelve
+    None si las lineas 7-9 no son numeros enteros."""
+    numeros = _numeros_de_atomos(inmcv_texto)
+    if numeros is None:
+        return None
+    nhe4, nhe3, namol = numeros
+    lineas = inmcv_texto.splitlines()
+    if namol > 0:
+        molecula = "".join(_parse_valor_comentario(lineas[9 + 2 * i])[0] for i in range(namol))
+    else:
+        molecula = "Pura"
+    return f"conf.{nhe4:02d}.{nhe3:02d}.{molecula}"
+
+
+def validar_contenido_conf(conf_texto, inmcv_texto):
+    """Comprueba que un conf.* tiene la forma que el simulador espera para
+    este in.mcv (ver leeconf/escrconf en mconfiguraciones.f90): una primera
+    linea con el numero de walkers y, por cada walker, una linea x y z por
+    atomo (He4 + He3 + el centro de masas de la impureza, si la hay) mas,
+    si la impureza es una molecula, una linea con su orientacion (3
+    numeros, o 4 si lleva la norma). El simulador lo lee por posicion y no
+    comprueba nada: un fichero de otro numero de atomos se leeria
+    descolocado sin ningun error. Devuelve None si es valido, o un mensaje
+    explicando que no cuadra."""
+    nhe4, nhe3, namol = _numeros_de_atomos(inmcv_texto)
+    natom = nhe4 + nhe3 + (1 if namol > 0 else 0)
+    con_orientacion = namol > 1
+    por_walker = natom + (1 if con_orientacion else 0)
+    descripcion = (f"{por_walker} líneas por walker ({natom} átomos"
+                   + (" + la orientación de la molécula)" if con_orientacion else ")"))
+
+    lineas = conf_texto.rstrip().splitlines()
+    if not lineas:
+        return ("está vacío -- para que el simulador cree las configuraciones, "
+                "no cargues ningún .HH")
+    try:
+        nwalkers = int(lineas[0])
+    except ValueError:
+        return f"la primera línea debería ser el número de walkers y es '{lineas[0].strip()[:40]}'"
+    if nwalkers < 1:
+        return f"dice tener {nwalkers} walkers"
+
+    datos = lineas[1:]
+    if len(datos) != nwalkers * por_walker:
+        return (f"tiene {len(datos)} líneas de coordenadas para {nwalkers} walkers, pero con estos "
+                f"valores de entrada hacen falta {descripcion}, es decir {nwalkers * por_walker}")
+
+    for i, linea in enumerate(datos):
+        campos = linea.replace("D", "E").replace("d", "e").split()
+        es_orientacion = con_orientacion and i % por_walker == por_walker - 1
+        esperados = (3, 4) if es_orientacion else (3,)
+        try:
+            [float(c) for c in campos]
+        except ValueError:
+            return f"la línea {i + 2} no son números: '{linea.strip()[:60]}'"
+        if len(campos) not in esperados:
+            que = "la orientación de la molécula" if es_orientacion else "las coordenadas x y z de un átomo"
+            return (f"la línea {i + 2} tiene {len(campos)} números y debería ser {que} -- "
+                    f"el fichero no tiene {descripcion}")
     return None
 
 
@@ -455,13 +541,32 @@ def build_config_schema(lineas=None):
     }
 
 
+# lineas que se toman SIEMPRE de la plantilla, aunque se importe otro
+# in.mcv: el fichero del potencial (24), que se copia a la carpeta de la
+# ejecucion y se abre por su nombre, y la opcion (31), que tiene que ser
+# la del pipeline GPU. Un in.mcv de la version de CPU trae ahi una ruta
+# relativa a su arbol de carpetas y opcion=4, y la ejecucion fallaria.
+LINEAS_DE_PLANTILLA = (24, 31)
+
+
+def fijar_lineas_de_plantilla(texto):
+    lineas = texto.splitlines()
+    referencia = DEFAULT_INMCV.read_text().splitlines()
+    for n in LINEAS_DE_PLANTILLA:
+        lineas[n - 1] = referencia[n - 1]
+    return "\n".join(lineas) + "\n"
+
+
 def build_inmcv(valores, base_text=None):
     """Parte del in.mcv base (el de referencia, o uno importado si se
     pasa 'base_text') y sustituye SOLO el valor de las lineas editables
     recibidas en 'valores' (dict linea(str) -> texto, o linea(str) ->
     [v1, v2] para las filas de 2 valores), preservando el resto del
     fichero byte a byte -- el lector Fortran es list-directed
-    (READ(5,*)), no depende de columnas exactas."""
+    (READ(5,*)), no depende de columnas exactas. Las LINEAS_DE_PLANTILLA
+    se toman de la plantilla aunque la base sea otra."""
+    if base_text is not None:
+        base_text = fijar_lineas_de_plantilla(base_text)
     lineas = (base_text if base_text is not None else DEFAULT_INMCV.read_text()).splitlines()
     campos_por_linea = {c["linea"]: c for c in TODOS_LOS_CAMPOS}
 
@@ -667,6 +772,7 @@ def parse_inmcv():
     if error:
         return jsonify({"error": error}), 400
 
+    contenido = fijar_lineas_de_plantilla(contenido)
     schema = build_config_schema(contenido.splitlines())
     schema["base_inmcv"] = contenido
     return jsonify(schema)
@@ -786,6 +892,17 @@ def run_simulation():
         if error:
             return jsonify({"error": "in.mcv base importado invalido: " + error}), 400
 
+    # configuracion inicial cargada desde el navegador (puede venir de
+    # cualquier carpeta del equipo). Es la UNICA que se usa: sin ella no
+    # se copia ningun conf.* y el simulador genera todas las
+    # configuraciones aleatoriamente (mconfiguraciones.f90)
+    conf_subido = body.get("conf")
+    if conf_subido is not None and not isinstance(conf_subido, str):
+        return jsonify({"error": "'conf' debe ser texto"}), 400
+    conf_subido_nombre = body.get("conf_nombre")
+    if conf_subido is not None and not isinstance(conf_subido_nombre, str):
+        return jsonify({"error": "'conf_nombre' debe ser el nombre del fichero cargado"}), 400
+
     inmcv_content = build_inmcv(limpios, base_text=base_inmcv or None)
     # red de seguridad: el in.mcv generado debe tener EXACTAMENTE la
     # estructura del de referencia (mismo numero de lineas y lmax)
@@ -802,10 +919,23 @@ def run_simulation():
     binpath = binary_dir / BINARY_NAME
     if not binpath.exists():
         return jsonify({"error": "compila primero -- no existe " + BINARY_NAME + " en " + str(binary_dir)}), 400
-    conf_fresco = buscar_conf_fresco()
-    if conf_fresco is None:
-        return jsonify({"error": f"no se encuentra {CONF_NOMBRE} ni en la carpeta del binario "
-                                 f"({binary_dir}) ni en la de compilacion ({get_source_dir()})"}), 400
+    conf_nombre = nombre_conf(inmcv_content)
+    if conf_nombre is None:
+        return jsonify({"error": "el numero de He4, He3 o de atomos de la impureza no es un entero"}), 400
+    # el nombre del conf.* dice para cuantos He4/He3 y que impureza es; si
+    # no es el que abre el simulador con este in.mcv, sus walkers tienen
+    # otro numero de atomos y el simulador los leeria descolocados sin
+    # avisar (lee por posicion). No se renombra: se rechaza.
+    if conf_subido is not None and Path(conf_subido_nombre).name != conf_nombre:
+        return jsonify({"error": f"el .HH cargado ({Path(conf_subido_nombre).name}) no corresponde al "
+                                 f"fichero de valores de entrada: con este in.mcv el simulador "
+                                 f"necesita {conf_nombre}"}), 400
+    # el nombre no basta: el contenido tambien tiene que ser de ese numero de atomos
+    if conf_subido is not None:
+        error = validar_contenido_conf(conf_subido, inmcv_content)
+        if error:
+            return jsonify({"error": f"el contenido del .HH cargado ({conf_nombre}) no corresponde "
+                                     f"al fichero de valores de entrada: {error}"}), 400
 
     nombre = str(body.get("nombre", "")).strip().replace("\n", " ").replace("\r", "")[:80]
     if not nombre:
@@ -816,7 +946,12 @@ def run_simulation():
     run_dir.mkdir(parents=True, exist_ok=False)
 
     shutil.copy(binpath, run_dir / BINARY_NAME)
-    shutil.copy(conf_fresco, run_dir / CONF_NOMBRE)
+    # se duplica en la carpeta de la ejecucion, donde lo busca el
+    # simulador, y tambien como CONF_INICIAL: el simulador sobrescribe el
+    # conf.* con la configuracion final al terminar
+    if conf_subido is not None:
+        (run_dir / conf_nombre).write_text(conf_subido)
+        (run_dir / CONF_INICIAL).write_text(conf_subido)
     (run_dir / "in.mcv").write_text(inmcv_content)
     (run_dir / "nombre.txt").write_text(nombre)
     # ficheros de datos auxiliares (potenciales, etc.) que el binario lee
@@ -827,7 +962,10 @@ def run_simulation():
         shutil.copy(potfile, run_dir / potfile.name)
 
     lanzar_run_en_segundo_plano(run_dir)
-    return jsonify({"run_id": run_id, "nombre": nombre})
+    # conf: nombre con el que se copio la configuracion cargada, o None si
+    # el simulador va a crear las configuraciones
+    return jsonify({"run_id": run_id, "nombre": nombre,
+                    "conf": conf_nombre if conf_subido is not None else None})
 
 
 @app.route("/api/run-activa")
@@ -996,9 +1134,16 @@ def run_histograms(run_id):
     if run_dir is None:
         return jsonify({"error": "run no encontrado"}), 404
 
+    inmcv_path = run_dir / "in.mcv"
+    numeros = _numeros_de_atomos(inmcv_path.read_text()) if inmcv_path.exists() else None
+
     radial, angular, omitidos = {}, {}, []
     for tabla, destino, lector in ((RADIAL_HISTS, radial, _read_radial), (ANGULAR_HISTS, angular, _read_angular)):
         for prefix, label in tabla:
+            if numeros is not None:
+                min_he4, min_he3 = HIST_MINIMOS.get(prefix, (0, 0))
+                if numeros[0] < min_he4 or numeros[1] < min_he3:
+                    continue  # falta ese tipo de helio: el histograma esta vacio
             matches = glob.glob(str(run_dir / f"{prefix}.*"))
             if not matches:
                 continue
@@ -1193,6 +1338,22 @@ def run_inmcv(run_id):
     if not inmcv_path.exists():
         return jsonify({"error": "esta ejecución no tiene in.mcv guardado"}), 404
     return jsonify({"content": inmcv_path.read_text()})
+
+
+@app.route("/api/runs/<run_id>/conf-inicial")
+def run_conf_inicial(run_id):
+    run_dir = _run_dir_or_404(run_id)
+    if run_dir is None:
+        return jsonify({"error": "run no encontrado"}), 404
+    conf_path = run_dir / CONF_INICIAL
+    if not conf_path.exists():
+        return jsonify({"error": "esta ejecución no guardó configuración inicial "
+                                 "(la generó el simulador o es anterior a esta función)"}), 404
+    # nombre: el conf.* con el que se uso (sale de su in.mcv), para que al
+    # recargarlo desde el historial pase la comprobacion de /api/run
+    inmcv_path = run_dir / "in.mcv"
+    nombre = nombre_conf(inmcv_path.read_text()) if inmcv_path.exists() else None
+    return jsonify({"content": conf_path.read_text(), "nombre": nombre or CONF_INICIAL})
 
 
 @app.route("/api/runs/<run_id>/stats")

@@ -118,8 +118,8 @@ def crea(id_, conf=None, log=None):
     return d
 crea("run_20260101_000001")                                          # vacia (sin conf ni log)
 crea("run_20260101_000002", conf="0\n")                              # conf corrupta: 0 walkers
-conf_ref = m.buscar_conf_fresco()
-crea("run_20260101_000003", conf=conf_ref.read_text() if conf_ref else "0\n")  # parada temprana: conf INICIAL copiada
+conf_ref = m.HIBRIDO_DIR / "conf.20.00.HH"
+crea("run_20260101_000003", conf=conf_ref.read_text() if conf_ref.is_file() else "0\n")  # parada temprana: conf INICIAL copiada
 crea("run_20260101_000004", log="basura sin formato\n" * 50)         # log corrupto
 crea("run_20260101_000005", conf="abc\n")                            # conf no numerica
 for rid in ["run_20260101_000001", "run_20260101_000002", "run_20260101_000003", "run_20260101_000004", "run_20260101_000005"]:

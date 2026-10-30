@@ -23,7 +23,9 @@ La interfaz permite, desde el navegador:
   puede detener en cualquier momento.
 - **Ver los resultados** de cada ejecución:
   - nube de puntos 3D con la configuración final de los *walkers*;
-  - histogramas radiales y angulares;
+  - histogramas radiales y angulares (sin los del tipo de helio que no
+    haya en la simulación, que el simulador escribe a cero, ni los de
+    impureza-He total si solo hay un tipo, porque repetirían el de ese tipo);
   - estadísticas por bloque (gráficas y tabla) en la pestaña *Numéricos*.
 - **Reabrir ejecuciones anteriores**, cada una con sus propios resultados.
 
@@ -104,7 +106,6 @@ cd DMC/gui-visualizacion
 |---|---|---|
 | `Makefile` y el código fuente del simulador | Botón *Compilar* (ejecuta `make`) | No se puede compilar |
 | `qmccluster_pipeline` (binario que genera la compilación) y los potenciales `*.pot` | Botón *Ejecutar* | No se puede ejecutar |
-| `conf.20.00.HH` | Configuración inicial de los *walkers*, que se copia a cada ejecución | No se puede ejecutar |
 
 Las rutas se pueden cambiar en la ventana **Ajustes** (icono ⚙), que las
 guarda en `settings.json`. Si ese fichero no existe (como ocurre nada más
@@ -116,9 +117,10 @@ defecto basta con borrar `settings.json`.
   y el código fuente. También se aceptan las carpetas de desarrollo
   anteriores, que se compilan con `compilar_pipeline.sh`.
 - **Carpeta donde está el binario compilado:** la que contiene
-  `qmccluster_pipeline`, los `*.pot` y `conf.20.00.HH`. Normalmente es la
-  misma que la anterior, porque la compilación deja ahí el binario. Si
-  `conf.20.00.HH` no está en esta carpeta, se busca en la de compilación.
+  `qmccluster_pipeline` y los `*.pot`. Normalmente es la misma que la
+  anterior, porque la compilación deja ahí el binario. Los `conf.*` de
+  esta carpeta no se usan: la configuración inicial se carga en la
+  interfaz (ver más abajo).
 - **Carpeta donde se guardan las ejecuciones:** por defecto, `runs/`
   dentro de este repositorio. Se crea si no existe.
 
@@ -132,11 +134,24 @@ comentarios y campos fijos) se copia tal cual, porque el simulador lee el
 fichero por posición de línea.
 
 Para partir de otra configuración, la página de configuración tiene el
-panel **Importar in.mcv**: se elige un `in.mcv` del equipo, el formulario
-se rellena con sus valores y ese fichero pasa a ser la base de la
-ejecución. Solo se aceptan ficheros con la misma estructura que la
-plantilla (mismo número de líneas y mismos `lmax` de la función de
-onda), para que cada campo se lea de la línea correcta.
+panel **Ficheros de entrada**:
+
+- **Valores de entrada:** se elige un fichero del equipo con cualquier
+  nombre (`in.mcv`, `in.dmc`...). El formulario se rellena con sus valores
+  y ese fichero pasa a ser la base de la ejecución. Solo se aceptan
+  ficheros con la misma estructura que la plantilla (mismo número de
+  líneas y mismos `lmax` de la función de onda), para que cada campo se
+  lea de la línea correcta. El fichero del potencial y la opción de
+  programa se toman siempre de la plantilla.
+- **Configuración inicial (.HH):** se elige un fichero de configuraciones
+  de cualquier carpeta. Se duplica en la carpeta de la ejecución, donde lo
+  busca el simulador. Su nombre y su contenido tienen que corresponder a
+  los valores de entrada; si no, la interfaz da error y no ejecuta. Si no se elige
+  ninguno, el simulador crea las configuraciones aleatoriamente (el
+  registro muestra "Creando configuraciones").
+- **Historial** (desplegable arriba a la derecha): cada ejecución guarda su `in.mcv` y una
+  copia de su configuración inicial (`conf_inicial.HH`). Al elegir una
+  ejecución anterior se recuperan las dos, sin volver a elegir ficheros.
 
 ### Instalación
 
@@ -166,10 +181,17 @@ automática y depurador: `DMC_GUI_DEBUG=1 ./venv/bin/python3 app.py`.
 4. **Resultados:** al terminar, la página de resultados se abre sola.
    Desde su selector se pueden abrir también las ejecuciones anteriores.
 
-**Limitación conocida:** se copia siempre `conf.20.00.HH`, preparado para
-20 átomos de He4, 0 de He3 y la impureza H₂. Cambiar el número de átomos
-de helio o la molécula en el formulario cambia el nombre del fichero de
-configuración que espera el simulador, y la ejecución fallará.
+**Configuración inicial:** el simulador abre el fichero
+`conf.NN.MM.XX`, donde `NN` es el número de He4, `MM` el de He3 y `XX` los
+átomos de la impureza (`conf.20.00.HH` para la plantilla, `conf.01.00.HH`
+con un solo He4). La interfaz calcula ese nombre a partir del `in.mcv` y
+comprueba que la configuración cargada se llama así y que su contenido es
+de ese número de átomos: primera línea con el número de walkers y, por
+cada walker, una línea `x y z` por átomo (He4, He3 y el centro de masas
+de la impureza) más una con la orientación de la molécula. Un fichero de
+otro número de átomos se leería descolocado sin ningún error, porque el
+simulador lo lee por posición. Si no se carga ninguna, el simulador
+genera todas las configuraciones iniciales aleatoriamente.
 
 ### Pruebas
 

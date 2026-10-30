@@ -33,25 +33,52 @@
   </aside>
 
   <main class="wide">
-    <div class="page-head">
-      <h1>Configuración de la simulación</h1>
-      <p class="hint">
-        Editable = parámetro real de la simulación. Fijo = requerido por cómo está
-        construido el pipeline GPU/CUDA de este TFG (cambiarlo rompería la
-        compilación o los límites de los kernels).
-      </p>
+    <div class="page-head results-head">
+      <div>
+        <h1>Configuración de la simulación</h1>
+        <p class="hint">
+          Editable = parámetro real de la simulación. Fijo = requerido por cómo está
+          construido el pipeline GPU/CUDA de este TFG (cambiarlo rompería la
+          compilación o los límites de los kernels).
+        </p>
+      </div>
+      <div class="results-head-controls">
+        <select id="select-historial" class="run-selector-big"
+                title="Recupera los valores de entrada y la configuración inicial de una ejecución anterior">
+          <option value="">(cargar del historial)</option>
+        </select>
+      </div>
     </div>
 
     <section class="panel" id="panel-import">
-      <h2><span class="panel-icon">&#8593;</span> Importar in.mcv</h2>
-      <p class="hint">
-        Carga un in.mcv existente (misma estructura -- mismo lmax de función de
-        onda que esta interfaz) para precargar todo el formulario con sus valores.
-      </p>
-      <div class="actions">
-        <input type="file" id="input-importar-inmcv" accept=".mcv,text/plain">
+      <h2><span class="panel-icon">&#8593;</span> Ficheros de entrada</h2>
+      <p id="historial-msg" class="hint"></p>
+
+      <div class="form-row">
+        <label for="input-importar-inmcv">Valores de entrada (in.mcv, in.dmc...)</label>
+        <input type="file" id="input-importar-inmcv">
       </div>
+      <p class="hint">
+        Cualquier nombre de fichero, con la misma estructura que esta interfaz
+        (mismo lmax de función de onda). Precarga todo el formulario con sus valores.
+      </p>
       <p id="import-msg" class="hint"></p>
+
+      <div class="form-row">
+        <label for="input-importar-conf">Configuración inicial (.HH)</label>
+        <div class="input-with-button">
+          <input type="file" id="input-importar-conf">
+          <button id="btn-quitar-conf" type="button" hidden>Quitar</button>
+        </div>
+      </div>
+      <p class="hint">
+        Puede estar en cualquier carpeta: se duplica en la carpeta de la
+        ejecución, donde la busca el simulador. Su nombre y su contenido tienen
+        que corresponder a los valores de entrada (conf.NN.MM.XX, con NN = número
+        de He4, y el mismo número de átomos por walker); si no, no se ejecuta.
+        Si no eliges ninguna, el simulador crea las configuraciones aleatoriamente.
+      </p>
+      <p id="conf-msg" class="hint"></p>
     </section>
 
     <section class="panel" id="panel-config">
@@ -59,7 +86,6 @@
         <button class="tab-btn active" data-tab="cfg-tab-1">1 · Datos del sistema</button>
         <button class="tab-btn" data-tab="cfg-tab-2">2 · Datos Monte Carlo</button>
         <button class="tab-btn" data-tab="cfg-tab-3">3 · Función de onda</button>
-        <button class="tab-btn" data-tab="cfg-tab-4">4 · Cálculo paralelo</button>
       </div>
 
       <div class="config-frame">
@@ -92,13 +118,6 @@
 
         <div id="cfg-tab-3" class="tab-content">
           <div id="seccion-3"></div>
-          <div class="tab-next">
-            <button type="button" class="tab-next-btn primary" data-next="cfg-tab-4">Siguiente: Cálculo paralelo &rarr;</button>
-          </div>
-        </div>
-
-        <div id="cfg-tab-4" class="tab-content">
-          <div id="seccion-4" class="field-grid"></div>
         </div>
       </div>
     </section>

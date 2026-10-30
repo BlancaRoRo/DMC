@@ -1,4 +1,4 @@
-html { font-size: 17.5px; }
+html { font-size: 19px; }
 
 :root {
   --bg: #0b0d12;
@@ -233,7 +233,7 @@ main.wide { max-width: none; }
    (el modal de ajustes tiene su propio layout, ver mas abajo). */
 #row-nombre-run { grid-template-columns: minmax(0, 1fr) minmax(320px, 2fr); }
 .input-with-button { display: flex; gap: 0.5rem; }
-.input-with-button input { flex: 1; min-width: 0; }
+.input-with-button input, .input-with-button select { flex: 1; min-width: 0; }
 .input-with-button button { flex: none; white-space: nowrap; }
 
 /* ---------------- modal de ajustes ---------------- */
@@ -570,9 +570,15 @@ table.editable-table td.par-cell { padding: 0.3rem; }
   gap: 1rem;
 }
 .plot-grid-6 .plot { min-height: 0; }
+/* con menos graficas (falta un tipo de helio) se reparten en una fila */
+.plot-grid-6[data-n="1"],
+.plot-grid-6[data-n="2"],
+.plot-grid-6[data-n="3"] { grid-template-columns: repeat(var(--n), 1fr); grid-template-rows: 1fr; }
+.plot-grid-6[data-n="4"] { grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(2, 1fr); }
 
 @media (max-width: 1000px) {
   .plot-grid-6 { grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(3, 1fr); }
+  .plot-grid-6[data-n="3"] { grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(2, 1fr); }
 }
 
 @media (max-width: 900px) {
@@ -661,7 +667,7 @@ select.run-selector-big {
   left: 0;
 }
 .stat-hero-label {
-  font-size: 0.78rem;
+  font-size: 0.92rem;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -680,7 +686,7 @@ select.run-selector-big {
   -webkit-text-fill-color: transparent;
 }
 .stat-hero-unit {
-  font-size: 1.1rem;
+  font-size: 1.25rem;
   font-weight: 500;
   margin-left: 0.4rem;
   color: var(--muted);
@@ -688,7 +694,7 @@ select.run-selector-big {
 }
 .stat-hero-error {
   font-family: var(--font-mono);
-  font-size: 0.85rem;
+  font-size: 1rem;
   color: var(--muted);
   margin-top: 0.35rem;
 }
@@ -696,7 +702,7 @@ select.run-selector-big {
 /* -- secondary stat cards, color-accented -- */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(165px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
   gap: 0.85rem;
   margin-bottom: 1.1rem;
 }
@@ -722,29 +728,29 @@ select.run-selector-big {
 }
 .stat-icon {
   color: var(--stat-accent);
-  font-size: 0.85rem;
+  font-size: 1rem;
   line-height: 1;
 }
 .stat-label {
-  font-size: 0.74rem;
+  font-size: 0.88rem;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
 .stat-value {
   font-family: var(--font-mono);
-  font-size: 1.2rem;
+  font-size: 1.45rem;
   font-weight: 600;
   color: var(--text);
 }
 .stat-unit {
-  font-size: 0.8rem;
+  font-size: 0.92rem;
   font-weight: 500;
   color: var(--muted);
 }
 .stat-error {
   font-family: var(--font-mono);
-  font-size: 0.76rem;
+  font-size: 0.9rem;
   color: var(--muted);
   margin-top: 0.15rem;
 }
@@ -763,7 +769,7 @@ select.run-selector-big {
   border: 1px solid var(--border-soft);
   border-radius: 999px;
   padding: 0.4rem 0.9rem;
-  font-size: 0.86rem;
+  font-size: 1rem;
 }
 .stat-chip-label {
   color: var(--muted);
@@ -830,3 +836,27 @@ select.run-selector-big {
 }
 .stats-tabla-wrap table { margin-top: 0.75rem; }
 
+
+/* configuracion: el texto de la cabecera ocupa el ancho que deja el
+   selector del historial, a la derecha como en Resultados */
+.results-head > div:first-child { flex: 1; min-width: 0; }
+
+/* resultados numericos: tabla de bloques con letra mas grande */
+#stats-tabla table.static-table { font-size: 0.95rem; }
+
+/* explicacion que sale al pasar el raton por la leyenda de una grafica */
+.leyenda-tooltip {
+  position: fixed;
+  z-index: 50;
+  max-width: 320px;
+  padding: 0.55rem 0.75rem;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 0.88rem;
+  line-height: 1.45;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+.leyenda-tooltip b { color: var(--accent-2); }
