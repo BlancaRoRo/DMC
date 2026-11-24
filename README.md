@@ -19,9 +19,6 @@ fase a fase, está en las ramas `fase0-compilación` a `fase4-pruebas`; esta ram
 
 ## Diagramas interactivos
 
-Cada uno vive en su rama correspondiente (GitHub no renderiza `.html` directamente,
-por eso el enlace pasa por [htmlpreview.github.io](https://htmlpreview.github.io)):
-
 - **Árbol de llamadas de `dmc2`** (`fase1-transcripción`, portado método a método):
   [ver diagrama](https://htmlpreview.github.io/?https://raw.githubusercontent.com/BlancaRoRo/DMC/fase1-transcripci%C3%B3n/docs-kernels/dmc2-call-graph.html)
 - **Pipeline CPU↔GPU de un paso DMC** (`fase3-optimización`, con la fusión de fases
